@@ -4,8 +4,10 @@ import {
   putExperienceBank,
   getApplicationProfile,
   putApplicationProfile,
+  getAutomationSettings,
+  putAutomationSettings,
 } from '../lib/api';
-import { getAutoSubmitEnabled, setAutoSubmitEnabled } from '../lib/storage';
+import { setAutoSubmitEnabled } from '../lib/storage';
 import type { ExperienceBankEntry, ApplicationProfile, Profile } from '../lib/types';
 import { parseStoredDate, formatDate } from '../lib/adapters/shared/dates';
 import WarningBanner from './WarningBanner';
@@ -152,14 +154,16 @@ export default function AutofillSetupScreen({ token, profile, onBack }: Autofill
   const [eeo, setEeo] = useState<Record<string, string>>({});
   const [eeoExpanded, setEeoExpanded] = useState(false);
   const [autoSubmit, setAutoSubmit] = useState(false);
+  const [automaticVerification, setAutomaticVerification] = useState(false);
+  const [automationSettingsLoaded, setAutomationSettingsLoaded] = useState(false);
 
   useEffect(() => {
     (async () => {
       try {
-        const [existingBank, existingProfile, storedAutoSubmit] = await Promise.all([
+        const [existingBank, existingProfile, automation] = await Promise.all([
           getExperienceBank(token),
           getApplicationProfile(token).catch(() => null),
-          getAutoSubmitEnabled(),
+          getAutomationSettings(token).catch(() => null),
         ]);
         if (existingBank.length > 0) {
           setBank(existingBank);
@@ -171,7 +175,15 @@ export default function AutofillSetupScreen({ token, profile, onBack }: Autofill
           setAppProfile(existingProfile);
           setEeo((existingProfile.eeo_prefs as Record<string, string>) ?? {});
         }
-        setAutoSubmit(storedAutoSubmit);
+        if (automation) {
+          setAutoSubmit(automation.automatic_submission_enabled);
+          setAutomaticVerification(automation.automatic_verification_enabled);
+          setAutomationSettingsLoaded(true);
+        } else {
+          setAutoSubmit(false);
+          setAutomaticVerification(false);
+          setError('Could not load your current automation permissions. Reopen setup before changing them.');
+        }
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Could not load your setup data.');
       } finally {
@@ -205,6 +217,10 @@ export default function AutofillSetupScreen({ token, profile, onBack }: Autofill
       await putApplicationProfile(token, {
         ...appProfile,
         eeo_prefs: Object.keys(eeo).length > 0 ? eeo : null,
+      });
+      await putAutomationSettings(token, {
+        automatic_submission_enabled: autoSubmit,
+        automatic_verification_enabled: automaticVerification,
       });
       await setAutoSubmitEnabled(autoSubmit);
       setStep('done');
@@ -570,20 +586,21 @@ export default function AutofillSetupScreen({ token, profile, onBack }: Autofill
             <div className="border-y border-gray-200 py-3">
               <div className="flex items-start justify-between gap-3">
                 <div>
-                  <p className="text-xs font-medium text-gray-700">Auto-submit after filling</p>
+                  <p className="text-xs font-medium text-gray-700">Automatically submit eligible applications</p>
                   <p className="mt-1 text-xs leading-5 text-gray-600">
-                    Off by default: Litos fills the form and stops so you can review before hitting
-                    Submit yourself. Turn this on and Litos will submit automatically after a
-                    countdown you can cancel on each application.
+                    Litos may submit applications you start after a cancelable countdown. It still
+                    pauses for missing or conflicting facts, sensitive attestations, CAPTCHA, and
+                    unsupported portal steps.
                   </p>
                 </div>
                 <button
                   type="button"
                   role="switch"
                   aria-checked={autoSubmit}
-                  aria-label="Auto-submit after filling"
+                  aria-label="Automatically submit eligible applications"
+                  disabled={!automationSettingsLoaded}
                   onClick={() => setAutoSubmit((v) => !v)}
-                  className="relative flex h-11 w-12 flex-shrink-0 items-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2"
+                  className="relative flex h-11 w-12 flex-shrink-0 items-center rounded-full disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2"
                 >
                   <span
                     className={`relative block h-7 w-12 rounded-full transition-colors ${
@@ -600,9 +617,19 @@ export default function AutofillSetupScreen({ token, profile, onBack }: Autofill
               </div>
             </div>
 
+            <div className="border-b border-gray-200 py-3">
+              <div className="flex items-start justify-between gap-3">
+                <div><p className="text-xs font-medium text-gray-700">Use application verification codes</p><p className="mt-1 text-xs leading-5 text-gray-600">Litos may use connected Gmail or Outlook to find a code for an active application. Codes are not saved.</p></div>
+                <button type="button" role="switch" aria-checked={automaticVerification} aria-label="Use application verification codes" disabled={!automationSettingsLoaded} onClick={() => setAutomaticVerification((value) => !value)} className="relative flex h-11 w-12 flex-shrink-0 items-center rounded-full disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2">
+                  <span className={`relative block h-7 w-12 rounded-full transition-colors ${automaticVerification ? 'bg-brand-600' : 'bg-gray-200'}`}><span className={`absolute top-0.5 h-6 w-6 rounded-full border border-gray-200 bg-white transition-transform ${automaticVerification ? 'translate-x-5' : 'translate-x-0.5'}`} /></span>
+                </button>
+              </div>
+            </div>
+
             <button
               type="button"
               onClick={handleSave}
+              disabled={!automationSettingsLoaded}
               className={`${primaryButtonClass} mt-1 w-full`}
             >
               Save and finish

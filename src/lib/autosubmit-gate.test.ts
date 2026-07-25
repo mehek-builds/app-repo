@@ -13,6 +13,17 @@ describe('skippedReasonsNeedReview', () => {
     expect(skippedReasonsNeedReview(['2 open-ended answers AI-drafted, review before submitting'])).toBe(true);
   });
 
+  it('allows only the grounded essay notice when standing consent is active', () => {
+    expect(skippedReasonsNeedReview(
+      ['2 open-ended answers AI-drafted, review before submitting'],
+      { allowGroundedDrafts: true },
+    )).toBe(false);
+    expect(skippedReasonsNeedReview(
+      ['picked the lowest German level, review before submitting: "German proficiency"'],
+      { allowGroundedDrafts: true },
+    )).toBe(true);
+  });
+
   it('holds on a never-fill / sensitive field left for the student', () => {
     expect(
       skippedReasonsNeedReview(['never-fill field (SSN/license/background-check consent), left for manual entry']),

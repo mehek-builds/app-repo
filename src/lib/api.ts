@@ -106,6 +106,26 @@ export async function getProfile(token: string): Promise<Profile> {
   return request<Profile>('/profile', {}, token);
 }
 
+export type AutomationSettings = {
+  automatic_submission_enabled: boolean;
+  automatic_verification_enabled: boolean;
+};
+
+export async function getAutomationSettings(token: string): Promise<AutomationSettings> {
+  const state = await request<AutomationSettings>('/onboarding/state', {}, token);
+  return {
+    automatic_submission_enabled: state.automatic_submission_enabled,
+    automatic_verification_enabled: state.automatic_verification_enabled,
+  };
+}
+
+export async function putAutomationSettings(token: string, settings: AutomationSettings): Promise<AutomationSettings> {
+  return request<AutomationSettings>('/onboarding/automation', {
+    method: 'PUT',
+    body: JSON.stringify(settings),
+  }, token);
+}
+
 export interface ResolveParams {
   company: string;
   domain?: string;

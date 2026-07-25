@@ -2,6 +2,21 @@
 
 All notable changes to the Litos extension are documented here.
 
+## [0.4.11] - 2026-07-25
+
+### Added
+
+- Autofill setup now synchronizes standing submission and verification-code permissions with the Litos account.
+- The final countdown rechecks server-side consent immediately before clicking the portal submit control.
+
+### Changed
+
+- Grounded essay drafts can proceed under standing consent while sensitive, ambiguous, incomplete, and unsupported answers still hold submission.
+
+### Fixed
+
+- A failed consent refresh now holds the application instead of trusting stale local storage.
+
 ## [0.4.10] - 2026-07-23
 
 ### Changed

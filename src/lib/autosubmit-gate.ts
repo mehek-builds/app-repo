@@ -14,8 +14,16 @@
 const REVIEW_FLAG =
   /review before submitting|left for|left blank|no matching|no unambiguous|no clean|agreement|never-fill|autocomplete field|could not be attached/i;
 
-export function skippedReasonsNeedReview(skippedReasons: string[]): boolean {
-  return skippedReasons.some((r) => REVIEW_FLAG.test(r));
+const GROUNDED_DRAFT_NOTICE = /^\d+ open-ended answers? AI-drafted, review before submitting$/i;
+
+export function skippedReasonsNeedReview(
+  skippedReasons: string[],
+  options: { allowGroundedDrafts?: boolean } = {},
+): boolean {
+  return skippedReasons.some((reason) => {
+    if (options.allowGroundedDrafts && GROUNDED_DRAFT_NOTICE.test(reason.trim())) return false;
+    return REVIEW_FLAG.test(reason);
+  });
 }
 
 // Which skip reasons the card shows under "Still needs you", and in what order. Pure and here
