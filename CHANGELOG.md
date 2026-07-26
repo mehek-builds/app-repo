@@ -2,6 +2,52 @@
 
 All notable changes to the Litos extension are documented here.
 
+## [0.5.0] - 2026-07-27
+
+Minor rather than patch: this changes how you get into the extension, and renames
+what things are called on every screen.
+
+### Added
+
+- Sign in to an account you already have. Previously the popup only knew how to
+  create accounts, so anyone who signed up on the website was shown "Set up
+  Litos" and asked for their email and resume a second time. Signing in needs no
+  resume; the profile already on the server is read back.
+- The answers screen's four sections are reachable directly once setup is done,
+  instead of being a strictly linear five-step walk.
+
+### Changed
+
+- One name per thing. "Profile", "Activity", "Account", "Settings" and "Your
+  answers" described two datasets between them; they are **Answers** and
+  **Emails** now, matching the website.
+- The popup heading names the screen instead of saying "Litos" on all of them.
+- One status vocabulary, shared between the main screen and the Emails screen.
+  A sent email is no longer amber on one screen and blue on the next, and the
+  raw API value is no longer printed as a status.
+- The card injected into an employer's page asks "Fill this application for
+  you?" instead of "Generate tailored resume + fill this application?", and its
+  failure messages say what to do next. Neither "portal" nor "auto-submit"
+  appears in anything a user reads.
+- Each workflow row carries its own button, so the screen's visual primary is
+  also its real one.
+- Verifying an emailed code is no longer counted as a step of setup; the flow is
+  five steps.
+
+### Fixed
+
+- Sign out moved out of the header, where it sat one mis-click away between two
+  navigation items, and no longer uses a native browser dialog.
+- Injected cards share one screen position, one stacking layer and three named
+  dismiss durations; they previously disagreed by 4px and stacked in an
+  unchosen order.
+- Litos no longer writes a border radius onto the employer's own submit button,
+  and restores what the page had rather than clearing it.
+- Status icons are drawn, not typed, so they render the same on every platform.
+- Injected cards declare a light color scheme, so a forced-dark page cannot
+  invert them into an unreadable white-on-white card.
+- A company name guessed from a URL now says that it was guessed.
+
 ## [0.4.12] - 2026-07-26
 
 ### Changed
