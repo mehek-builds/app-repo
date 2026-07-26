@@ -4,55 +4,60 @@ export default {
   content: ['./src/**/*.{ts,tsx,html}'],
   theme: {
     extend: {
+      // Same pair as the website. The deck still says Geist and is stale; see src/styles/tokens.ts.
       fontFamily: {
-        sans: [
-          'Geist Variable',
-          'Geist',
-          'sans-serif',
-        ],
+        sans: ['Hanken Grotesk Variable', 'Hanken Grotesk', 'sans-serif'],
+        mono: ['Azeret Mono Variable', 'Azeret Mono', 'ui-monospace', 'monospace'],
+      },
+      borderRadius: {
+        // Deck section 04: two radii cover the whole system.
+        card: '20px',
+        control: '999px',
+        inner: '12px',
       },
       colors: {
         gray: {
-          50: '#faf9f7',
+          50: '#faf9f7',   // surface-alt
           100: '#f1efec',
-          200: '#e2dfda',
-          300: '#d0ccc5',
-          400: '#a7a29a',
-          500: '#79746d',
-          600: '#625f5b',
-          700: '#494641',
-          800: '#302e2b',
-          900: '#201f1d',
-          950: '#151412',
+          200: '#e8e6e1',  // border (site hairline)
+          300: '#d8d5ce',
+          400: '#a3a19a',  // faint
+          500: '#84827b',
+          600: '#6b6a64',  // muted
+          700: '#4b4a45',
+          800: '#2e2d29',
+          900: '#1d1c19',
+          950: '#12120f',  // ink
         },
+        // 600 is the Litos signature blue #6b84e8, not the saturated #3157d5 this shipped with.
         brand: {
-          50: '#f1f4ff',
-          100: '#e3e9ff',
-          200: '#c9d4ff',
-          300: '#a5b5fa',
-          400: '#7891ee',
-          500: '#4e6fe0',
-          600: '#3157d5',
-          700: '#2948b5',
-          800: '#263f92',
+          50: '#f7f9ff',
+          100: '#eef1fe',  // brand-soft
+          200: '#dbe1fb',
+          300: '#b9c5f5',
+          400: '#95a6ef',
+          500: '#7d93eb',
+          600: '#6b84e8',  // brand
+          700: '#4a61c6',
+          800: '#3d51ad',  // brand-ink
         },
         success: {
-          50: '#eef8f1',
-          200: '#b9dfc4',
-          600: '#237a43',
-          700: '#1d6338',
+          50: '#eaf6ee',   // positive-soft
+          200: '#b4dcc1',
+          600: '#15803d',  // positive
+          700: '#116632',
         },
         warning: {
-          50: '#fff8e8',
-          200: '#efd79d',
-          500: '#b97a12',
-          700: '#80510a',
+          50: '#fdf3e7',   // warn-soft
+          200: '#eccfa4',
+          500: '#b45309',  // warn
+          700: '#8c4007',
         },
         danger: {
-          50: '#fff1ef',
-          200: '#f2c1ba',
-          600: '#b63a2b',
-          700: '#922e23',
+          50: '#fbeaea',   // danger-soft
+          200: '#eebcbc',
+          600: '#b91c1c',  // danger
+          700: '#951616',
         },
       },
       keyframes: {

@@ -32,7 +32,7 @@ export default defineContentScript({
         z-index: 2147483645;
         width: 44px;
         height: 44px;
-        border: 1px solid #e2dfda;
+        border: 1px solid #e8e6e1;
         border-radius: 10px;
         background: #ffffff;
         display: flex;
@@ -45,7 +45,7 @@ export default defineContentScript({
         user-select: none;
       " title="Open Litos" aria-label="Open Litos">
         <svg width="24" height="24" viewBox="0 0 100 100" aria-hidden="true">
-          <path fill="#151412" d="M32.81 8 L76.01 8 L75.17 16 L31.97 16 Z M27.53 24 L77.93 24 L77.09 32 L26.69 32 Z M22.25 40 L79.85 40 L79.01 48 L21.41 48 Z M16.97 56 L81.77 56 L80.93 64 L16.13 64 Z M11.69 72 L83.69 72 L81.59 92 L9.59 92 Z" />
+          <path fill="#12120f" d="M32.81 8 L76.01 8 L75.17 16 L31.97 16 Z M27.53 24 L77.93 24 L77.09 32 L26.69 32 Z M22.25 40 L79.85 40 L79.01 48 L21.41 48 Z M16.97 56 L81.77 56 L80.93 64 L16.13 64 Z M11.69 72 L83.69 72 L81.59 92 L9.59 92 Z" />
         </svg>
       </div>
       <div id="litos-persistent-tip" style="
@@ -54,11 +54,11 @@ export default defineContentScript({
         bottom: 68px;
         right: 16px;
         z-index: 2147483645;
-        background: #151412;
+        background: #12120f;
         color: white;
         border-radius: 8px;
         padding: 8px 12px;
-        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        font-family: "Hanken Grotesk Variable", "Hanken Grotesk", sans-serif;
         font-size: 12px;
         max-width: 190px;
         text-align: center;

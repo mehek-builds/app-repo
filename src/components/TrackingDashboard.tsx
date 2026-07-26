@@ -11,11 +11,15 @@ interface TrackingDashboardProps {
   onBack: () => void;
 }
 
-const STATUS_STYLE: Record<OutreachStatus, { tone: 'neutral' | 'success' | 'warning' | 'danger'; className: string }> = {
-  drafted: { tone: 'neutral', className: 'text-gray-600' },
-  sent: { tone: 'warning', className: 'text-warning-700' },
-  replied: { tone: 'success', className: 'text-success-700' },
-  bounced: { tone: 'danger', className: 'text-danger-700' },
+/* Status is a fact about what happened, not a judgement. "Sent" was amber, which reads as a
+   warning about an email that went out exactly as intended; only a bounce is actually bad. */
+type StatusTone = 'neutral' | 'success' | 'warning' | 'danger' | 'brand';
+
+const STATUS_STYLE: Record<OutreachStatus, { tone: StatusTone; className: string; label: string }> = {
+  drafted: { tone: 'neutral', className: 'text-gray-600', label: 'Written, not sent' },
+  sent: { tone: 'brand', className: 'text-gray-950', label: 'Sent' },
+  replied: { tone: 'success', className: 'text-success-700', label: 'They replied' },
+  bounced: { tone: 'danger', className: 'text-danger-700', label: 'Did not arrive' },
 };
 
 function formatDate(iso?: string): string {
@@ -65,7 +69,7 @@ export default function TrackingDashboard({ token, onBack }: TrackingDashboardPr
 
   return (
     <div className="flex min-h-full animate-slide-in-right flex-col bg-white">
-      <PopupHeader title="Outreach" subtitle="Drafts, sends, and replies" onBack={onBack} />
+      <PopupHeader title="Outreach" subtitle="Emails you wrote and what happened" onBack={onBack} />
 
       <main className="flex flex-1 flex-col px-4 py-4">
         {loading ? (
@@ -88,8 +92,8 @@ export default function TrackingDashboard({ token, onBack }: TrackingDashboardPr
             {events.length === 0 ? (
               <div className="flex flex-1 flex-col items-start justify-center gap-3 py-12">
                 <SectionLabel>No outreach yet</SectionLabel>
-                <h2 className="text-xl font-semibold text-gray-950">Your drafts will appear here</h2>
-                <p className="text-sm leading-5 text-gray-600">Find a contact, write a draft, then track the reply.</p>
+                <h2 className="text-xl font-medium text-gray-950">Nothing here yet</h2>
+                <p className="text-sm leading-5 text-gray-600">Find someone at a company, write an email, and it shows up here.</p>
                 <button type="button" onClick={onBack} className={textButtonClass}>Find contacts</button>
               </div>
             ) : (
@@ -100,7 +104,7 @@ export default function TrackingDashboard({ token, onBack }: TrackingDashboardPr
                 </div>
                 <div className="divide-y divide-gray-200 border-y border-gray-200">
                   {events.map((event) => {
-                    const statusStyle = STATUS_STYLE[event.status] ?? STATUS_STYLE.drafted;
+                    const statusStyle = STATUS_STYLE[event.status] ?? { tone: 'neutral' as StatusTone, className: 'text-gray-600', label: 'Unknown' };
                     return (
                       <article key={event.id} className="flex flex-col gap-2 py-3">
                         <div className="flex items-start gap-3">
@@ -111,9 +115,9 @@ export default function TrackingDashboard({ token, onBack }: TrackingDashboardPr
                             {event.subject && <p className="mt-1 truncate text-xs text-gray-600">{event.subject}</p>}
                           </div>
                           <div className="flex flex-shrink-0 flex-col items-end gap-1">
-                            <span className={`inline-flex items-center gap-1.5 text-xs font-medium capitalize ${statusStyle.className}`}>
+                            <span className={`inline-flex items-center gap-1.5 text-xs font-medium ${statusStyle.className}`}>
                               <StatusDot tone={statusStyle.tone} />
-                              {event.status}
+                              {statusStyle.label}
                             </span>
                             <time className="text-xs tabular-nums text-gray-600">{formatDate(event.sent_at)}</time>
                           </div>
@@ -127,15 +131,15 @@ export default function TrackingDashboard({ token, onBack }: TrackingDashboardPr
                               disabled={updating?.id === event.id}
                               className={textButtonClass}
                             >
-                              {updating?.id === event.id && updating.outcome === 'replied' ? <PendingLabel>Marking…</PendingLabel> : 'Mark replied'}
+                              {updating?.id === event.id && updating.outcome === 'replied' ? <PendingLabel>Marking…</PendingLabel> : 'Got a reply'}
                             </button>
                             <button
                               type="button"
                               onClick={() => handleUpdateStatus(event, 'bounced')}
                               disabled={updating?.id === event.id}
-                              className={`${textButtonClass} text-danger-700 hover:bg-danger-50 hover:text-danger-700`}
+                              className={textButtonClass}
                             >
-                              {updating?.id === event.id && updating.outcome === 'bounced' ? <PendingLabel>Marking…</PendingLabel> : 'Mark bounced'}
+                              {updating?.id === event.id && updating.outcome === 'bounced' ? <PendingLabel>Marking…</PendingLabel> : 'It bounced'}
                             </button>
                           </div>
                         )}

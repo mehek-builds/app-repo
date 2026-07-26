@@ -100,7 +100,7 @@ export default function MainScreen({
       });
       window.close();
     } catch {
-      setFillError("Chrome does not allow extensions on this page.");
+      setFillError("Chrome does not let Litos work on this page.");
     }
   };
 
@@ -169,8 +169,14 @@ export default function MainScreen({
         <button type="button" onClick={onViewTracking} className="min-h-11 px-1.5 text-xs font-medium text-gray-600 hover:text-gray-950">
           Activity
         </button>
-        <button type="button" onClick={onLogout} className="min-h-11 px-1.5 text-xs font-medium text-gray-600 hover:text-gray-950">
-          Exit
+        <button
+          type="button"
+          onClick={() => {
+            if (window.confirm('Sign out of Litos? Your saved answers stay on your account.')) onLogout();
+          }}
+          className="min-h-11 px-1.5 text-xs font-medium text-gray-600 hover:text-gray-950"
+        >
+          Sign out
         </button>
       </PopupHeader>
 
@@ -262,26 +268,26 @@ export default function MainScreen({
             <div className="mt-2 divide-y divide-gray-200 border-y border-gray-200">
               <div className="flex min-h-16 items-center gap-3 py-2">
                 <div className="min-w-0 flex-1">
-                  <p className="text-sm font-semibold text-gray-950">Application</p>
-                  <p className="text-xs text-gray-600">Fill the open form and stop for review</p>
+                  <p className="text-sm font-medium text-gray-950">This job&rsquo;s form</p>
+                  <p className="text-xs text-gray-600">Litos fills it in and stops so you can check it</p>
                 </div>
-                <button type="button" onClick={handleFillThisPage} className={secondaryButtonClass}>
-                  Fill page
+                <button type="button" onClick={handleFillThisPage} className={primaryButtonClass}>
+                  Fill this form
                 </button>
               </div>
               <div className="flex min-h-16 items-center gap-3 py-2">
                 <div className="min-w-0 flex-1">
-                  <p className="text-sm font-semibold text-gray-950">Outreach</p>
-                  <p className="text-xs text-gray-600">Find verified people for this role</p>
+                  <p className="text-sm font-medium text-gray-950">Outreach</p>
+                  <p className="text-xs text-gray-600">Find people to email about this job</p>
                 </div>
-                <StatusDot tone={loading ? 'warning' : 'neutral'} />
+                <span className="text-xs text-gray-600">{loading ? 'Looking…' : 'Not started'}</span>
               </div>
             </div>
             {fillError && <p className="mt-2 text-xs text-danger-700" role="alert">{fillError}</p>}
           </section>
 
-          <button type="submit" disabled={loading} className={primaryButtonClass}>
-            {loading ? <PendingLabel state="searching" onColor>Finding contacts…</PendingLabel> : 'Find contacts'}
+          <button type="submit" disabled={loading} className={secondaryButtonClass}>
+            {loading ? <PendingLabel state="searching">Looking…</PendingLabel> : 'Find people to email'}
           </button>
         </form>
 
@@ -300,7 +306,7 @@ export default function MainScreen({
             <WarningBanner message={eventsError} variant="error" />
           ) : recentEvents.length === 0 ? (
             <p className="border-y border-gray-200 py-4 text-sm text-gray-600">
-              No outreach yet. Find contacts for the current job to start.
+              Nothing here yet. Find someone to email and it shows up here.
             </p>
           ) : (
             <div className="divide-y divide-gray-200 border-y border-gray-200">

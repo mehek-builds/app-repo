@@ -2,12 +2,22 @@
 @tailwind components;
 @tailwind utilities;
 
+/* The website's pair, self-hosted latin-only so the popup does not ship every language subset.
+   The brand deck still says Geist and is stale; see src/styles/tokens.ts. */
 @font-face {
-  font-family: 'Geist Variable';
+  font-family: 'Hanken Grotesk Variable';
   font-style: normal;
   font-display: swap;
   font-weight: 100 900;
-  src: url('@fontsource-variable/geist/files/geist-latin-wght-normal.woff2') format('woff2-variations');
+  src: url('@fontsource-variable/hanken-grotesk/files/hanken-grotesk-latin-wght-normal.woff2') format('woff2-variations');
+}
+
+@font-face {
+  font-family: 'Azeret Mono Variable';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url('@fontsource-variable/azeret-mono/files/azeret-mono-latin-wght-normal.woff2') format('woff2-variations');
 }
 
 * {
@@ -15,18 +25,19 @@
 }
 
 :root {
+  /* Mirrors src/styles/tokens.ts, which mirrors the website. */
   --litos-canvas: #faf9f7;
   --litos-surface: #ffffff;
-  --litos-ink: #151412;
-  --litos-muted: #625f5b;
-  --litos-border: #e2dfda;
-  --litos-accent: #3157d5;
+  --litos-ink: #12120f;
+  --litos-muted: #6b6a64;
+  --litos-border: #e8e6e1;
+  --litos-accent: #6b84e8;
 }
 
 body {
   margin: 0;
   padding: 0;
-  font-family: 'Geist Variable', 'Geist', sans-serif;
+  font-family: 'Hanken Grotesk Variable', 'Hanken Grotesk', sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   font-feature-settings: 'ss01', 'ss03';
@@ -89,7 +100,7 @@ button:disabled,
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #e2dfda;
+  background: #e8e6e1;
   border-radius: 2px;
 }
 ::-webkit-scrollbar-thumb:hover {

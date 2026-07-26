@@ -27,8 +27,15 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const nextFile = e.target.files?.[0];
     if (!nextFile) return;
-    if (nextFile.type !== 'application/pdf') {
-      setError('Upload your resume as a PDF.');
+    // The website accepts either, so the extension must too: one product cannot have two rules
+    // about the same file.
+    const name = nextFile.name.toLowerCase();
+    const isPdf = nextFile.type === 'application/pdf' || name.endsWith('.pdf');
+    const isDocx =
+      nextFile.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+      name.endsWith('.docx');
+    if (!isPdf && !isDocx) {
+      setError('Use a PDF or a Word file.');
       return;
     }
     setError(null);
@@ -50,7 +57,7 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
       return;
     }
     if (!file) {
-      setError('Add your resume PDF.');
+      setError('Add your resume.');
       return;
     }
 
@@ -98,7 +105,7 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
       const message = err instanceof Error ? err.message : 'Verification failed.';
       setError(
         message.includes('Incorrect') || message.includes('400')
-          ? 'That code is not right. Check your email and try again.'
+          ? 'That code is not right. Check your email and type it again.'
           : message,
       );
       setStep('code');
@@ -129,17 +136,17 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
           <div className="flex flex-1 flex-col items-start justify-center gap-4" role="status" aria-live="polite">
             <ThinkingOrb state="composing" size={64} />
             <div>
-              <h2 className="text-xl font-semibold text-gray-950">Reading your resume</h2>
+              <h2 className="text-xl font-medium text-gray-950">Reading your resume</h2>
               <p className="mt-1 text-sm leading-5 text-gray-600">
-                Litos is pulling out your experience for tailored applications.
+                Pulling out your jobs, projects and skills.
               </p>
             </div>
           </div>
         ) : step === 'code' ? (
           <form onSubmit={handleVerify} className="flex flex-col gap-5">
             <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.08em] text-gray-600">Step 2 of 2</p>
-              <h2 className="mt-2 text-xl font-semibold text-gray-950">Check your email</h2>
+              <p className="text-xs font-medium text-gray-600">Step 2 of 6</p>
+              <h2 className="mt-2 text-xl font-medium text-gray-950">Check your email</h2>
               <p id="code-help" className="mt-1 text-sm leading-5 text-gray-600">
                 Enter the code sent to <span className="font-medium text-gray-800">{email}</span>.
               </p>
@@ -190,8 +197,8 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
         ) : (
           <form onSubmit={handleSubmit} className="flex flex-col gap-5">
             <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.08em] text-gray-600">Step 1 of 2</p>
-              <h2 className="mt-2 text-xl font-semibold text-gray-950">Set up Litos</h2>
+              <p className="text-xs font-medium text-gray-600">Step 1 of 6</p>
+              <h2 className="mt-2 text-xl font-medium text-gray-950">Set up Litos</h2>
               <p className="mt-1 text-sm leading-5 text-gray-600">
                 Add your email and resume. You can review everything Litos creates.
               </p>
@@ -217,25 +224,25 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
             <div className="flex flex-col gap-2">
               <div>
                 <p className="text-sm font-medium text-gray-800">Resume</p>
-                <p id="resume-help" className="mt-0.5 text-xs text-gray-600">PDF, up to the limit shown by Chrome.</p>
+                <p id="resume-help" className="mt-0.5 text-xs text-gray-600">A PDF or a Word file.</p>
               </div>
               <input
                 id="resume-upload"
                 type="file"
-                accept="application/pdf"
+                accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                 className="peer sr-only"
                 onChange={handleFileChange}
                 aria-describedby="resume-help"
               />
               <label
                 htmlFor="resume-upload"
-                className={`flex min-h-28 cursor-pointer items-center gap-3 rounded-md border border-dashed px-4 transition-[border-color,background-color,box-shadow] peer-focus-visible:ring-2 peer-focus-visible:ring-brand-500 ${
+                className={`flex min-h-28 cursor-pointer items-center gap-3 rounded-card border border-dashed px-4 transition-[border-color,background-color,box-shadow] peer-focus-visible:ring-2 peer-focus-visible:ring-brand-500 ${
                   file
                     ? 'border-brand-300 bg-brand-50'
                     : 'border-gray-300 bg-gray-50 hover:border-gray-400 hover:bg-white'
                 }`}
               >
-                <span className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-md border border-gray-200 bg-white text-gray-700" aria-hidden="true">
+                <span className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-inner border border-gray-200 bg-white text-gray-700" aria-hidden="true">
                   <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
                   </svg>
@@ -245,7 +252,7 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
                     {file ? file.name : 'Choose your resume'}
                   </span>
                   <span className="mt-0.5 block text-xs text-gray-600">
-                    {file ? 'Choose a different PDF' : 'Click or press Enter to browse'}
+                    {file ? 'Pick a different file' : 'Click or press Enter to browse'}
                   </span>
                 </span>
               </label>

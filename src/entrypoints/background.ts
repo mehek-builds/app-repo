@@ -388,7 +388,7 @@ export default defineBackground(() => {
         lastDetectedJob = p;
         chrome.storage.session.set({ lastDetectedJob }).catch(() => {});
         chrome.action.setBadgeText({ text: '!' });
-        chrome.action.setBadgeBackgroundColor({ color: '#3157d5' });
+        chrome.action.setBadgeBackgroundColor({ color: '#6b84e8' });
         chrome.runtime.sendMessage(message).catch(() => {});
         return false;
       }
@@ -453,7 +453,7 @@ export default defineBackground(() => {
             if (drafts.length > 0) {
               await chrome.storage.session.set({ pendingDrafts: drafts });
               chrome.action.setBadgeText({ text: `${drafts.length}` });
-              chrome.action.setBadgeBackgroundColor({ color: '#3157d5' });
+              chrome.action.setBadgeBackgroundColor({ color: '#6b84e8' });
               // Notify popup if open
               chrome.runtime.sendMessage({ type: 'DRAFTS_READY', payload: { count: drafts.length } }).catch(() => {});
             }

@@ -3,22 +3,22 @@ import BrandMark from './BrandMark';
 import { ThinkingOrb, type OrbState } from 'thinking-orbs';
 
 export const fieldClass =
-  'min-h-11 w-full rounded-md border border-gray-300 bg-white px-3 text-sm text-gray-950 placeholder:text-gray-500 transition-[border-color,box-shadow] focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-100';
+  'min-h-11 w-full rounded-inner border border-gray-300 bg-white px-3 text-sm text-gray-950 placeholder:text-gray-500 transition-[border-color,box-shadow] focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-100';
 
 export const textAreaClass =
   `${fieldClass} resize-none py-2.5 leading-6`;
 
 export const primaryButtonClass =
-  'inline-flex min-h-11 items-center justify-center rounded-md bg-brand-600 px-4 text-sm font-semibold text-white transition-[background-color,transform] hover:bg-brand-700 active:translate-y-px focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50';
+  'inline-flex min-h-11 items-center justify-center rounded-control bg-brand-600 px-4 text-sm font-semibold text-white transition-[background-color,transform] hover:bg-brand-700 active:translate-y-px focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50';
 
 export const secondaryButtonClass =
-  'inline-flex min-h-11 items-center justify-center rounded-md border border-gray-300 bg-white px-4 text-sm font-semibold text-gray-800 transition-[background-color,border-color] hover:border-gray-400 hover:bg-gray-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50';
+  'inline-flex min-h-11 items-center justify-center rounded-control border border-gray-300 bg-white px-4 text-sm font-semibold text-gray-800 transition-[background-color,border-color] hover:border-gray-400 hover:bg-gray-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50';
 
 export const textButtonClass =
-  'inline-flex min-h-11 items-center justify-center rounded-md px-2 text-sm font-semibold text-brand-700 transition-colors hover:bg-brand-50 hover:text-brand-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500';
+  'inline-flex min-h-11 items-center justify-center rounded-control px-2 text-sm font-medium text-brand-800 transition-colors hover:bg-brand-50 hover:text-brand-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500';
 
 export const iconButtonClass =
-  'inline-flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-md text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500';
+  'inline-flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-control text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500';
 
 interface PopupHeaderProps {
   title?: string;
@@ -45,7 +45,7 @@ export function PopupHeader({ title = 'Litos', subtitle, onBack, children }: Pop
       )}
 
       <div className="min-w-0 flex-1">
-        <h1 className="truncate text-base font-semibold text-gray-950">{title}</h1>
+        <h1 className="truncate text-base font-medium text-gray-950">{title}</h1>
         {subtitle && <p className="truncate text-xs text-gray-600">{subtitle}</p>}
       </div>
 
@@ -56,9 +56,8 @@ export function PopupHeader({ title = 'Litos', subtitle, onBack, children }: Pop
 
 export function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
-    <h2 className="text-xs font-semibold uppercase tracking-[0.08em] text-gray-600">
-      {children}
-    </h2>
+    // Mono is the machine voice. A section name is not, so it reads as plain small text.
+    <h2 className="text-xs font-medium text-gray-600">{children}</h2>
   );
 }
 

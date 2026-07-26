@@ -122,7 +122,7 @@ describe('redesigned popup workflows', () => {
     const user = userEvent.setup();
     render(<MainScreen {...mainProps} detectedJob={null} />);
 
-    await user.click(screen.getByRole('button', { name: 'Find contacts' }));
+    await user.click(screen.getByRole('button', { name: 'Find people to email' }));
 
     expect(screen.getByRole('alert')).toHaveProperty('textContent', 'Enter both the company and role.');
     expect(api.resolveContacts).not.toHaveBeenCalled();
@@ -134,7 +134,7 @@ describe('redesigned popup workflows', () => {
     vi.mocked(api.resolveContacts).mockResolvedValueOnce([contact]);
     render(<MainScreen {...mainProps} detectedJob={job} onContactsFound={onContactsFound} />);
 
-    await user.click(screen.getByRole('button', { name: 'Find contacts' }));
+    await user.click(screen.getByRole('button', { name: 'Find people to email' }));
 
     await waitFor(() => {
       expect(api.resolveContacts).toHaveBeenCalledWith('token', {
@@ -151,7 +151,7 @@ describe('redesigned popup workflows', () => {
     tabsQueryMock.mockResolvedValueOnce([]);
     render(<MainScreen {...mainProps} detectedJob={job} />);
 
-    await user.click(screen.getByRole('button', { name: 'Fill page' }));
+    await user.click(screen.getByRole('button', { name: 'Fill this form' }));
 
     expect(await screen.findByText('Could not find the current tab.')).toBeTruthy();
   });
@@ -240,7 +240,7 @@ describe('redesigned popup workflows', () => {
 
     render(<TrackingDashboard token="token" onBack={vi.fn()} />);
 
-    expect(await screen.findByText('queued')).toBeTruthy();
+    expect(await screen.findByText('Unknown')).toBeTruthy();
     expect(screen.getByRole('heading', { level: 1, name: 'Outreach' })).toBeTruthy();
   });
 
@@ -256,7 +256,7 @@ describe('redesigned popup workflows', () => {
     vi.mocked(api.getEvents).mockResolvedValueOnce([sentEvent]);
     render(<TrackingDashboard token="token" onBack={vi.fn()} />);
 
-    await user.click(await screen.findByRole('button', { name: 'Mark replied' }));
+    await user.click(await screen.findByRole('button', { name: 'Got a reply' }));
 
     await waitFor(() => {
       expect(api.trackEvent).toHaveBeenCalledWith('token', {
@@ -264,7 +264,7 @@ describe('redesigned popup workflows', () => {
         channel: 'email',
         outcome: 'replied',
       });
-      expect(screen.getByText('replied')).toBeTruthy();
+      expect(screen.getByText('They replied')).toBeTruthy();
     });
   });
 
@@ -281,26 +281,26 @@ describe('redesigned popup workflows', () => {
     vi.mocked(api.trackEvent).mockRejectedValueOnce(new Error('Update failed'));
     render(<TrackingDashboard token="token" onBack={vi.fn()} />);
 
-    await user.click(await screen.findByRole('button', { name: 'Mark bounced' }));
+    await user.click(await screen.findByRole('button', { name: 'It bounced' }));
 
     expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'Update failed');
-    expect(screen.getByText('sent')).toBeTruthy();
+    expect(screen.getByText('Sent')).toBeTruthy();
   });
 
-  it('keeps onboarding validation visible and rejects non-PDF uploads', async () => {
+  it('keeps onboarding validation visible and rejects unsupported uploads', async () => {
     const user = userEvent.setup();
     render(<OnboardingScreen onComplete={vi.fn()} />);
 
     await user.type(screen.getByLabelText('Email address'), 'student@usc.edu');
     await user.click(screen.getByRole('button', { name: 'Continue' }));
-    expect(screen.getByRole('alert')).toHaveProperty('textContent', 'Add your resume PDF.');
+    expect(screen.getByRole('alert')).toHaveProperty('textContent', 'Add your resume.');
 
     fireEvent.change(screen.getByLabelText(/Choose your resume/), {
       target: { files: [new File(['resume'], 'resume.txt', { type: 'text/plain' })] },
     });
 
     await waitFor(() => {
-      expect(screen.getByRole('alert')).toHaveProperty('textContent', 'Upload your resume as a PDF.');
+      expect(screen.getByRole('alert')).toHaveProperty('textContent', 'Use a PDF or a Word file.');
     });
   });
 

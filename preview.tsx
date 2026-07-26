@@ -1,6 +1,7 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import '@fontsource-variable/geist';
+import '@fontsource-variable/hanken-grotesk';
+import '@fontsource-variable/azeret-mono';
 import './src/styles/globals.css';
 import type { Contact, Profile, JobContext } from './src/lib/types';
 import OnboardingScreen from './src/components/OnboardingScreen';
@@ -34,6 +35,23 @@ if (typeof chrome === 'undefined' || !chrome.storage?.local) {
             callback?.();
           },
         },
+      },
+      // The autofill screens read chrome.runtime.lastError after a storage call. Without it the
+      // preview threw "Cannot read properties of undefined (reading 'lastError')" and rendered an
+      // error banner that does not exist in the real extension, which made that screen impossible
+      // to review.
+      runtime: {
+        lastError: undefined,
+        sendMessage(_message: unknown, callback?: (response: unknown) => void) {
+          callback?.(undefined);
+        },
+        onMessage: { addListener() {}, removeListener() {} },
+      },
+      tabs: {
+        query(_info: unknown, callback: (tabs: unknown[]) => void) {
+          callback([]);
+        },
+        create() {},
       },
     },
   });
