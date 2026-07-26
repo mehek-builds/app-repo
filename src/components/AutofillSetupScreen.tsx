@@ -296,7 +296,7 @@ export default function AutofillSetupScreen({ token, profile, onBack }: Autofill
                     <button
                       type="button"
                       onClick={() => removeEntry(idx)}
-                      className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-md text-gray-500 hover:bg-gray-100 hover:text-gray-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
+                      className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-md text-gray-500 hover:bg-gray-100 hover:text-gray-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
                       aria-label={`Remove ${entry.org || entry.type}`}
                     >
                       ×

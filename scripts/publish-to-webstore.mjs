@@ -18,7 +18,8 @@
  *   1. console.cloud.google.com -> new project -> enable "Chrome Web Store API"
  *   2. APIs & Services -> OAuth consent screen -> External -> add yourself as a
  *      test user. Use the SAME Google account that owns the extension
- *      (maggimandal@gmail.com), not a different one.
+ *      (mehekmandal05@gmail.com), not a different one. Its recovery email is
+ *      maggimandal@gmail.com.
  *   3. Credentials -> Create OAuth client ID -> type "Desktop app"
  *      -> note the client id and client secret
  *   4. Get a refresh token once:

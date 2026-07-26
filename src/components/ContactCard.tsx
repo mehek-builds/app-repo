@@ -71,13 +71,13 @@ export default function ContactCard({ contact, onDraft }: ContactCardProps) {
         </div>
 
         {contactLine && (
-          <div className="mt-1 flex min-h-10 items-center gap-2">
+          <div className="mt-1 flex min-h-11 items-center gap-2">
             <span className="min-w-0 flex-1 truncate text-xs text-gray-600">{contactLine}</span>
             {!isLinkedInOnly && (
               <button
                 type="button"
                 onClick={handleCopy}
-                className="inline-flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-md text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
+                className="inline-flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-md text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
                 aria-label={copied ? `${contact.full_name}'s email copied` : `Copy ${contact.full_name}'s email`}
               >
                 {copied ? (
