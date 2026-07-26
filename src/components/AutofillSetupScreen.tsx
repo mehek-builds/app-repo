@@ -93,7 +93,7 @@ function YesNoDecline({
           type="button"
           onClick={() => onChange(opt)}
           aria-pressed={value === opt}
-          className={`min-h-11 rounded-inner border px-3 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 ${
+          className={`min-h-11 rounded-inner border px-3 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 ${
             value === opt
               ? 'border-brand-400 bg-brand-50 text-brand-700'
               : 'border-gray-300 bg-white text-gray-700 hover:border-gray-400 hover:bg-gray-50'
@@ -236,6 +236,32 @@ export default function AutofillSetupScreen({ token, profile, onBack, onLogout }
 
       <main className="flex flex-1 flex-col gap-4 px-4 py-4">
         {error && <WarningBanner message={error} variant="error" />}
+
+        {/* First run is a sequence, because the order is the point. Coming back is not: changing
+            a LinkedIn URL should not mean clicking through experience, location and EEO first.
+            After setup, the four sections become tabs. */}
+        {!firstRun && step !== 'saving' && step !== 'done' && (
+          <nav aria-label="Answer sections" className="-mx-1 flex gap-1 overflow-x-auto pb-1">
+            {([
+              ['experience', 'Experience'],
+              ['checks', 'About you'],
+              ['required', 'Every form'],
+              ['links', 'Links'],
+            ] as const).map(([key, label]) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setStep(key)}
+                aria-current={step === key ? 'true' : undefined}
+                className={`min-h-11 whitespace-nowrap rounded-control px-3 text-sm transition-colors ${
+                  step === key ? 'bg-gray-100 font-medium text-gray-950' : 'text-gray-600 hover:text-gray-950'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </nav>
+        )}
 
         {step === 'experience' && (
           <div className="flex flex-col gap-3">
@@ -487,7 +513,7 @@ export default function AutofillSetupScreen({ token, profile, onBack, onLogout }
                 id="application-salary"
                 value={appProfile.desired_salary ?? ''}
                 onChange={(e) => setAppProfile((p) => ({ ...p, desired_salary: e.target.value }))}
-                placeholder="Leave blank to skip"
+                placeholder="Leave blank"
                 className={fieldClass}
               />
             </div>
@@ -533,7 +559,7 @@ export default function AutofillSetupScreen({ token, profile, onBack, onLogout }
                         id={`eeo-${field}`}
                         value={eeo[field] ?? ''}
                         onChange={(e) => setEeo((p) => ({ ...p, [field]: e.target.value }))}
-                        placeholder="Leave blank to decline"
+                        placeholder="Leave blank"
                         className={fieldClass}
                       />
                     </div>
@@ -592,7 +618,7 @@ export default function AutofillSetupScreen({ token, profile, onBack, onLogout }
                   type="button"
                   role="switch"
                   aria-checked={autoSubmit}
-                  aria-label="Automatically submit eligible applications"
+                  aria-label="Send an application without asking me again"
                   disabled={!automationSettingsLoaded}
                   onClick={() => setAutoSubmit((v) => !v)}
                   className="relative flex h-11 w-12 flex-shrink-0 items-center rounded-full disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2"
@@ -615,7 +641,7 @@ export default function AutofillSetupScreen({ token, profile, onBack, onLogout }
             <div className="border-b border-gray-200 py-3">
               <div className="flex items-start justify-between gap-3">
                 <div><p className="text-xs font-medium text-gray-700">Use application verification codes</p><p className="mt-1 text-xs leading-5 text-gray-600">Litos may use connected Gmail or Outlook to find a code for an active application. Codes are not saved.</p></div>
-                <button type="button" role="switch" aria-checked={automaticVerification} aria-label="Use application verification codes" disabled={!automationSettingsLoaded} onClick={() => setAutomaticVerification((value) => !value)} className="relative flex h-11 w-12 flex-shrink-0 items-center rounded-full disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2">
+                <button type="button" role="switch" aria-checked={automaticVerification} aria-label="Read the code a company emails me" disabled={!automationSettingsLoaded} onClick={() => setAutomaticVerification((value) => !value)} className="relative flex h-11 w-12 flex-shrink-0 items-center rounded-full disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2">
                   <span className={`relative block h-7 w-12 rounded-full transition-colors ${automaticVerification ? 'bg-brand-600' : 'bg-gray-200'}`}><span className={`absolute top-0.5 h-6 w-6 rounded-full border border-gray-200 bg-white transition-transform ${automaticVerification ? 'translate-x-5' : 'translate-x-0.5'}`} /></span>
                 </button>
               </div>

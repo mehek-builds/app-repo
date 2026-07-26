@@ -214,7 +214,7 @@ describe('redesigned popup workflows', () => {
       />,
     );
 
-    await user.click(await screen.findByRole('button', { name: 'Mark as sent' }));
+    await user.click(await screen.findByRole('button', { name: 'I sent it' }));
 
     await waitFor(() => {
       expect(api.trackEvent).toHaveBeenCalledWith('token', {
