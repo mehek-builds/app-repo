@@ -87,7 +87,7 @@ export default {
         'fade-in-up': 'fade-in-up 0.34s cubic-bezier(0.16,1,0.3,1) both',
         'slide-down': 'slide-down 0.24s cubic-bezier(0.16,1,0.3,1) both',
         'slide-in-right': 'slide-in-right 0.26s cubic-bezier(0.16,1,0.3,1) both',
-        shimmer: 'shimmer 1.4s linear infinite',
+        shimmer: 'shimmer 2.4s ease-in-out infinite',
       },
     },
   },

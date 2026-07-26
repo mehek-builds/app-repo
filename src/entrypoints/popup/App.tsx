@@ -99,9 +99,15 @@ export default function App() {
     return () => chrome.runtime.onMessage.removeListener(handler);
   }, [screen]);
 
-  const handleOnboardingComplete = (newProfile: Profile, newToken: string) => {
+  const handleOnboardingComplete = (newProfile: Profile, newToken: string, returning = false) => {
     setToken(newToken);
     setProfile(newProfile);
+    // Someone signing back in already did setup. Sending them through it again was the whole
+    // reason the extension had no sign-in path to begin with.
+    if (returning) {
+      setScreen('main');
+      return;
+    }
     // Route straight into autofill setup at JOIN time so work-auth, EEO, DOB, salary, and links
     // are collected once, up front - never asked mid-application. That keeps the first (and
     // every) fill instant: the adapter only ever reads stored data or skips, it never prompts.
@@ -167,13 +173,12 @@ export default function App() {
           onContactsFound={handleContactsFound}
           onViewTracking={() => setScreen('tracking')}
           onViewAutofillSetup={() => setScreen('autofill-setup')}
-          onLogout={handleLogout}
           userSchool={profile.school}
         />
       )}
 
       {screen === 'autofill-setup' && token && profile && (
-        <AutofillSetupScreen token={token} profile={profile} onBack={() => setScreen('main')} />
+        <AutofillSetupScreen token={token} profile={profile} onBack={() => setScreen('main')} onLogout={handleLogout} />
       )}
 
       {screen === 'contacts' && token && job && (
