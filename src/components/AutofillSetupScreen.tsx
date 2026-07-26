@@ -103,7 +103,7 @@ function YesNoDecline({
           type="button"
           onClick={() => onChange(opt)}
           aria-pressed={value === opt}
-          className={`min-h-11 rounded-md border px-3 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 ${
+          className={`min-h-11 rounded-inner border px-3 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 ${
             value === opt
               ? 'border-brand-400 bg-brand-50 text-brand-700'
               : 'border-gray-300 bg-white text-gray-700 hover:border-gray-400 hover:bg-gray-50'
@@ -224,7 +224,7 @@ export default function AutofillSetupScreen({ token, profile, onBack }: Autofill
 
   return (
     <div className="flex min-h-full animate-fade-in flex-col bg-white">
-      <PopupHeader title="Application profile" subtitle="Used for autofill" onBack={onBack} />
+      <PopupHeader title="Your answers" subtitle="Litos reuses these on every form" onBack={onBack} />
 
       <main className="flex flex-1 flex-col gap-4 px-4 py-4">
         {error && <WarningBanner message={error} variant="error" />}
@@ -232,8 +232,8 @@ export default function AutofillSetupScreen({ token, profile, onBack }: Autofill
         {step === 'experience' && (
           <div className="flex flex-col gap-3">
             <StepHeader
-              step={1}
-              total={4}
+              step={3}
+              total={6}
               title="Your experience"
               subtitle={
                 bankIsSeeded
@@ -255,7 +255,7 @@ export default function AutofillSetupScreen({ token, profile, onBack }: Autofill
                           onChange={(e) => updateEntry(idx, { org: e.target.value })}
                           placeholder={entry.type === 'job' ? 'Company' : 'Project name'}
                           aria-label={entry.type === 'job' ? `Company ${idx + 1}` : `Project ${idx + 1}`}
-                          className="w-full rounded-md border-0 bg-transparent px-0 text-sm font-semibold text-gray-900 placeholder:text-gray-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2"
+                          className="w-full rounded-inner border-0 bg-transparent px-0 text-sm font-semibold text-gray-900 placeholder:text-gray-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2"
                         />
                         </label>
                         {bankIsSeeded && <ResumePill />}
@@ -268,7 +268,7 @@ export default function AutofillSetupScreen({ token, profile, onBack }: Autofill
                           onChange={(e) => updateEntry(idx, { title: e.target.value })}
                           placeholder="Title"
                           aria-label={`Title ${idx + 1}`}
-                          className="w-full rounded-md border-0 bg-transparent px-0 text-xs text-gray-600 placeholder:text-gray-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2"
+                          className="w-full rounded-inner border-0 bg-transparent px-0 text-xs text-gray-600 placeholder:text-gray-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2"
                         />
                         </label>
                       )}
@@ -276,7 +276,7 @@ export default function AutofillSetupScreen({ token, profile, onBack }: Autofill
                     <button
                       type="button"
                       onClick={() => removeEntry(idx)}
-                      className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-md text-gray-500 hover:bg-gray-100 hover:text-gray-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
+                      className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-inner text-gray-500 hover:bg-gray-100 hover:text-gray-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
                       aria-label={`Remove ${entry.org || entry.type}`}
                     >
                       ×
@@ -319,10 +319,10 @@ export default function AutofillSetupScreen({ token, profile, onBack }: Autofill
         {step === 'checks' && (
           <div className="flex animate-fade-in-up flex-col gap-4">
             <StepHeader
-              step={2}
-              total={4}
-              title="A couple quick checks"
-              subtitle="These aren't always on a resume, so we ask directly rather than guess."
+              step={4}
+              total={6}
+              title="A couple of quick checks"
+              subtitle="Not usually on a resume, so we ask instead of guessing."
             />
 
             <div className="flex flex-col gap-1.5">
@@ -366,10 +366,10 @@ export default function AutofillSetupScreen({ token, profile, onBack }: Autofill
         {step === 'required' && (
           <div className="flex animate-fade-in-up flex-col gap-4">
             <StepHeader
-              step={3}
-              total={4}
-              title="A few required fields"
-              subtitle="Nearly every application asks these. Never guessed, never defaulted."
+              step={5}
+              total={6}
+              title="Things every form asks"
+              subtitle="We never guess these, so we ask you once."
             />
 
             <div className="flex flex-col gap-1.5">
@@ -447,7 +447,7 @@ export default function AutofillSetupScreen({ token, profile, onBack }: Autofill
                   forms asking when you can start are left for you. Pick a date to fix that.
                 </p>
               ) : (
-                <p className="text-xs leading-5 text-gray-600">When you can start. Stored as YYYY-MM-DD.</p>
+                <p className="text-xs leading-5 text-gray-600">The earliest date you could start.</p>
               )}
             </div>
 
@@ -496,7 +496,7 @@ export default function AutofillSetupScreen({ token, profile, onBack }: Autofill
                   to fix that.
                 </p>
               ) : (
-                <p className="text-xs leading-5 text-gray-600">Only used when a form asks, never for SSN. Stored as YYYY-MM-DD.</p>
+                <p className="text-xs leading-5 text-gray-600">Only used when a form asks for it.</p>
               )}
             </div>
 
@@ -506,7 +506,7 @@ export default function AutofillSetupScreen({ token, profile, onBack }: Autofill
                 onClick={() => setEeoExpanded((v) => !v)}
                 aria-expanded={eeoExpanded}
                 aria-controls="eeo-fields"
-                className="flex min-h-11 w-full items-center justify-between rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
+                className="flex min-h-11 w-full items-center justify-between rounded-inner text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
               >
                 <span className="text-xs font-medium text-gray-700">
                   EEO voluntary disclosures <span className="text-gray-600">(optional)</span>
@@ -528,7 +528,7 @@ export default function AutofillSetupScreen({ token, profile, onBack }: Autofill
                     </div>
                   ))}
                   <p className="text-xs leading-5 text-gray-600">
-                    Left blank means Litos selects "Decline to Self-Identify" on every application.
+                    Left blank means Litos selects "Prefer not to say" on every application.
                   </p>
                 </div>
               )}
@@ -546,7 +546,7 @@ export default function AutofillSetupScreen({ token, profile, onBack }: Autofill
 
         {step === 'links' && (
           <div className="flex animate-fade-in-up flex-col gap-4">
-            <StepHeader step={4} total={4} title="Links and contact" subtitle="Whatever you don't have, leave blank." />
+            <StepHeader step={6} total={6} title="Links and contact" subtitle="Leave anything you do not have blank." />
 
             {(
               [

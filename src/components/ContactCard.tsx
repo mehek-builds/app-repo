@@ -16,11 +16,13 @@ const PERSONA_LABELS: Record<Persona, string> = {
   recruiter: 'Recruiter',
 };
 
+/* What the dot actually means, said in words. "Likely" and "LinkedIn only" are the database's
+   values; a student reading them cannot tell what to do differently. */
 const STATUS_LABELS: Record<Contact['status'], string> = {
-  verified: 'Verified',
-  likely: 'Likely',
-  linkedin_only: 'LinkedIn only',
-  none: 'No contact details',
+  verified: 'Email checked',
+  likely: 'Email is a guess',
+  linkedin_only: 'No email, LinkedIn only',
+  none: 'No way to reach them',
 };
 
 export default function ContactCard({ contact, onDraft }: ContactCardProps) {
@@ -40,10 +42,9 @@ export default function ContactCard({ contact, onDraft }: ContactCardProps) {
     }
   };
 
-  const metadata = [
-    contact.school_match ? 'School alum' : PERSONA_LABELS[contact.persona],
-    STATUS_LABELS[contact.status],
-  ].join(' · ');
+  // Who they are and how good the email is are two different facts, and joining them with a dot
+  // put them on one line under a single coloured dot that only described the second one.
+  const whoTheyAre = contact.school_match ? 'Went to your school' : PERSONA_LABELS[contact.persona];
 
   return (
     <article className="flex min-h-[88px] items-start gap-3 py-3">
@@ -65,9 +66,10 @@ export default function ContactCard({ contact, onDraft }: ContactCardProps) {
           </button>
         </div>
 
+        <p className="mt-1 text-xs text-gray-600">{whoTheyAre}</p>
         <div className="mt-1 flex items-center gap-1.5 text-xs text-gray-600">
           <StatusDot tone={tone} />
-          <span>{metadata}</span>
+          <span>{STATUS_LABELS[contact.status]}</span>
         </div>
 
         {contactLine && (
@@ -77,7 +79,7 @@ export default function ContactCard({ contact, onDraft }: ContactCardProps) {
               <button
                 type="button"
                 onClick={handleCopy}
-                className="inline-flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-md text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
+                className="inline-flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-inner text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
                 aria-label={copied ? `${contact.full_name}'s email copied` : `Copy ${contact.full_name}'s email`}
               >
                 {copied ? (

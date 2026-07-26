@@ -9,6 +9,10 @@ import {
 import { isLinkedInApplicationPage, extractLinkedInJdText, fillLinkedInApplication } from '../lib/adapters/linkedin';
 import { isLikelyApplicationForm, extractGenericJdText, getGenericJobDetails, fillGenericApplication, drainR030CandidateLabels } from '../lib/adapters/generic';
 import { getAutoSubmitEnabled, getPortalAccounts, recordPortalAccount } from '../lib/storage';
+import { COLOR, FONT, RADIUS } from '../styles/tokens';
+
+/** Hostnames where the student pressed "Never ask on this site". */
+const MUTED_HOSTS_KEY = 'litos-muted-hosts';
 import { selectNeedsYouReasons, skippedReasonsNeedReview } from '../lib/autosubmit-gate';
 import {
   extractValidationErrors,
@@ -334,8 +338,8 @@ export default defineContentScript({
     ): void {
       if (!statusEl) return;
       const head: string[] = [`Filled ${fillResult.fields_filled} field${fillResult.fields_filled === 1 ? '' : 's'}.`];
-      if (opts.resumeMissing) head.push('⚠ Resume not attached - add it yourself.');
-      if (opts.autoSubmitHeld) head.push('Auto-submit held: finish the flagged items, then submit.');
+      if (opts.resumeMissing) head.push('Resume not attached. Add it yourself.');
+      if (opts.autoSubmitHeld) head.push('Waiting on you. Finish the items below, then send.');
       // Keep the reasons that actually need a human: resume, agreements, unmatched/never-fill,
       // required blanks. Selection + ordering live in the pure selectNeedsYouReasons (autosubmit-
       // gate.ts) so it stays unit-tested: required blanks sort ahead of the cap, because a card
@@ -347,10 +351,10 @@ export default defineContentScript({
       statusEl.innerHTML =
         head.map((l) => `<div style="line-height:1.4;">${escapeHtml(l)}</div>`).join('') +
         (needsYou.length
-          ? `<div style="margin-top:4px;font-weight:600;line-height:1.4;">Still needs you:</div>` +
+          ? `<div style="margin-top:4px;font-weight:500;line-height:1.4;">Still needs you:</div>` +
             needsYou.map((r) => `<div style="line-height:1.4;">• ${escapeHtml(r)}</div>`).join('')
           : '') +
-        `<div style="margin-top:4px;line-height:1.4;">Review, then submit yourself.</div>`;
+        `<div style="margin-top:4px;line-height:1.4;">Check it over, then send it yourself.</div>`;
     }
 
     // E-015 watcher. A MutationObserver, deliberately NOT an event listener: a capture-phase
@@ -398,8 +402,8 @@ export default defineContentScript({
             host.id = 'litos-validation-card';
             host.style.cssText =
               'position:fixed;right:16px;bottom:16px;z-index:2147483646;max-width:340px;' +
-              'background:#fff;border:1px solid #c7c9d1;border-radius:10px;box-shadow:0 4px 18px rgba(0,0,0,.18);' +
-              'padding:12px 14px;font:13px/1.45 system-ui,sans-serif;color:#111;';
+              `background:#fff;border:1px solid ${COLOR.border};border-radius:${RADIUS.card};box-shadow:0 2px 10px rgba(18,18,15,.08);` +
+              `padding:12px 14px;font:13px/1.45 ${FONT.sans};color:${COLOR.ink};`;
             document.documentElement.appendChild(host);
             state.statusEl = host;
           }
@@ -530,37 +534,43 @@ export default defineContentScript({
         <div style="
           position: relative;
           background: white;
-          border: 1.5px solid #e0e7ff;
-          border-radius: 14px;
+          border: 1px solid #e8e6e1;
+          border-radius: ${RADIUS.card};
           padding: 16px 16px 14px;
-          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+          font-family: ${FONT.sans};
           font-size: 13px;
           line-height: 1.4;
-          box-shadow: 0 8px 32px rgba(79,70,229,0.18);
+          box-shadow: none;
           width: 272px;
           box-sizing: border-box;
           animation: wp-slide-in 0.25s ease-out;
         ">
           <button id="wp-close" style="position:absolute;top:10px;right:12px;background:none;border:none;cursor:pointer;font-size:17px;opacity:0.4;color:#333;padding:0;line-height:1;">×</button>
           <div style="display:flex;align-items:flex-start;gap:9px;margin-bottom:12px;line-height:1.4;">
-            <span style="font-size:20px;flex-shrink:0;margin-top:1px;line-height:1;">🔥</span>
             <div>
-              <div style="font-weight:700;font-size:13px;color:#1e1b4b;line-height:1.4;">${escapeHtml(headline)}</div>
-              <div style="font-size:12px;color:#6366f1;margin-top:2px;word-break:break-word;line-height:1.4;">${escapeHtml(subline)}</div>
+              <div style="font-weight:500;font-size:13px;color:#12120f;line-height:1.4;">${escapeHtml(headline)}</div>
+              <div style="font-size:12px;color:#6b6a64;margin-top:2px;word-break:break-word;line-height:1.4;">${escapeHtml(subline)}</div>
             </div>
           </div>
           <div style="display:flex;gap:8px;">
             <button id="wp-yes" style="
-              flex:1;background:#4f46e5;color:white;border:none;border-radius:8px;
-              padding:9px 0;font-size:12px;font-weight:600;cursor:pointer;
-              font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
-            ">Yes, draft emails</button>
+              flex:1;background:#6b84e8;color:white;border:none;border-radius:${RADIUS.control};
+              padding:9px 0;font-size:12px;font-weight:500;cursor:pointer;
+              font-family:${FONT.sans};
+            ">Yes, find people</button>
             <button id="wp-no" style="
-              flex:1;background:#f3f4f6;color:#374151;border:none;border-radius:8px;
-              padding:9px 0;font-size:12px;font-weight:600;cursor:pointer;
-              font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
-            ">Not this one</button>
+              flex:1;background:#faf9f7;color:#12120f;border:none;border-radius:${RADIUS.control};
+              padding:9px 0;font-size:12px;font-weight:500;cursor:pointer;
+              font-family:${FONT.sans};
+            ">No thanks</button>
           </div>
+          <!-- A forced yes/no on someone's own application page left no way to stop being
+               interrupted short of uninstalling. This is the third answer. -->
+          <button id="wp-never" style="
+            margin-top:10px;background:none;border:none;padding:0;cursor:pointer;
+            font-size:11px;color:${COLOR.faint};text-decoration:underline;text-underline-offset:2px;
+            font-family:${FONT.sans};
+          ">Never ask on this site</button>
         </div>
         <style>
           @keyframes wp-slide-in {
@@ -575,15 +585,28 @@ export default defineContentScript({
       const dismiss = () => { card.remove(); cardInjected = false; };
       card.querySelector('#wp-close')?.addEventListener('click', dismiss);
       card.querySelector('#wp-no')?.addEventListener('click', dismiss);
+      // Remembered per hostname, so the answer holds for this employer's site rather than only
+      // for this one posting. Read back by shouldOfferOnThisHost() before any card is injected.
+      card.querySelector('#wp-never')?.addEventListener('click', () => {
+        try {
+          chrome.storage.local.get([MUTED_HOSTS_KEY], (items) => {
+            const hosts: string[] = Array.isArray(items?.[MUTED_HOSTS_KEY]) ? items[MUTED_HOSTS_KEY] : [];
+            if (!hosts.includes(location.hostname)) hosts.push(location.hostname);
+            chrome.storage.local.set({ [MUTED_HOSTS_KEY]: hosts });
+          });
+        } catch {
+          /* storage unavailable: still dismiss, the student asked us to go away */
+        }
+        dismiss();
+      });
       card.querySelector('#wp-yes')?.addEventListener('click', () => {
         approved = true;
         const inner = card.querySelector('div') as HTMLElement;
         inner.innerHTML = `
           <div style="display:flex;align-items:center;gap:10px;">
-            <span style="font-size:20px;">⏳</span>
             <div>
-              <div style="font-weight:700;font-size:13px;color:#1e1b4b;">Finding contacts &amp; drafting...</div>
-              <div style="font-size:12px;color:#6366f1;margin-top:2px;">Open Litos when ready</div>
+              <div style="font-weight:500;font-size:13px;color:#12120f;">Finding people to email</div>
+              <div style="font-size:12px;color:#6b6a64;margin-top:2px;">Click the Litos icon in a moment to see them</div>
             </div>
           </div>
         `;
@@ -595,6 +618,16 @@ export default defineContentScript({
     // Card 1: fires when application form loads
     function injectActionCard(title: string, company: string, url: string) {
       if (cardInjected || document.getElementById('litos-action-card')) return;
+      // Honour "Never ask on this site" before anything is drawn.
+      chrome.storage.local.get([MUTED_HOSTS_KEY], (items) => {
+        const hosts: string[] = Array.isArray(items?.[MUTED_HOSTS_KEY]) ? items[MUTED_HOSTS_KEY] : [];
+        if (hosts.includes(location.hostname)) return;
+        drawActionCard(title, company, url);
+      });
+    }
+
+    function drawActionCard(title: string, company: string, url: string) {
+      if (cardInjected || document.getElementById('litos-action-card')) return;
       cardInjected = true;
 
       chrome.runtime.sendMessage({ type: 'JOB_DETECTED', payload: { title, company, url } });
@@ -602,7 +635,7 @@ export default defineContentScript({
       const card = document.createElement('div');
       card.id = 'litos-action-card';
       card.innerHTML = cardShell(
-        'Draft recruiter emails?',
+        'Want emails to people here?',
         `${title} at ${company}`
       );
       getCardStack().appendChild(card);
@@ -619,14 +652,14 @@ export default defineContentScript({
       const card = document.createElement('div');
       card.id = 'litos-submit-card';
       card.innerHTML = `
-        <div style="position:relative;background:white;border:1.5px solid #e0e7ff;border-radius:14px;padding:16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:13px;line-height:1.4;box-shadow:0 8px 32px rgba(79,70,229,0.18);width:272px;box-sizing:border-box;animation:wp-slide-in 0.25s ease-out;">
+        <div style="position:relative;background:white;border:1px solid #e8e6e1;border-radius:${RADIUS.card};padding:16px;font-family:${FONT.sans};font-size:13px;line-height:1.4;box-shadow:none;width:272px;box-sizing:border-box;animation:wp-slide-in 0.25s ease-out;">
           <button id="wp-submit-close" aria-label="Close Litos submission status" style="position:absolute;top:10px;right:12px;background:none;border:none;cursor:pointer;font-size:17px;opacity:0.4;color:#333;padding:0;line-height:1;">×</button>
           <div style="display:flex;align-items:flex-start;gap:9px;line-height:1.4;">
             <span id="wp-submit-icon" style="font-size:20px;flex-shrink:0;line-height:1.4;"><canvas id="wp-submit-orb"></canvas></span>
             <div style="line-height:1.4;">
-              <div id="wp-submit-title" style="font-weight:700;font-size:13px;color:#1e1b4b;line-height:1.4;">Sending your application</div>
-              <div style="font-size:12px;color:#6366f1;margin-top:2px;word-break:break-word;line-height:1.4;">${escapeHtml(title)} at ${escapeHtml(company)}</div>
-              <div id="wp-submit-status" role="status" aria-live="polite" style="font-size:11px;color:#6b7280;margin-top:8px;line-height:1.4;">${submissionProgress(0)}</div>
+              <div id="wp-submit-title" style="font-weight:500;font-size:13px;color:#12120f;line-height:1.4;">Sending</div>
+              <div style="font-size:12px;color:#6b6a64;margin-top:2px;word-break:break-word;line-height:1.4;">${escapeHtml(title)} at ${escapeHtml(company)}</div>
+              <div id="wp-submit-status" role="status" aria-live="polite" style="font-size:11px;color:#6b6a64;margin-top:8px;line-height:1.4;">${submissionProgress(0)}</div>
             </div>
           </div>
         </div>
@@ -672,17 +705,17 @@ export default defineContentScript({
         onOutcome: (outcome) => {
         if (outcome.kind === 'failure') {
           stopSubmitOrbAnd(() => { if (iconEl) iconEl.textContent = '!'; });
-          if (titleEl) titleEl.textContent = 'Application not submitted';
+          if (titleEl) titleEl.textContent = 'Not sent';
           if (statusEl) statusEl.textContent = outcome.message;
         } else {
           stopSubmitOrbAnd(() => { if (iconEl) iconEl.textContent = '✓'; });
-          if (titleEl) titleEl.textContent = 'Application confirmed';
-          if (statusEl) statusEl.textContent = 'The company portal confirmed receipt.';
+          if (titleEl) titleEl.textContent = 'Sent';
+          if (statusEl) statusEl.textContent = 'The company confirmed they got it.';
         }
         },
         onUnknown: () => {
           stopSubmitOrbAnd(() => { if (iconEl) iconEl.textContent = '?'; });
-          if (titleEl) titleEl.textContent = 'Confirmation unknown';
+          if (titleEl) titleEl.textContent = 'Not sure it went through';
           if (statusEl) statusEl.textContent = submissionProgress(60);
         },
       });
@@ -697,8 +730,8 @@ export default defineContentScript({
         // tell the student Litos is waiting on the company when the form is visibly incomplete.
         if (!outcomeController.isFinished() && elapsedSeconds >= 1 && hasEmptyRequiredFields()) {
           stopSubmitOrbAnd(() => { if (iconEl) iconEl.textContent = '!'; });
-          if (titleEl) titleEl.textContent = 'Application needs your review';
-          if (statusEl) statusEl.textContent = 'The portal did not submit. Complete the required fields, then try again.';
+          if (titleEl) titleEl.textContent = 'Needs you';
+          if (statusEl) statusEl.textContent = 'The form did not go through. Fill in what is missing, then try again.';
           return;
         }
         if (!outcomeController.isFinished() && statusEl) {
@@ -723,34 +756,34 @@ export default defineContentScript({
       return `
         <div style="
           position: relative;
-          background: white; border: 1.5px solid #e0e7ff; border-radius: 14px;
-          padding: 16px 16px 14px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-          font-size: 13px; line-height: 1.4; box-shadow: 0 8px 32px rgba(79,70,229,0.18);
+          background: white; border: 1px solid #e8e6e1; border-radius: ${RADIUS.card};
+          padding: 16px 16px 14px; font-family: ${FONT.sans};
+          font-size: 13px; line-height: 1.4; box-shadow: none;
           width: 300px; box-sizing: border-box; animation: wp-slide-in 0.25s ease-out;
         ">
           <button id="wp-resume-close" aria-label="Close Litos resume assistant" style="position:absolute;top:10px;right:12px;background:none;border:none;cursor:pointer;font-size:17px;opacity:0.4;color:#333;padding:0;line-height:1;">×</button>
           <div style="display:flex;align-items:flex-start;gap:9px;margin-bottom:12px;line-height:1.4;">
             <span style="font-size:20px;flex-shrink:0;margin-top:1px;line-height:1;">📄</span>
             <div>
-              <div style="font-weight:700;font-size:13px;color:#1e1b4b;line-height:1.4;">Generate tailored resume + fill this application?</div>
-              <div style="font-size:12px;color:#6366f1;margin-top:2px;word-break:break-word;line-height:1.4;">${escapeHtml(title)} at ${escapeHtml(company)}</div>
+              <div style="font-weight:500;font-size:13px;color:#12120f;line-height:1.4;">Generate tailored resume + fill this application?</div>
+              <div style="font-size:12px;color:#6b6a64;margin-top:2px;word-break:break-word;line-height:1.4;">${escapeHtml(title)} at ${escapeHtml(company)}</div>
             </div>
           </div>
           <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;min-width:0;">
             <canvas id="wp-resume-orb" style="display:none;flex-shrink:0;"></canvas>
-            <div id="wp-resume-status" style="font-size:11px;color:#6b7280;display:none;line-height:1.4;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></div>
+            <div id="wp-resume-status" style="font-size:11px;color:#6b6a64;display:none;line-height:1.4;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></div>
           </div>
           <div id="wp-resume-announcer" role="status" aria-live="polite" aria-atomic="true" style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;"></div>
           <div style="display:flex;gap:8px;">
             <button id="wp-resume-yes" style="
-              flex:1;background:#4f46e5;color:white;border:none;border-radius:8px;
-              padding:9px 0;font-size:12px;font-weight:600;cursor:pointer;
-              font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+              flex:1;background:#6b84e8;color:white;border:none;border-radius:${RADIUS.control};
+              padding:9px 0;font-size:12px;font-weight:500;cursor:pointer;
+              font-family:${FONT.sans};
             ">Yes, fill it</button>
             <button id="wp-resume-no" style="
-              flex:1;background:#f3f4f6;color:#374151;border:none;border-radius:8px;
-              padding:9px 0;font-size:12px;font-weight:600;cursor:pointer;
-              font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+              flex:1;background:#faf9f7;color:#12120f;border:none;border-radius:${RADIUS.control};
+              padding:9px 0;font-size:12px;font-weight:500;cursor:pointer;
+              font-family:${FONT.sans};
             ">No thanks</button>
           </div>
         </div>
@@ -923,7 +956,7 @@ export default defineContentScript({
         // cached per job, so nothing paid for is thrown away; re-opening the card reuses it.
         if (!card.isConnected) return;
         if (!result || result.error || !result.profile || !result.applicationProfile || !result.resume) {
-          if (statusEl) statusEl.textContent = `${result?.error || 'Could not generate a resume.'} Nothing was attached or submitted.`;
+          if (statusEl) statusEl.textContent = `${result?.error || 'We could not build a resume.'} Nothing was attached or submitted.`;
           generationController.announce('Resume generation failed. You can retry.');
           if (yesBtn) {
             yesBtn.disabled = false;
@@ -934,7 +967,7 @@ export default defineContentScript({
         const { profile, applicationProfile, resume } = result;
 
         if (!result.resume.quality?.ready_to_attach || result.resume.quality.issues.length > 0) {
-          if (statusEl) statusEl.textContent = 'The resume needs another layout pass. Nothing was attached or submitted.';
+          if (statusEl) statusEl.textContent = 'The resume needs another pass. Nothing was attached or sent.';
           generationController.announce('The resume needs another layout pass. You can retry.');
           if (yesBtn) {
             yesBtn.disabled = false;
@@ -1031,7 +1064,7 @@ export default defineContentScript({
             FILL_INACTIVITY_TIMEOUT_MS,
           );
         } catch {
-          if (statusEl) statusEl.textContent = 'This form is taking too long to fill - some fields may be partially filled. Review and finish it yourself.';
+          if (statusEl) statusEl.textContent = 'This form is taking too long. Some boxes may be half filled. Please finish it yourself.';
           if (yesBtn) yesBtn.style.display = 'none';
           setTimeout(dismiss, 8000);
           return;
@@ -1196,44 +1229,54 @@ export default defineContentScript({
 
       let remaining = AUTO_SUBMIT_COUNTDOWN_SECONDS;
       let cancelled = false;
-      const RADIUS = 20;
-      const CIRC = 2 * Math.PI * RADIUS;
+      const RING_RADIUS = 20;
+      const CIRC = 2 * Math.PI * RING_RADIUS;
 
       // The button itself gets a highlighted ring so it's unmistakable which control the timer
-      // is counting down toward.
-      submitBtn.style.outline = '3px solid #4f46e5';
+      // is counting down toward. Remember what the employer's own page had first, so backing off
+      // can put it back exactly: this is someone else's page and Litos should leave no trace.
+      const priorOutline = submitBtn.style.outline;
+      const priorOutlineOffset = submitBtn.style.outlineOffset;
+      const priorBorderRadius = submitBtn.style.borderRadius;
+      const restoreSubmitButton = () => {
+        submitBtn.style.outline = priorOutline;
+        submitBtn.style.outlineOffset = priorOutlineOffset;
+        submitBtn.style.borderRadius = priorBorderRadius;
+      };
+      submitBtn.style.outline = `3px solid ${COLOR.brand}`;
       submitBtn.style.outlineOffset = '3px';
-      submitBtn.style.borderRadius = getComputedStyle(submitBtn).borderRadius || '8px';
+      submitBtn.style.borderRadius = getComputedStyle(submitBtn).borderRadius || RADIUS.control;
 
       const overlay = document.createElement('div');
       overlay.id = 'litos-autosubmit-overlay';
       overlay.style.cssText =
         'position:fixed;inset:0;z-index:2147483647;pointer-events:none;' +
-        "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;";
+        `font-family:${FONT.sans};`;
       overlay.innerHTML = `
         <div id="wp-as-panel" style="
           pointer-events:auto;position:absolute;display:flex;align-items:center;gap:12px;
-          background:#1e1b4b;color:#fff;border-radius:12px;padding:10px 12px;
-          box-shadow:0 10px 34px rgba(30,27,75,0.42);white-space:nowrap;
+          background:${COLOR.surface};color:${COLOR.ink};border:1px solid ${COLOR.border};
+          border-radius:${RADIUS.card};padding:10px 12px;
+          box-shadow:0 8px 28px rgba(18,18,15,0.10);white-space:nowrap;
           animation:wp-slide-in 0.2s ease-out;
         ">
           <div style="position:relative;width:46px;height:46px;flex-shrink:0;">
             <svg width="46" height="46" viewBox="0 0 46 46" style="transform:rotate(-90deg);">
-              <circle cx="23" cy="23" r="${RADIUS}" fill="none" stroke="rgba(255,255,255,0.18)" stroke-width="4"/>
-              <circle id="wp-as-ring" cx="23" cy="23" r="${RADIUS}" fill="none" stroke="#a5b4fc"
+              <circle cx="23" cy="23" r="${RING_RADIUS}" fill="none" stroke="${COLOR.border}" stroke-width="4"/>
+              <circle id="wp-as-ring" cx="23" cy="23" r="${RING_RADIUS}" fill="none" stroke="${COLOR.ink}"
                 stroke-width="4" stroke-linecap="round" stroke-dasharray="${CIRC}"
                 stroke-dashoffset="0" style="transition:stroke-dashoffset 1s linear;"/>
             </svg>
-            <div id="wp-as-num" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:700;">${remaining}</div>
+            <div id="wp-as-num" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:500;">${remaining}</div>
           </div>
           <div style="display:flex;flex-direction:column;gap:2px;">
-            <div style="font-size:12px;font-weight:700;">${actionLabel} your application</div>
-            <div id="wp-as-sub" style="font-size:11px;color:#c7d2fe;">${fillResult.fields_filled} field${fillResult.fields_filled === 1 ? '' : 's'} filled. Auto-submits in ${remaining}s.</div>
+            <div style="font-size:12px;font-weight:500;">${actionLabel} your application</div>
+            <div id="wp-as-sub" style="font-size:11px;color:${COLOR.muted};">${fillResult.fields_filled} field${fillResult.fields_filled === 1 ? '' : 's'} filled. Auto-submits in ${remaining}s.</div>
           </div>
           <button id="wp-as-cancel" style="
-            pointer-events:auto;background:#f43f5e;color:#fff;border:none;border-radius:8px;
-            padding:9px 16px;font-size:12px;font-weight:700;cursor:pointer;
-            font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+            pointer-events:auto;background:${COLOR.ink};color:#fff;border:none;border-radius:${RADIUS.control};
+            padding:9px 16px;font-size:12px;font-weight:500;cursor:pointer;
+            font-family:${FONT.sans};
           ">Cancel</button>
         </div>
       `;
@@ -1278,13 +1321,14 @@ export default defineContentScript({
         overlay.remove();
       };
 
-      const cancel = (msg = 'Cancelled. Review, then submit yourself.') => {
+      const cancel = (msg = 'Stopped. Check it over, then send it yourself.') => {
         if (cancelled) return;
         cancelled = true;
         clearInterval(interval);
         cleanupChrome();
-        submitBtn.style.outline = '3px solid #4f46e5';
-        submitBtn.style.outlineOffset = '2px';
+        // This re-applied the ring instead of clearing it, so backing off left the employer's own
+        // Submit button permanently outlined in Litos blue.
+        restoreSubmitButton();
         if (statusEl) statusEl.textContent = msg;
         reportEvent(false);
         setTimeout(() => card.remove(), 4000);
@@ -1343,8 +1387,7 @@ export default defineContentScript({
           if (num) num.textContent = '0';
           if (ring) ring.style.strokeDashoffset = String(CIRC);
           cleanupChrome();
-          submitBtn.style.outline = '';
-          submitBtn.style.outlineOffset = '';
+          restoreSubmitButton();
           // Re-resolve the submit control at fire time: on a multi-step React form the button we
           // anchored to can be replaced during the countdown, and clicking a detached node is a
           // silent no-op that would falsely report a submit. If the live button is gone, stop and
@@ -1396,33 +1439,33 @@ export default defineContentScript({
       return `
         <div style="
           position: relative;
-          background: white; border: 1.5px solid #e0e7ff; border-radius: 14px;
-          padding: 16px 16px 14px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-          font-size: 13px; line-height: 1.4; box-shadow: 0 8px 32px rgba(79,70,229,0.18);
+          background: white; border: 1px solid #e8e6e1; border-radius: ${RADIUS.card};
+          padding: 16px 16px 14px; font-family: ${FONT.sans};
+          font-size: 13px; line-height: 1.4; box-shadow: none;
           width: 272px; box-sizing: border-box; animation: wp-slide-in 0.25s ease-out;
         ">
           <button id="wp-account-close" style="position:absolute;top:10px;right:12px;background:none;border:none;cursor:pointer;font-size:17px;opacity:0.4;color:#333;padding:0;line-height:1;">×</button>
           <div style="display:flex;align-items:flex-start;gap:9px;margin-bottom:12px;line-height:1.4;">
             <span style="font-size:20px;flex-shrink:0;margin-top:1px;line-height:1;">⚡</span>
             <div>
-              <div style="font-weight:700;font-size:13px;color:#1e1b4b;line-height:1.4;">Fill in your email here?</div>
-              <div style="font-size:12px;color:#6366f1;margin-top:2px;line-height:1.4;">You'll still set your own password and click Create Account.</div>
+              <div style="font-weight:500;font-size:13px;color:#12120f;line-height:1.4;">Fill in your email here?</div>
+              <div style="font-size:12px;color:#6b6a64;margin-top:2px;line-height:1.4;">You'll still set your own password and click Create Account.</div>
             </div>
           </div>
           <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;min-width:0;">
             <canvas id="wp-account-orb" style="display:none;flex-shrink:0;"></canvas>
-            <div id="wp-account-status" style="font-size:11px;color:#6b7280;display:none;line-height:1.4;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></div>
+            <div id="wp-account-status" style="font-size:11px;color:#6b6a64;display:none;line-height:1.4;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></div>
           </div>
           <div style="display:flex;gap:8px;">
             <button id="wp-account-yes" style="
-              flex:1;background:#4f46e5;color:white;border:none;border-radius:8px;
-              padding:9px 0;font-size:12px;font-weight:600;cursor:pointer;
-              font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+              flex:1;background:#6b84e8;color:white;border:none;border-radius:${RADIUS.control};
+              padding:9px 0;font-size:12px;font-weight:500;cursor:pointer;
+              font-family:${FONT.sans};
             ">Yes, fill it</button>
             <button id="wp-account-no" style="
-              flex:1;background:#f3f4f6;color:#374151;border:none;border-radius:8px;
-              padding:9px 0;font-size:12px;font-weight:600;cursor:pointer;
-              font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+              flex:1;background:#faf9f7;color:#12120f;border:none;border-radius:${RADIUS.control};
+              padding:9px 0;font-size:12px;font-weight:500;cursor:pointer;
+              font-family:${FONT.sans};
             ">No thanks</button>
           </div>
         </div>
@@ -1533,17 +1576,17 @@ export default defineContentScript({
       card.innerHTML = `
         <div style="
           position: relative;
-          background: white; border: 1.5px solid #e0e7ff; border-radius: 14px;
-          padding: 16px 16px 14px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-          font-size: 13px; line-height: 1.4; box-shadow: 0 8px 32px rgba(79,70,229,0.18);
+          background: white; border: 1px solid #e8e6e1; border-radius: ${RADIUS.card};
+          padding: 16px 16px 14px; font-family: ${FONT.sans};
+          font-size: 13px; line-height: 1.4; box-shadow: none;
           width: 272px; box-sizing: border-box; animation: wp-slide-in 0.25s ease-out;
         ">
           <button id="wp-start-close" style="position:absolute;top:10px;right:12px;background:none;border:none;cursor:pointer;font-size:17px;opacity:0.4;color:#333;padding:0;line-height:1;">×</button>
           <div style="display:flex;align-items:flex-start;gap:9px;margin-bottom:12px;line-height:1.4;">
             <span style="font-size:20px;flex-shrink:0;margin-top:1px;line-height:1;">👋</span>
             <div>
-              <div style="font-weight:700;font-size:13px;color:#1e1b4b;line-height:1.4;">This employer uses Workday</div>
-              <div style="font-size:12px;color:#6b7280;margin-top:2px;line-height:1.4;">
+              <div style="font-weight:500;font-size:13px;color:#12120f;line-height:1.4;">This employer uses Workday</div>
+              <div style="font-size:12px;color:#6b6a64;margin-top:2px;line-height:1.4;">
                 You'll need to sign in or create an account first - that part's still on you. Tap below
                 and Litos will take you to the right screen, then speed up account setup and the
                 application from there.
@@ -1551,9 +1594,9 @@ export default defineContentScript({
             </div>
           </div>
           <button id="wp-start-go" style="
-            width:100%;background:#4f46e5;color:white;border:none;border-radius:8px;
-            padding:9px 0;font-size:12px;font-weight:600;cursor:pointer;
-            font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+            width:100%;background:#6b84e8;color:white;border:none;border-radius:${RADIUS.control};
+            padding:9px 0;font-size:12px;font-weight:500;cursor:pointer;
+            font-family:${FONT.sans};
           ">Take me there</button>
         </div>
       `;
@@ -1585,9 +1628,9 @@ export default defineContentScript({
         const note = document.createElement('div');
         note.id = 'litos-generic-note';
         note.style.cssText =
-          'position:fixed;bottom:72px;right:20px;z-index:2147483647;background:white;border:1.5px solid #e0e7ff;' +
-          'border-radius:14px;padding:12px 16px;font-family:-apple-system,BlinkMacSystemFont,sans-serif;' +
-          'font-size:12px;line-height:1.4;color:#374151;box-shadow:0 8px 32px rgba(79,70,229,0.18);max-width:272px;';
+          `position:fixed;bottom:72px;right:20px;z-index:2147483647;background:${COLOR.surface};border:1px solid ${COLOR.border};` +
+          `border-radius:${RADIUS.card};padding:12px 16px;font-family:${FONT.sans};` +
+          `font-size:12px;line-height:1.4;color:${COLOR.ink};max-width:272px;`;
         note.textContent = "Litos couldn't find an application form on this page. Open the page with the actual form fields, then try again.";
         document.getElementById('litos-generic-note')?.remove();
         document.body.appendChild(note);

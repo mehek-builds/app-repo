@@ -37,7 +37,7 @@ export default function WarningBanner({
 
   return (
     <div
-      className={`flex min-h-11 animate-slide-down items-start gap-2 rounded-md border px-3 py-2.5 text-sm leading-5 ${colors}`}
+      className={`flex min-h-11 animate-slide-down items-start gap-2 rounded-inner border px-3 py-2.5 text-sm leading-5 ${colors}`}
       role={variant === 'error' ? 'alert' : 'status'}
       aria-live={variant === 'error' ? 'assertive' : 'polite'}
     >

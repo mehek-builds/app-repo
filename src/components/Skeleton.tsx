@@ -12,7 +12,7 @@ export function SkeletonBar({
 }) {
   return (
     <div
-      className={`skeleton animate-shimmer rounded-md ${className}`}
+      className={`skeleton animate-shimmer rounded-inner ${className}`}
       style={{ width, height }}
     />
   );
