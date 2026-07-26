@@ -2,6 +2,35 @@
 
 All notable changes to the Litos extension are documented here.
 
+## [0.4.12] - 2026-07-26
+
+### Changed
+
+- Standardized popup, page assistants, badge, and focus treatments on Litos action blue.
+- Replaced the floating emoji launcher with the Litos mark.
+- Named the popup header actions and raised interactive targets to at least 44px.
+- Kept detected jobs compact, with one summary and an explicit Edit action.
+
+### Fixed
+
+- Removed competing action weight between application fill and contact search.
+- Removed legacy indigo styling from page-level application helpers.
+
+## [0.4.11] - 2026-07-25
+
+### Added
+
+- Autofill setup now synchronizes standing submission and verification-code permissions with the Litos account.
+- The final countdown rechecks server-side consent immediately before clicking the portal submit control.
+
+### Changed
+
+- Grounded essay drafts can proceed under standing consent while sensitive, ambiguous, incomplete, and unsupported answers still hold submission.
+
+### Fixed
+
+- A failed consent refresh now holds the application instead of trusting stale local storage.
+
 ## [0.4.10] - 2026-07-23
 
 ### Changed

@@ -8,6 +8,7 @@ import { overloadWaitMs, overloadBudgetRemains, RESUME_OVERLOAD_BUDGET_MS } from
 import { parseAshbyPostingRef, selectPostingCompensation, type PostingCompensation } from '../lib/adapters/salary';
 import { litosClientHeaders, PRODUCT_NAME, type ProductMeta } from '../lib/product';
 import type { GeneratedResume } from '../lib/types';
+import { automaticSubmissionEnabled, groundedDraftAnswer } from '../lib/auto-submit-consent';
 
 // Latched off once the backend reports onboarding complete. Service-worker memory is fine for
 // this: the worst case on a restart is one wasted 403, which re-latches it immediately.
@@ -387,7 +388,7 @@ export default defineBackground(() => {
         lastDetectedJob = p;
         chrome.storage.session.set({ lastDetectedJob }).catch(() => {});
         chrome.action.setBadgeText({ text: '!' });
-        chrome.action.setBadgeBackgroundColor({ color: '#4f46e5' });
+        chrome.action.setBadgeBackgroundColor({ color: '#6b84e8' });
         chrome.runtime.sendMessage(message).catch(() => {});
         return false;
       }
@@ -395,6 +396,32 @@ export default defineBackground(() => {
       case 'GET_LAST_JOB': {
         sendResponse({ job: lastDetectedJob }); // synchronous response
         return false;
+      }
+
+      case 'GET_AUTOMATION_SETTINGS': {
+        getStoredToken().then(async (token) => {
+          if (!token) {
+            sendResponse({ automatic_submission_enabled: false, automatic_verification_enabled: false });
+            return;
+          }
+          try {
+            const res = await timeoutFetch(`${API_BASE}/onboarding/state`, {
+              headers: { Authorization: `Bearer ${token}` },
+            });
+            if (!res.ok) throw new Error(`settings failed (${res.status})`);
+            const data: { automatic_submission_enabled?: boolean; automatic_verification_enabled?: boolean } = await res.json();
+            const automaticSubmission = automaticSubmissionEnabled(data);
+            await setAutoSubmitEnabled(automaticSubmission);
+            sendResponse({
+              automatic_submission_enabled: automaticSubmission,
+              automatic_verification_enabled: data.automatic_verification_enabled === true,
+            });
+          } catch {
+            // A failed revocation check is a hold, never permission to submit from stale storage.
+            sendResponse({ automatic_submission_enabled: false, automatic_verification_enabled: false });
+          }
+        });
+        return true;
       }
 
       case 'CLEAR_JOB_BADGE': {
@@ -426,7 +453,7 @@ export default defineBackground(() => {
             if (drafts.length > 0) {
               await chrome.storage.session.set({ pendingDrafts: drafts });
               chrome.action.setBadgeText({ text: `${drafts.length}` });
-              chrome.action.setBadgeBackgroundColor({ color: '#4f46e5' });
+              chrome.action.setBadgeBackgroundColor({ color: '#6b84e8' });
               // Notify popup if open
               chrome.runtime.sendMessage({ type: 'DRAFTS_READY', payload: { count: drafts.length } }).catch(() => {});
             }
@@ -491,8 +518,8 @@ export default defineBackground(() => {
               sendResponse({ error: `draft failed (${res.status})` });
               return;
             }
-            const data: { answer?: string } = await res.json();
-            sendResponse({ answer: data.answer ?? null });
+            const data: unknown = await res.json();
+            sendResponse({ answer: groundedDraftAnswer(data) });
           } catch (err) {
             sendResponse({ error: err instanceof Error ? err.message : 'draft failed' });
           }

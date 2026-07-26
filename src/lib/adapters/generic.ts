@@ -1773,6 +1773,6 @@ function markForReview(el: HTMLElement, note = '✎ AI draft: review before subm
   const badge = document.createElement('div');
   badge.textContent = note;
   badge.style.cssText =
-    'font:600 11px -apple-system,BlinkMacSystemFont,sans-serif;color:#b45309;margin-top:4px;';
+    'font:500 11px "Hanken Grotesk Variable","Hanken Grotesk",sans-serif;color:#b45309;margin-top:4px;';
   el.insertAdjacentElement('afterend', badge);
 }

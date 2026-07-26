@@ -8,7 +8,7 @@ import {
 } from '../lib/adapters/workday';
 import { isLinkedInApplicationPage, extractLinkedInJdText, fillLinkedInApplication } from '../lib/adapters/linkedin';
 import { isLikelyApplicationForm, extractGenericJdText, getGenericJobDetails, fillGenericApplication, drainR030CandidateLabels } from '../lib/adapters/generic';
-import { getAutoSubmitEnabled, getPortalAccounts, recordPortalAccount } from '../lib/storage';
+import { getPortalAccounts, recordPortalAccount } from '../lib/storage';
 import { COLOR, FONT, RADIUS } from '../styles/tokens';
 
 /** Hostnames where the student pressed "Never ask on this site". */
@@ -37,6 +37,7 @@ import {
 } from '../lib/application-task-controller';
 import { mountThinkingOrb } from '../lib/thinking-orb';
 import { derivePortalPassword, portalKeyForHost, currentSaltFingerprint } from '../lib/portal-password';
+import { automaticSubmissionEnabled } from '../lib/auto-submit-consent';
 
 export default defineContentScript({
   matches: [
@@ -58,6 +59,23 @@ export default defineContentScript({
   allFrames: true,
   runAt: 'document_idle',
   main() {
+    async function serverAutoSubmitEnabled(): Promise<boolean> {
+      return new Promise((resolve) => {
+        let settled = false;
+        const finish = (enabled: boolean) => {
+          if (settled) return;
+          settled = true;
+          window.clearTimeout(timer);
+          resolve(enabled);
+        };
+        const timer = window.setTimeout(() => finish(false), 10_000);
+        chrome.runtime.sendMessage(
+          { type: 'GET_AUTOMATION_SETTINGS' },
+          (settings: { automatic_submission_enabled?: boolean } | undefined) =>
+            finish(automaticSubmissionEnabled(settings)),
+        );
+      });
+    }
     // No top-frame gating: for a cross-origin Greenhouse iframe embed, this script's instance
     // running INSIDE that iframe is the only one that ever matches `*.greenhouse.io/*` at all
     // (the parent page is on the company's own domain, which isn't in `matches`). That iframe
@@ -1080,19 +1098,18 @@ export default defineContentScript({
           fillResult.skipped_reasons.push(resumeFetchSkipReason);
         }
 
-        const autoSubmitOn = await getAutoSubmitEnabled();
+        const autoSubmitOn = await serverAutoSubmitEnabled();
         const finalSubmitBtn = findFinalSubmitButton();
         // Resume is "missing" if the blob never reached us (fetch failed upstream) or the adapter
         // reported it could not attach it. Never auto-submit an application with no resume.
         const resumeMissing = !resumeBlob || fillResult.skipped_reasons.some((r) => /^resume:/i.test(r));
-        // Any answer the adapter AI-drafted must be read by the student before it goes out in their
-        // name, so gate on the count the adapter now returns, not just a text match on the reasons.
-        const aiDrafted = fillResult.ai_drafted > 0;
         // Items the adapter flagged as still needing the student (agreements, questions it could not
         // answer, never-fill/sensitive fields, dropdowns left for manual selection, answers left
         // blank). Classified by the pure skippedReasonsNeedReview() so it stays unit-tested. If the
         // fill flagged ANYTHING for review, hold auto-submit and hand back rather than submit unread.
-        const needsReview = skippedReasonsNeedReview(fillResult.skipped_reasons);
+        const needsReview = skippedReasonsNeedReview(fillResult.skipped_reasons, {
+          allowGroundedDrafts: autoSubmitOn,
+        });
 
         // R-030 observation (register: the "cheapest next step"): labels where linkQuestion
         // committed with asksForLink false on an input[type=text] - the population that fills a
@@ -1139,8 +1156,13 @@ export default defineContentScript({
         // can't see the window to back out); going hidden mid-countdown is handled separately.
         const autoSubmitHeld =
           autoSubmitOn &&
-          (!finalSubmitBtn || resumeMissing || aiDrafted || needsReview || hasEmptyRequiredFields() || document.hidden);
+          (!finalSubmitBtn || resumeMissing || needsReview || hasEmptyRequiredFields() || document.hidden);
         reportEvent(false);
+
+        if (autoSubmitOn && !autoSubmitHeld && finalSubmitBtn) {
+          runAutoSubmitCountdown(card, statusEl, yesBtn, noBtn, finalSubmitBtn, fillResult, reportEvent, 'Submitting');
+          return;
+        }
 
         const dashboardQuestions = [
           ...draftedQuestions,
@@ -1401,25 +1423,51 @@ export default defineContentScript({
           // AND focused (never submit into a background or blurred tab), and no required field is now
           // empty. Anything else hands back to the student instead of clicking.
           const tabActive = !document.hidden && document.hasFocus();
-          if (
+          const portalStillSafe =
             target instanceof HTMLElement &&
             target.isConnected &&
             isElementVisible(target) &&
             tabActive &&
-            !hasEmptyRequiredFields()
-          ) {
-            if (statusEl) statusEl.textContent = `${actionLabel}...`;
-            target.click();
-            reportEvent(true);
-          } else {
+            !hasEmptyRequiredFields();
+          if (!portalStillSafe) {
+            cleanupChrome();
+            submitBtn.style.outline = '';
+            submitBtn.style.outlineOffset = '';
             if (statusEl) {
               statusEl.textContent = tabActive
                 ? 'The form changed before submitting. Review and submit it yourself.'
                 : 'The tab was not in focus, so auto-submit was held. Come back and submit it yourself.';
             }
             reportEvent(false);
+            setTimeout(() => card.remove(), 2000);
+            return;
           }
-          setTimeout(() => card.remove(), 2000);
+          // The server is the authority for standing consent. Recheck after the countdown and
+          // immediately before the click so revoking permission in Settings stops an open tab too.
+          if (statusEl) statusEl.textContent = 'Checking your automatic submission permission. You can still cancel.';
+          let permissionSettled = false;
+          const finishPermissionCheck = (settings: { automatic_submission_enabled?: boolean } | undefined) => {
+            if (permissionSettled || cancelled) return;
+            permissionSettled = true;
+            window.clearTimeout(permissionTimer);
+            const stillSafe = target.isConnected && isElementVisible(target) && !document.hidden && document.hasFocus() && !hasEmptyRequiredFields();
+            cleanupChrome();
+            submitBtn.style.outline = '';
+            submitBtn.style.outlineOffset = '';
+            if (settings?.automatic_submission_enabled === true && stillSafe) {
+              if (statusEl) statusEl.textContent = `${actionLabel}...`;
+              target.click();
+              reportEvent(true);
+            } else {
+              if (statusEl) statusEl.textContent = settings?.automatic_submission_enabled === true
+                ? 'The form changed before submitting. Review and submit it yourself.'
+                : 'Automatic submission is off, so the application was held for you.';
+              reportEvent(false);
+            }
+            setTimeout(() => card.remove(), 2000);
+          };
+          const permissionTimer = window.setTimeout(() => finishPermissionCheck(undefined), 10_000);
+          chrome.runtime.sendMessage({ type: 'GET_AUTOMATION_SETTINGS' }, finishPermissionCheck);
           return;
         }
         if (num) num.textContent = String(remaining);

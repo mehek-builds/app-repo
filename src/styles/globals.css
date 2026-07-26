@@ -100,7 +100,7 @@ button:disabled,
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #e2dfda;
+  background: #e8e6e1;
   border-radius: 2px;
 }
 ::-webkit-scrollbar-thumb:hover {

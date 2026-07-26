@@ -162,7 +162,7 @@ function markForReview(el: HTMLElement, note = 'AI draft: review before submitti
   el.style.outlineOffset = '1px';
   const badge = document.createElement('div');
   badge.textContent = note;
-  badge.style.cssText = 'font:600 11px -apple-system,BlinkMacSystemFont,sans-serif;color:#b45309;margin-top:4px;';
+  badge.style.cssText = 'font:500 11px "Hanken Grotesk Variable","Hanken Grotesk",sans-serif;color:#b45309;margin-top:4px;';
   el.insertAdjacentElement('afterend', badge);
 }
 
