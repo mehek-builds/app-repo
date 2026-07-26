@@ -6,7 +6,6 @@ import { SkeletonBar } from './Skeleton';
 import WarningBanner from './WarningBanner';
 import {
   fieldClass,
-  iconButtonClass,
   PendingLabel,
   PopupHeader,
   primaryButtonClass,
@@ -164,20 +163,14 @@ export default function MainScreen({
   return (
     <div className="flex min-h-full animate-fade-in flex-col bg-white">
       <PopupHeader>
-        <button type="button" onClick={onViewAutofillSetup} className={iconButtonClass} aria-label="Application profile" title="Application profile">
-          <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M8 6h8M8 10h8M8 14h5m4 7H7a2 2 0 01-2-2V5a2 2 0 012-2h7l5 5v11a2 2 0 01-2 2z" />
-          </svg>
+        <button type="button" onClick={onViewAutofillSetup} className="min-h-11 px-1.5 text-xs font-medium text-gray-600 hover:text-gray-950">
+          Profile
         </button>
-        <button type="button" onClick={onViewTracking} className={iconButtonClass} aria-label="Outreach tracker" title="Outreach tracker">
-          <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M5 19V9m7 10V5m7 14v-7" />
-          </svg>
+        <button type="button" onClick={onViewTracking} className="min-h-11 px-1.5 text-xs font-medium text-gray-600 hover:text-gray-950">
+          Activity
         </button>
-        <button type="button" onClick={onLogout} className={iconButtonClass} aria-label="Sign out" title="Sign out">
-          <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M14 8l4 4m0 0l-4 4m4-4H8m4 8H6a2 2 0 01-2-2V6a2 2 0 012-2h6" />
-          </svg>
+        <button type="button" onClick={onLogout} className="min-h-11 px-1.5 text-xs font-medium text-gray-600 hover:text-gray-950">
+          Exit
         </button>
       </PopupHeader>
 

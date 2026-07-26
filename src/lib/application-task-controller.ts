@@ -93,7 +93,7 @@ export function createResumeReviewPrompt(options: {
   const attach = document.createElement('button');
   attach.type = 'button';
   attach.textContent = 'Attach and fill';
-  attach.style.cssText = 'flex:1;background:#4f46e5;color:white;border:none;border-radius:8px;padding:8px 6px;font-size:11px;font-weight:600;cursor:pointer;line-height:1.4;';
+  attach.style.cssText = 'flex:1;background:#3157d5;color:white;border:none;border-radius:8px;padding:8px 6px;font-size:11px;font-weight:600;cursor:pointer;line-height:1.4;';
   const cancel = document.createElement('button');
   cancel.type = 'button';
   cancel.textContent = 'Not now';
