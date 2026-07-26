@@ -33,7 +33,8 @@ import {
 } from '../lib/application-task-controller';
 import { mountThinkingOrb } from '../lib/thinking-orb';
 import { derivePortalPassword, portalKeyForHost, currentSaltFingerprint } from '../lib/portal-password';
-import { automaticSubmissionEnabled } from '../lib/auto-submit-consent';
+import { automaticCaptchaEnabled, automaticSubmissionEnabled } from '../lib/auto-submit-consent';
+import { hasVisibleUnresolvedCaptcha, waitForVisibleCaptchaResolution } from '../lib/captcha-detection';
 
 export default defineContentScript({
   matches: [
@@ -55,20 +56,26 @@ export default defineContentScript({
   allFrames: true,
   runAt: 'document_idle',
   main() {
-    async function serverAutoSubmitEnabled(): Promise<boolean> {
+    async function serverAutomationSettings(): Promise<{
+      automatic_submission_enabled: boolean;
+      automatic_captcha_enabled: boolean;
+    }> {
       return new Promise((resolve) => {
         let settled = false;
-        const finish = (enabled: boolean) => {
+        const finish = (settings: unknown) => {
           if (settled) return;
           settled = true;
           window.clearTimeout(timer);
-          resolve(enabled);
+          resolve({
+            automatic_submission_enabled: automaticSubmissionEnabled(settings),
+            automatic_captcha_enabled: automaticCaptchaEnabled(settings),
+          });
         };
-        const timer = window.setTimeout(() => finish(false), 10_000);
+        const timer = window.setTimeout(() => finish(undefined), 10_000);
         chrome.runtime.sendMessage(
           { type: 'GET_AUTOMATION_SETTINGS' },
-          (settings: { automatic_submission_enabled?: boolean } | undefined) =>
-            finish(automaticSubmissionEnabled(settings)),
+          (settings: { automatic_submission_enabled?: boolean; automatic_captcha_enabled?: boolean } | undefined) =>
+            finish(settings),
         );
       });
     }
@@ -1065,7 +1072,8 @@ export default defineContentScript({
           fillResult.skipped_reasons.push(resumeFetchSkipReason);
         }
 
-        const autoSubmitOn = await serverAutoSubmitEnabled();
+        const automationSettings = await serverAutomationSettings();
+        const autoSubmitOn = automationSettings.automatic_submission_enabled;
         const finalSubmitBtn = findFinalSubmitButton();
         // Resume is "missing" if the blob never reached us (fetch failed upstream) or the adapter
         // reported it could not attach it. Never auto-submit an application with no resume.
@@ -1101,6 +1109,25 @@ export default defineContentScript({
           });
         };
 
+        const dashboardQuestions = [
+          ...draftedQuestions,
+          ...selectNeedsYouReasons(fillResult.skipped_reasons, 20).map((reason, index) => ({
+            id: `required-${index + 1}`,
+            question: reason,
+            answer: '',
+            kind: 'required' as const,
+            required: true,
+          })),
+        ];
+
+        const reviewPayload = {
+          applicationId: resume.resume_id,
+          atsName: fillResult.ats_name,
+          portalUrl: window.location.href,
+          questions: dashboardQuestions,
+          skippedReasons: fillResult.skipped_reasons,
+        };
+
         // Same dismissal check as after the generation await, for the stretch the fill itself
         // takes (potentially multiple healthy request waves on an essay-heavy form). A dismissal
         // that lands while the fill is running must not be followed by an auto-submit countdown:
@@ -1110,6 +1137,39 @@ export default defineContentScript({
         if (!card.isConnected) {
           reportEvent(false);
           return;
+        }
+
+        // A solved widget often stays mounted, so the provider response token is checked by the
+        // pure detector before this branch. An unresolved visible CAPTCHA is never clicked in the
+        // local tab. Without separate CAPTCHA consent we stop in place. With both standing
+        // permissions, Litos waits for the student to complete the challenge in this tab, refreshes
+        // server consent, re-runs every final-submit guard, and only then starts the normal countdown.
+        if (hasVisibleUnresolvedCaptcha(document)) {
+          if (!automationSettings.automatic_captcha_enabled) {
+            reportEvent(false);
+            if (statusEl) statusEl.textContent = 'Complete the CAPTCHA in this tab. Litos stopped because resume-after-CAPTCHA is off.';
+            return;
+          }
+          if (autoSubmitOn) {
+            if (statusEl) statusEl.textContent = 'Complete the CAPTCHA in this tab. Litos will resume automatically after it is verified.';
+            const captchaResolved = await waitForVisibleCaptchaResolution(document);
+            if (!captchaResolved) {
+              reportEvent(false);
+              if (statusEl) statusEl.textContent = 'The CAPTCHA was not completed within 10 minutes. Nothing was submitted.';
+              return;
+            }
+            const refreshedSettings = await serverAutomationSettings();
+            const canResume = refreshedSettings.automatic_submission_enabled
+              && refreshedSettings.automatic_captcha_enabled;
+            if (!canResume || !card.isConnected || !finalSubmitBtn?.isConnected
+              || resumeMissing || needsReview || hasEmptyRequiredFields() || document.hidden) {
+              reportEvent(false);
+              if (statusEl) statusEl.textContent = 'CAPTCHA completed. Litos paused because permission changed or the form still needs review.';
+              return;
+            }
+            runAutoSubmitCountdown(card, statusEl, yesBtn, noBtn, finalSubmitBtn, fillResult, reportEvent, 'Submitting');
+            return;
+          }
         }
 
         // Auto-submit is opt-in (AutofillSetupScreen toggle, off by default) AND only fires when it
@@ -1130,17 +1190,6 @@ export default defineContentScript({
           runAutoSubmitCountdown(card, statusEl, yesBtn, noBtn, finalSubmitBtn, fillResult, reportEvent, 'Submitting');
           return;
         }
-
-        const dashboardQuestions = [
-          ...draftedQuestions,
-          ...selectNeedsYouReasons(fillResult.skipped_reasons, 20).map((reason, index) => ({
-            id: `required-${index + 1}`,
-            question: reason,
-            answer: '',
-            kind: 'required' as const,
-            required: true,
-          })),
-        ];
 
         submitFromDashboard = async (approvedQuestions) => {
           if (!finalSubmitBtn || !finalSubmitBtn.isConnected) {
@@ -1172,13 +1221,7 @@ export default defineContentScript({
 
         chrome.runtime.sendMessage({
           type: 'APPLICATION_REVIEW_READY',
-          payload: {
-            applicationId: resume.resume_id,
-            atsName: fillResult.ats_name,
-            portalUrl: window.location.href,
-            questions: dashboardQuestions,
-            skippedReasons: fillResult.skipped_reasons,
-          },
+          payload: reviewPayload,
         }, (response: { ok?: boolean; error?: string } | undefined) => {
           if (!statusEl) return;
           statusEl.textContent = response?.ok

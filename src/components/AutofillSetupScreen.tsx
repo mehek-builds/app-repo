@@ -155,6 +155,7 @@ export default function AutofillSetupScreen({ token, profile, onBack }: Autofill
   const [eeoExpanded, setEeoExpanded] = useState(false);
   const [autoSubmit, setAutoSubmit] = useState(false);
   const [automaticVerification, setAutomaticVerification] = useState(false);
+  const [automaticCaptcha, setAutomaticCaptcha] = useState(false);
   const [automationSettingsLoaded, setAutomationSettingsLoaded] = useState(false);
 
   useEffect(() => {
@@ -178,10 +179,12 @@ export default function AutofillSetupScreen({ token, profile, onBack }: Autofill
         if (automation) {
           setAutoSubmit(automation.automatic_submission_enabled);
           setAutomaticVerification(automation.automatic_verification_enabled);
+          setAutomaticCaptcha(automation.automatic_captcha_enabled);
           setAutomationSettingsLoaded(true);
         } else {
           setAutoSubmit(false);
           setAutomaticVerification(false);
+          setAutomaticCaptcha(false);
           setError('Could not load your current automation permissions. Reopen setup before changing them.');
         }
       } catch (err) {
@@ -221,6 +224,7 @@ export default function AutofillSetupScreen({ token, profile, onBack }: Autofill
       await putAutomationSettings(token, {
         automatic_submission_enabled: autoSubmit,
         automatic_verification_enabled: automaticVerification,
+        automatic_captcha_enabled: automaticCaptcha,
       });
       await setAutoSubmitEnabled(autoSubmit);
       setStep('done');
@@ -589,8 +593,9 @@ export default function AutofillSetupScreen({ token, profile, onBack }: Autofill
                   <p className="text-xs font-medium text-gray-700">Automatically submit eligible applications</p>
                   <p className="mt-1 text-xs leading-5 text-gray-600">
                     Litos may submit applications you start after a cancelable countdown. It still
-                    pauses for missing or conflicting facts, sensitive attestations, CAPTCHA, and
-                    unsupported portal steps.
+                    pauses for missing or conflicting facts, sensitive attestations, unsupported
+                    portal steps, and CAPTCHAs. A separate setting can let Litos resume after you
+                    complete a challenge in the current tab.
                   </p>
                 </div>
                 <button
@@ -622,6 +627,31 @@ export default function AutofillSetupScreen({ token, profile, onBack }: Autofill
                 <div><p className="text-xs font-medium text-gray-700">Use application verification codes</p><p className="mt-1 text-xs leading-5 text-gray-600">Litos may use connected Gmail or Outlook to find a code for an active application. Codes are not saved.</p></div>
                 <button type="button" role="switch" aria-checked={automaticVerification} aria-label="Use application verification codes" disabled={!automationSettingsLoaded} onClick={() => setAutomaticVerification((value) => !value)} className="relative flex h-11 w-12 flex-shrink-0 items-center rounded-full disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2">
                   <span className={`relative block h-7 w-12 rounded-full transition-colors ${automaticVerification ? 'bg-brand-600' : 'bg-gray-200'}`}><span className={`absolute top-0.5 h-6 w-6 rounded-full border border-gray-200 bg-white transition-transform ${automaticVerification ? 'translate-x-5' : 'translate-x-0.5'}`} /></span>
+                </button>
+              </div>
+            </div>
+
+            <div className="border-b border-gray-200 py-3">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs font-medium text-gray-700">Resume after I solve a CAPTCHA</p>
+                  <p className="mt-1 text-xs leading-5 text-gray-600">
+                    Litos never clicks or solves the challenge. It waits in your current tab and
+                    resumes only after the portal provides a completed response. This starts off.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={automaticCaptcha}
+                  aria-label="Resume after I solve a CAPTCHA"
+                  disabled={!automationSettingsLoaded}
+                  onClick={() => setAutomaticCaptcha((value) => !value)}
+                  className="relative flex h-11 w-12 flex-shrink-0 items-center rounded-full disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2"
+                >
+                  <span className={`relative block h-7 w-12 rounded-full transition-colors ${automaticCaptcha ? 'bg-brand-600' : 'bg-gray-200'}`}>
+                    <span className={`absolute top-0.5 h-6 w-6 rounded-full border border-gray-200 bg-white transition-transform ${automaticCaptcha ? 'translate-x-5' : 'translate-x-0.5'}`} />
+                  </span>
                 </button>
               </div>
             </div>

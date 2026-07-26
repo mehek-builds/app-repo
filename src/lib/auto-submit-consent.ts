@@ -3,6 +3,11 @@ export function automaticSubmissionEnabled(value: unknown): boolean {
   return (value as { automatic_submission_enabled?: unknown }).automatic_submission_enabled === true;
 }
 
+export function automaticCaptchaEnabled(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false;
+  return (value as { automatic_captcha_enabled?: unknown }).automatic_captcha_enabled === true;
+}
+
 export function groundedDraftAnswer(value: unknown): string | null {
   if (!value || typeof value !== 'object') return null;
   const response = value as { answer?: unknown; grounded?: unknown };

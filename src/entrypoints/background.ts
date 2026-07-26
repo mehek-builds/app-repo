@@ -8,7 +8,15 @@ import { overloadWaitMs, overloadBudgetRemains, RESUME_OVERLOAD_BUDGET_MS } from
 import { parseAshbyPostingRef, selectPostingCompensation, type PostingCompensation } from '../lib/adapters/salary';
 import { litosClientHeaders, PRODUCT_NAME, type ProductMeta } from '../lib/product';
 import type { GeneratedResume } from '../lib/types';
-import { automaticSubmissionEnabled, groundedDraftAnswer } from '../lib/auto-submit-consent';
+import { automaticCaptchaEnabled, automaticSubmissionEnabled, groundedDraftAnswer } from '../lib/auto-submit-consent';
+
+type ApplicationReviewPayload = {
+  applicationId: string;
+  atsName: string;
+  portalUrl: string;
+  questions: Array<{ id: string; question: string; answer: string; kind: 'essay' | 'required'; required: boolean }>;
+  skippedReasons: string[];
+};
 
 // Latched off once the backend reports onboarding complete. Service-worker memory is fine for
 // this: the worst case on a restart is one wasted 403, which re-latches it immediately.
@@ -63,6 +71,101 @@ function timeoutFetch(input: string, init: RequestInit = {}, ms = FETCH_TIMEOUT_
     for (const [name, value] of Object.entries(litosClientHeaders())) headers.set(name, value);
   }
   return fetch(input, { ...init, headers, signal: AbortSignal.timeout(ms) });
+}
+
+async function responseError(res: Response, fallback: string): Promise<string> {
+  const body = await res.json().catch(() => null) as { error?: unknown } | null;
+  return typeof body?.error === 'string' && body.error.trim() ? body.error : `${fallback} (${res.status})`;
+}
+
+type SubmissionReviewResponse = {
+  review?: { status?: unknown; submission_error?: unknown; attention_reason?: unknown };
+};
+
+function secureSubmissionResult(body: SubmissionReviewResponse | null): {
+  terminal: boolean;
+  ok: boolean;
+  stopped: boolean;
+  status: string;
+  message?: string;
+  error?: string;
+} {
+  const status = typeof body?.review?.status === 'string' ? body.review.status : 'submit_requested';
+  if (status === 'failed' || status === 'needs_attention' || status === 'ready_for_final_approval') {
+    const detail = body?.review?.submission_error ?? body?.review?.attention_reason;
+    return {
+      terminal: true,
+      ok: false,
+      stopped: true,
+      status,
+      error: typeof detail === 'string' && detail.trim() ? detail : 'Secure submission stopped before anything was sent.',
+    };
+  }
+  if (status === 'submitted') {
+    return { terminal: true, ok: true, stopped: false, status, message: 'Application submitted securely.' };
+  }
+  return { terminal: false, ok: true, stopped: false, status, message: 'Secure submission is still in progress. Do not submit again.' };
+}
+
+async function pollSecureApplicationSubmit(token: string, applicationId: string) {
+  const deadline = Date.now() + 90_000;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    let statusRes: Response;
+    try {
+      statusRes = await timeoutFetch(`${API_BASE}/applications/${applicationId}/submission`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+    } catch {
+      return { ok: true, stopped: false, status: 'status_unknown', message: 'Secure submission was accepted, but its current status could not be confirmed. Do not submit again.' };
+    }
+    if (!statusRes.ok) {
+      return { ok: true, stopped: false, status: 'status_unknown', message: 'Secure submission was accepted, but its current status could not be confirmed. Do not submit again.' };
+    }
+    const result = secureSubmissionResult(await statusRes.json().catch(() => null) as SubmissionReviewResponse | null);
+    if (result.terminal) return result;
+  }
+  return { ok: true, stopped: false, status: 'status_unknown', message: 'Secure submission is still processing. Do not submit again.' };
+}
+
+async function requestSecureApplicationSubmit(
+  token: string,
+  payload: ApplicationReviewPayload,
+): Promise<{ ok: boolean; stopped: boolean; status?: string; message?: string; error?: string }> {
+  try {
+    const reviewRes = await timeoutFetch(`${API_BASE}/applications/${payload.applicationId}/review`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        ats_name: payload.atsName,
+        portal_url: payload.portalUrl,
+        questions: payload.questions,
+        skipped_reasons: payload.skippedReasons,
+      }),
+    });
+    if (!reviewRes.ok) {
+      return { ok: false, stopped: true, error: await responseError(reviewRes, 'Could not prepare the secure submission') };
+    }
+
+    const submitRes = await timeoutFetch(`${API_BASE}/applications/${payload.applicationId}/submit-request`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ questions: payload.questions }),
+    });
+    if (!submitRes.ok) {
+      return { ok: false, stopped: true, error: await responseError(submitRes, 'Secure submission stopped') };
+    }
+
+    const accepted = secureSubmissionResult(await submitRes.json().catch(() => null) as SubmissionReviewResponse | null);
+    if (accepted.terminal) return accepted;
+    return pollSecureApplicationSubmit(token, payload.applicationId);
+  } catch (error) {
+    return {
+      ok: false,
+      stopped: true,
+      error: error instanceof Error ? error.message : 'Secure submission stopped before anything was sent.',
+    };
+  }
 }
 
 // ─── Transient model-capacity retry (live QA 2026-07-16, R-003) ──────────────
@@ -401,7 +504,7 @@ export default defineBackground(() => {
       case 'GET_AUTOMATION_SETTINGS': {
         getStoredToken().then(async (token) => {
           if (!token) {
-            sendResponse({ automatic_submission_enabled: false, automatic_verification_enabled: false });
+            sendResponse({ automatic_submission_enabled: false, automatic_verification_enabled: false, automatic_captcha_enabled: false });
             return;
           }
           try {
@@ -409,16 +512,17 @@ export default defineBackground(() => {
               headers: { Authorization: `Bearer ${token}` },
             });
             if (!res.ok) throw new Error(`settings failed (${res.status})`);
-            const data: { automatic_submission_enabled?: boolean; automatic_verification_enabled?: boolean } = await res.json();
+            const data: { automatic_submission_enabled?: boolean; automatic_verification_enabled?: boolean; automatic_captcha_enabled?: boolean } = await res.json();
             const automaticSubmission = automaticSubmissionEnabled(data);
             await setAutoSubmitEnabled(automaticSubmission);
             sendResponse({
               automatic_submission_enabled: automaticSubmission,
               automatic_verification_enabled: data.automatic_verification_enabled === true,
+              automatic_captcha_enabled: automaticCaptchaEnabled(data),
             });
           } catch {
             // A failed revocation check is a hold, never permission to submit from stale storage.
-            sendResponse({ automatic_submission_enabled: false, automatic_verification_enabled: false });
+            sendResponse({ automatic_submission_enabled: false, automatic_verification_enabled: false, automatic_captcha_enabled: false });
           }
         });
         return true;
@@ -568,13 +672,7 @@ export default defineBackground(() => {
             sendResponse({ error: 'The application tab is no longer available.' });
             return;
           }
-          const payload = message.payload as {
-            applicationId: string;
-            atsName: string;
-            portalUrl: string;
-            questions: Array<{ id: string; question: string; answer: string; kind: 'essay' | 'required'; required: boolean }>;
-            skippedReasons: string[];
-          };
+          const payload = message.payload as ApplicationReviewPayload;
           try {
             const res = await timeoutFetch(`${API_BASE}/applications/${payload.applicationId}/review`, {
               method: 'PUT',
@@ -600,6 +698,18 @@ export default defineBackground(() => {
           } catch (error) {
             sendResponse({ error: error instanceof Error ? error.message : 'Could not prepare dashboard review.' });
           }
+        });
+        return true;
+      }
+
+      case 'APPLICATION_SECURE_SUBMIT_REQUEST': {
+        getStoredToken().then(async (token) => {
+          if (!token) {
+            sendResponse({ ok: false, stopped: true, error: 'Sign in to request secure submission.' });
+            return;
+          }
+          const result = await requestSecureApplicationSubmit(token, message.payload as ApplicationReviewPayload);
+          sendResponse(result);
         });
         return true;
       }

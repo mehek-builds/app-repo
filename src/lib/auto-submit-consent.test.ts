@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { automaticSubmissionEnabled, groundedDraftAnswer } from './auto-submit-consent';
+import { automaticCaptchaEnabled, automaticSubmissionEnabled, groundedDraftAnswer } from './auto-submit-consent';
 
 describe('automatic submission consent', () => {
   it('fails closed for missing, malformed, and disabled responses', () => {
@@ -11,6 +11,16 @@ describe('automatic submission consent', () => {
 
   it('accepts only an explicit server boolean', () => {
     expect(automaticSubmissionEnabled({ automatic_submission_enabled: true })).toBe(true);
+  });
+});
+
+describe('automatic CAPTCHA consent', () => {
+  it('fails closed unless the server returns an explicit true boolean', () => {
+    expect(automaticCaptchaEnabled(undefined)).toBe(false);
+    expect(automaticCaptchaEnabled({})).toBe(false);
+    expect(automaticCaptchaEnabled({ automatic_captcha_enabled: 'true' })).toBe(false);
+    expect(automaticCaptchaEnabled({ automatic_captcha_enabled: false })).toBe(false);
+    expect(automaticCaptchaEnabled({ automatic_captcha_enabled: true })).toBe(true);
   });
 });
 
