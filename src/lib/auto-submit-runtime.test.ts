@@ -12,7 +12,11 @@ describe('automatic submission runtime wiring', () => {
   });
 
   it('keeps cancellation listeners active during the final permission request', () => {
-    const finalCheck = content.slice(content.indexOf("if (statusEl) statusEl.textContent = 'Checking your automatic submission permission"));
+    // Anchored on the permission re-check, not on its wording. This used to grep the copy
+    // itself, so a copy edit failed a test about listener ordering.
+    const anchor = content.indexOf("if (statusEl) statusEl.textContent = 'Checking your settings");
+    expect(anchor).toBeGreaterThan(0);
+    const finalCheck = content.slice(anchor);
     const callbackAt = finalCheck.indexOf('const finishPermissionCheck');
     expect(callbackAt).toBeGreaterThan(0);
     expect(finalCheck.slice(0, callbackAt)).not.toContain('cleanupChrome()');

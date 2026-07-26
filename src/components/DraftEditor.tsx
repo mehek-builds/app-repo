@@ -11,7 +11,7 @@ import {
   secondaryButtonClass,
   StatusDot,
   textAreaClass,
-  textButtonClass,
+  quietButtonClass,
   fieldClass,
 } from './ui';
 
@@ -70,7 +70,6 @@ export default function DraftEditor({
       .finally(() => setLoading(false));
   }, []);
 
-  const wordCount = body.trim().split(/\s+/).filter(Boolean).length;
 
   const handleCopy = async () => {
     try {
@@ -169,7 +168,6 @@ export default function DraftEditor({
             <div className="flex flex-1 flex-col gap-1.5">
               <div className="flex items-center justify-between gap-3">
                 <label htmlFor="draft-body" className="text-sm font-medium text-gray-800">Message</label>
-                <span className="text-xs tabular-nums text-gray-600">{wordCount} words</span>
               </div>
               <textarea
                 id="draft-body"
@@ -193,15 +191,15 @@ export default function DraftEditor({
               {gmailOpened ? 'Opened Gmail' : 'Open in Gmail'}
             </button>
           </div>
-          <div className="mt-1 flex items-center justify-between gap-2">
-            <button type="button" onClick={onDraftAnother} className={textButtonClass}>Draft another</button>
+          <div className="mt-2 flex items-center justify-between gap-2 border-t border-gray-200 pt-2">
+            <button type="button" onClick={onDraftAnother} className={quietButtonClass}>Write another</button>
             <button
               type="button"
               onClick={handleMarkSent}
               disabled={markingSent || markedSent}
-              className={textButtonClass}
+              className={quietButtonClass}
             >
-              {markingSent ? <PendingLabel>Saving…</PendingLabel> : markedSent ? 'Marked sent' : 'Mark as sent'}
+              {markingSent ? <PendingLabel>Saving…</PendingLabel> : markedSent ? 'Marked as sent' : 'I sent it'}
             </button>
           </div>
           {(copied || gmailOpened) && (

@@ -9,7 +9,21 @@ import {
 import { isLinkedInApplicationPage, extractLinkedInJdText, fillLinkedInApplication } from '../lib/adapters/linkedin';
 import { isLikelyApplicationForm, extractGenericJdText, getGenericJobDetails, fillGenericApplication, drainR030CandidateLabels } from '../lib/adapters/generic';
 import { getPortalAccounts, recordPortalAccount } from '../lib/storage';
-import { COLOR, FONT, RADIUS } from '../styles/tokens';
+import { COLOR, FONT, RADIUS , OVERLAY, DISMISS_MS } from '../styles/tokens';
+
+/* Status icons drawn as SVG.
+ *
+ * These were `iconEl.textContent = '✓' / '!' / '?'`, so they inherited the employer page's
+ * font stack and rendered as three different glyph designs across macOS, Windows and Linux,
+ * inside a 20px circle we drew ourselves. */
+function setStatusIcon(el: HTMLElement, kind: 'ok' | 'problem' | 'unknown'): void {
+  const path = kind === 'ok'
+    ? '<path d="M4 8.5l3 3 5-6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>'
+    : kind === 'problem'
+      ? '<path d="M8 4v5m0 3v.01" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>'
+      : '<path d="M6 6a2 2 0 113 1.7c-.6.4-1 .8-1 1.5m0 2.8v.01" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>';
+  el.innerHTML = `<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">${path}</svg>`;
+}
 
 /** Hostnames where the student pressed "Never ask on this site". */
 const MUTED_HOSTS_KEY = 'litos-muted-hosts';
@@ -102,7 +116,7 @@ export default defineContentScript({
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       if (message?.type !== 'SUBMIT_FROM_DASHBOARD') return false;
       if (!submitFromDashboard) {
-        sendResponse({ ok: false, error: 'This portal is no longer ready for dashboard submission.' });
+        sendResponse({ ok: false, error: 'This page is not ready to send any more. Open it and check it.' });
         return false;
       }
       submitFromDashboard(message.payload?.questions ?? []).then(sendResponse);
@@ -356,7 +370,7 @@ export default defineContentScript({
     ): void {
       if (!statusEl) return;
       const head: string[] = [`Filled ${fillResult.fields_filled} field${fillResult.fields_filled === 1 ? '' : 's'}.`];
-      if (opts.resumeMissing) head.push('Resume not attached. Add it yourself.');
+      if (opts.resumeMissing) head.push('Litos could not attach your resume. Add it yourself before you send.');
       if (opts.autoSubmitHeld) head.push('Waiting on you. Finish the items below, then send.');
       // Keep the reasons that actually need a human: resume, agreements, unmatched/never-fill,
       // required blanks. Selection + ordering live in the pure selectNeedsYouReasons (autosubmit-
@@ -419,7 +433,7 @@ export default defineContentScript({
             const host = document.createElement('div');
             host.id = 'litos-validation-card';
             host.style.cssText =
-              'position:fixed;right:16px;bottom:16px;z-index:2147483646;max-width:340px;' +
+              `position:fixed;right:${OVERLAY.right};bottom:${OVERLAY.bottom};z-index:${OVERLAY.z};max-width:340px;` +
               `background:#fff;border:1px solid ${COLOR.border};border-radius:${RADIUS.card};box-shadow:0 2px 10px rgba(18,18,15,.08);` +
               `padding:12px 14px;font:13px/1.45 ${FONT.sans};color:${COLOR.ink};`;
             document.documentElement.appendChild(host);
@@ -541,7 +555,7 @@ export default defineContentScript({
         stack = document.createElement('div');
         stack.id = 'litos-card-stack';
         stack.style.cssText =
-          'position:fixed;bottom:72px;right:20px;z-index:2147483647;display:flex;flex-direction:column;align-items:flex-end;gap:12px;';
+          `position:fixed;bottom:${OVERLAY.bottom};right:${OVERLAY.right};z-index:${OVERLAY.z};display:flex;flex-direction:column;align-items:flex-end;gap:${OVERLAY.gap};`;
         document.body.appendChild(stack);
       }
       return stack;
@@ -552,10 +566,10 @@ export default defineContentScript({
         <div style="
           position: relative;
           background: white;
-          border: 1px solid #e8e6e1;
+          border: 1px solid ${COLOR.border};
           border-radius: ${RADIUS.card};
           padding: 16px 16px 14px;
-          font-family: ${FONT.sans};
+          font-family: ${FONT.sans}; color-scheme: only light;
           font-size: 13px;
           line-height: 1.4;
           box-shadow: none;
@@ -566,20 +580,20 @@ export default defineContentScript({
           <button id="wp-close" style="position:absolute;top:10px;right:12px;background:none;border:none;cursor:pointer;font-size:17px;opacity:0.4;color:#333;padding:0;line-height:1;">×</button>
           <div style="display:flex;align-items:flex-start;gap:9px;margin-bottom:12px;line-height:1.4;">
             <div>
-              <div style="font-weight:500;font-size:13px;color:#12120f;line-height:1.4;">${escapeHtml(headline)}</div>
-              <div style="font-size:12px;color:#6b6a64;margin-top:2px;word-break:break-word;line-height:1.4;">${escapeHtml(subline)}</div>
+              <div style="font-weight:500;font-size:13px;color:${COLOR.ink};line-height:1.4;">${escapeHtml(headline)}</div>
+              <div style="font-size:12px;color:${COLOR.muted};margin-top:2px;word-break:break-word;line-height:1.4;">${escapeHtml(subline)}</div>
             </div>
           </div>
           <div style="display:flex;gap:8px;">
             <button id="wp-yes" style="
-              flex:1;background:#6b84e8;color:white;border:none;border-radius:${RADIUS.control};
+              flex:1;background:${COLOR.brand};color:white;border:none;border-radius:${RADIUS.control};
               padding:9px 0;font-size:12px;font-weight:500;cursor:pointer;
-              font-family:${FONT.sans};
+              font-family:${FONT.sans};color-scheme:only light;
             ">Yes, find people</button>
             <button id="wp-no" style="
-              flex:1;background:#faf9f7;color:#12120f;border:none;border-radius:${RADIUS.control};
+              flex:1;background:${COLOR.surfaceAlt};color:${COLOR.ink};border:none;border-radius:${RADIUS.control};
               padding:9px 0;font-size:12px;font-weight:500;cursor:pointer;
-              font-family:${FONT.sans};
+              font-family:${FONT.sans};color-scheme:only light;
             ">No thanks</button>
           </div>
           <!-- A forced yes/no on someone's own application page left no way to stop being
@@ -587,7 +601,7 @@ export default defineContentScript({
           <button id="wp-never" style="
             margin-top:10px;background:none;border:none;padding:0;cursor:pointer;
             font-size:11px;color:${COLOR.faint};text-decoration:underline;text-underline-offset:2px;
-            font-family:${FONT.sans};
+            font-family:${FONT.sans};color-scheme:only light;
           ">Never ask on this site</button>
         </div>
         <style>
@@ -623,13 +637,13 @@ export default defineContentScript({
         inner.innerHTML = `
           <div style="display:flex;align-items:center;gap:10px;">
             <div>
-              <div style="font-weight:500;font-size:13px;color:#12120f;">Finding people to email</div>
-              <div style="font-size:12px;color:#6b6a64;margin-top:2px;">Click the Litos icon in a moment to see them</div>
+              <div style="font-weight:500;font-size:13px;color:${COLOR.ink};">Finding people to email</div>
+              <div style="font-size:12px;color:${COLOR.muted};margin-top:2px;">They will be in Litos in a moment</div>
             </div>
           </div>
         `;
         chrome.runtime.sendMessage({ type: 'JOB_APPROVED', payload: { title, company, url } });
-        setTimeout(dismiss, 3500);
+        setTimeout(dismiss, DISMISS_MS.confirmation);
       });
     }
 
@@ -653,7 +667,7 @@ export default defineContentScript({
       const card = document.createElement('div');
       card.id = 'litos-action-card';
       card.innerHTML = cardShell(
-        'Want emails to people here?',
+        'Want to email someone here?',
         `${title} at ${company}`
       );
       getCardStack().appendChild(card);
@@ -670,14 +684,14 @@ export default defineContentScript({
       const card = document.createElement('div');
       card.id = 'litos-submit-card';
       card.innerHTML = `
-        <div style="position:relative;background:white;border:1px solid #e8e6e1;border-radius:${RADIUS.card};padding:16px;font-family:${FONT.sans};font-size:13px;line-height:1.4;box-shadow:none;width:272px;box-sizing:border-box;animation:wp-slide-in 0.25s ease-out;">
+        <div style="position:relative;background:white;border:1px solid ${COLOR.border};border-radius:${RADIUS.card};padding:16px;font-family:${FONT.sans};color-scheme:only light;font-size:13px;line-height:1.4;box-shadow:none;width:272px;box-sizing:border-box;animation:wp-slide-in 0.25s ease-out;">
           <button id="wp-submit-close" aria-label="Close Litos submission status" style="position:absolute;top:10px;right:12px;background:none;border:none;cursor:pointer;font-size:17px;opacity:0.4;color:#333;padding:0;line-height:1;">×</button>
           <div style="display:flex;align-items:flex-start;gap:9px;line-height:1.4;">
             <span id="wp-submit-icon" style="font-size:20px;flex-shrink:0;line-height:1.4;"><canvas id="wp-submit-orb"></canvas></span>
             <div style="line-height:1.4;">
-              <div id="wp-submit-title" style="font-weight:500;font-size:13px;color:#12120f;line-height:1.4;">Sending</div>
-              <div style="font-size:12px;color:#6b6a64;margin-top:2px;word-break:break-word;line-height:1.4;">${escapeHtml(title)} at ${escapeHtml(company)}</div>
-              <div id="wp-submit-status" role="status" aria-live="polite" style="font-size:11px;color:#6b6a64;margin-top:8px;line-height:1.4;">${submissionProgress(0)}</div>
+              <div id="wp-submit-title" style="font-weight:500;font-size:13px;color:${COLOR.ink};line-height:1.4;">Sending</div>
+              <div style="font-size:12px;color:${COLOR.muted};margin-top:2px;word-break:break-word;line-height:1.4;">${escapeHtml(title)} at ${escapeHtml(company)}</div>
+              <div id="wp-submit-status" role="status" aria-live="polite" style="font-size:11px;color:${COLOR.muted};margin-top:8px;line-height:1.4;">${submissionProgress(0)}</div>
             </div>
           </div>
         </div>
@@ -722,19 +736,19 @@ export default defineContentScript({
         onStop: stopResources,
         onOutcome: (outcome) => {
         if (outcome.kind === 'failure') {
-          stopSubmitOrbAnd(() => { if (iconEl) iconEl.textContent = '!'; });
+          stopSubmitOrbAnd(() => { if (iconEl) setStatusIcon(iconEl, 'problem'); });
           if (titleEl) titleEl.textContent = 'Not sent';
           if (statusEl) statusEl.textContent = outcome.message;
         } else {
-          stopSubmitOrbAnd(() => { if (iconEl) iconEl.textContent = '✓'; });
+          stopSubmitOrbAnd(() => { if (iconEl) setStatusIcon(iconEl, 'ok'); });
           if (titleEl) titleEl.textContent = 'Sent';
           if (statusEl) statusEl.textContent = 'The company confirmed they got it.';
         }
         },
         onUnknown: () => {
-          stopSubmitOrbAnd(() => { if (iconEl) iconEl.textContent = '?'; });
+          stopSubmitOrbAnd(() => { if (iconEl) setStatusIcon(iconEl, 'unknown'); });
           if (titleEl) titleEl.textContent = 'Not sure it went through';
-          if (statusEl) statusEl.textContent = submissionProgress(60);
+          if (statusEl) statusEl.textContent = 'Open the tab and check before you send it again.';
         },
       });
       timer = setInterval(() => {
@@ -747,7 +761,7 @@ export default defineContentScript({
         // Native browser validation can reject a click before any request leaves the page. Do not
         // tell the student Litos is waiting on the company when the form is visibly incomplete.
         if (!outcomeController.isFinished() && elapsedSeconds >= 1 && hasEmptyRequiredFields()) {
-          stopSubmitOrbAnd(() => { if (iconEl) iconEl.textContent = '!'; });
+          stopSubmitOrbAnd(() => { if (iconEl) setStatusIcon(iconEl, 'problem'); });
           if (titleEl) titleEl.textContent = 'Needs you';
           if (statusEl) statusEl.textContent = 'The form did not go through. Fill in what is missing, then try again.';
           return;
@@ -774,8 +788,8 @@ export default defineContentScript({
       return `
         <div style="
           position: relative;
-          background: white; border: 1px solid #e8e6e1; border-radius: ${RADIUS.card};
-          padding: 16px 16px 14px; font-family: ${FONT.sans};
+          background: white; border: 1px solid ${COLOR.border}; border-radius: ${RADIUS.card};
+          padding: 16px 16px 14px; font-family: ${FONT.sans}; color-scheme: only light;
           font-size: 13px; line-height: 1.4; box-shadow: none;
           width: 300px; box-sizing: border-box; animation: wp-slide-in 0.25s ease-out;
         ">
@@ -783,25 +797,25 @@ export default defineContentScript({
           <div style="display:flex;align-items:flex-start;gap:9px;margin-bottom:12px;line-height:1.4;">
             <span style="font-size:20px;flex-shrink:0;margin-top:1px;line-height:1;">📄</span>
             <div>
-              <div style="font-weight:500;font-size:13px;color:#12120f;line-height:1.4;">Generate tailored resume + fill this application?</div>
-              <div style="font-size:12px;color:#6b6a64;margin-top:2px;word-break:break-word;line-height:1.4;">${escapeHtml(title)} at ${escapeHtml(company)}</div>
+              <div style="font-weight:500;font-size:13px;color:${COLOR.ink};line-height:1.4;">Fill this application for you?</div>
+              <div style="font-size:12px;color:${COLOR.muted};margin-top:2px;word-break:break-word;line-height:1.4;">${escapeHtml(title)} at ${escapeHtml(company)}</div>
             </div>
           </div>
           <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;min-width:0;">
             <canvas id="wp-resume-orb" style="display:none;flex-shrink:0;"></canvas>
-            <div id="wp-resume-status" style="font-size:11px;color:#6b6a64;display:none;line-height:1.4;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></div>
+            <div id="wp-resume-status" style="font-size:11px;color:${COLOR.muted};display:none;line-height:1.4;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></div>
           </div>
           <div id="wp-resume-announcer" role="status" aria-live="polite" aria-atomic="true" style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;"></div>
           <div style="display:flex;gap:8px;">
             <button id="wp-resume-yes" style="
-              flex:1;background:#6b84e8;color:white;border:none;border-radius:${RADIUS.control};
+              flex:1;background:${COLOR.brand};color:white;border:none;border-radius:${RADIUS.control};
               padding:9px 0;font-size:12px;font-weight:500;cursor:pointer;
-              font-family:${FONT.sans};
+              font-family:${FONT.sans};color-scheme:only light;
             ">Yes, fill it</button>
             <button id="wp-resume-no" style="
-              flex:1;background:#faf9f7;color:#12120f;border:none;border-radius:${RADIUS.control};
+              flex:1;background:${COLOR.surfaceAlt};color:${COLOR.ink};border:none;border-radius:${RADIUS.control};
               padding:9px 0;font-size:12px;font-weight:500;cursor:pointer;
-              font-family:${FONT.sans};
+              font-family:${FONT.sans};color-scheme:only light;
             ">No thanks</button>
           </div>
         </div>
@@ -885,7 +899,7 @@ export default defineContentScript({
             resolve(r);
           };
           const timer = setTimeout(
-            () => done({ error: 'Resume generation timed out - fill this form manually.' }),
+            () => done({ error: 'The resume took too long. Fill this form yourself.' }),
             RESUME_GEN_TIMEOUT_MS,
           );
           chrome.runtime.sendMessage(
@@ -898,7 +912,7 @@ export default defineContentScript({
               // result), rather than the response object - treat both as a recoverable error
               // instead of letting `undefined` fall through as a fake success.
               if (chrome.runtime.lastError || !result) {
-                done({ error: chrome.runtime.lastError?.message || 'Could not reach the extension - fill this form manually.' });
+                done({ error: chrome.runtime.lastError?.message || 'Litos is not responding. Fill this form yourself.' });
               } else {
                 done(result);
               }
@@ -975,7 +989,7 @@ export default defineContentScript({
         if (!card.isConnected) return;
         if (!result || result.error || !result.profile || !result.applicationProfile || !result.resume) {
           if (statusEl) statusEl.textContent = `${result?.error || 'We could not build a resume.'} Nothing was attached or submitted.`;
-          generationController.announce('Resume generation failed. You can retry.');
+          generationController.announce('The resume did not build. Try again.');
           if (yesBtn) {
             yesBtn.disabled = false;
             yesBtn.textContent = 'Retry';
@@ -985,8 +999,8 @@ export default defineContentScript({
         const { profile, applicationProfile, resume } = result;
 
         if (!result.resume.quality?.ready_to_attach || result.resume.quality.issues.length > 0) {
-          if (statusEl) statusEl.textContent = 'The resume needs another pass. Nothing was attached or sent.';
-          generationController.announce('The resume needs another layout pass. You can retry.');
+          if (statusEl) statusEl.textContent = 'The resume did not come out right. Nothing was attached or sent.';
+          generationController.announce('The resume did not come out right. Try again.');
           if (yesBtn) {
             yesBtn.disabled = false;
             yesBtn.textContent = 'Retry';
@@ -997,7 +1011,7 @@ export default defineContentScript({
         if (statusEl) statusEl.textContent = `${buildResumeReviewSummary(resume.quality)} Preparing your dashboard review...`;
         if (yesBtn) yesBtn.style.display = 'none';
         if (noBtn) noBtn.style.display = 'none';
-        generationController.announce('Resume ready. Preparing the job and resume review in your Litos dashboard.');
+        generationController.announce('Resume ready. Opening it for you to check.');
 
         // R-041: this fetch used to swallow every failure in a bare catch - the card stayed
         // clean, the fill read as a success, and the student could submit resume-less without
@@ -1082,9 +1096,9 @@ export default defineContentScript({
             FILL_INACTIVITY_TIMEOUT_MS,
           );
         } catch {
-          if (statusEl) statusEl.textContent = 'This form is taking too long. Some boxes may be half filled. Please finish it yourself.';
+          if (statusEl) statusEl.textContent = 'This form is taking too long. Some boxes may be half filled. Finish it yourself.';
           if (yesBtn) yesBtn.style.display = 'none';
-          setTimeout(dismiss, 8000);
+          setTimeout(dismiss, DISMISS_MS.problem);
           return;
         }
 
@@ -1177,7 +1191,7 @@ export default defineContentScript({
 
         submitFromDashboard = async (approvedQuestions) => {
           if (!finalSubmitBtn || !finalSubmitBtn.isConnected) {
-            return { ok: false, error: 'The portal no longer has a final Submit button.' };
+            return { ok: false, error: 'This page no longer has a Submit button. Finish it yourself.' };
           }
           for (const approvedQuestion of approvedQuestions) {
             const original = draftedQuestions.find((item) => item.id === approvedQuestion.id);
@@ -1190,7 +1204,7 @@ export default defineContentScript({
             target.dispatchEvent(new Event('input', { bubbles: true }));
             target.dispatchEvent(new Event('change', { bubbles: true }));
           }
-          if (hasEmptyRequiredFields()) return { ok: false, error: 'The portal still has required fields that need an answer.' };
+          if (hasEmptyRequiredFields()) return { ok: false, error: 'Some required boxes are still empty. Fill them in, then send it.' };
           finalSubmitBtn.click();
           const started = Date.now();
           while (Date.now() - started < 45_000) {
@@ -1200,7 +1214,7 @@ export default defineContentScript({
             if (pageShowsSubmissionConfirmation(text)) return { ok: true };
             await new Promise((resolve) => setTimeout(resolve, 500));
           }
-          return { ok: false, error: 'The company portal did not confirm submission within 45 seconds.' };
+          return { ok: false, error: 'The company never confirmed it. Open the tab and check whether it went through.' };
         };
 
         chrome.runtime.sendMessage({
@@ -1215,8 +1229,8 @@ export default defineContentScript({
         }, (response: { ok?: boolean; error?: string } | undefined) => {
           if (!statusEl) return;
           statusEl.textContent = response?.ok
-            ? 'Review ready in your Litos dashboard. This portal will stay open in the background.'
-            : response?.error ?? 'Could not open the dashboard review. This portal was not submitted.';
+            ? 'Ready for you to check. This tab stays open.'
+            : response?.error ?? 'Could not open your review. Nothing was sent.';
         });
       });
     }
@@ -1259,21 +1273,18 @@ export default defineContentScript({
       // can put it back exactly: this is someone else's page and Litos should leave no trace.
       const priorOutline = submitBtn.style.outline;
       const priorOutlineOffset = submitBtn.style.outlineOffset;
-      const priorBorderRadius = submitBtn.style.borderRadius;
       const restoreSubmitButton = () => {
         submitBtn.style.outline = priorOutline;
         submitBtn.style.outlineOffset = priorOutlineOffset;
-        submitBtn.style.borderRadius = priorBorderRadius;
       };
       submitBtn.style.outline = `3px solid ${COLOR.brand}`;
       submitBtn.style.outlineOffset = '3px';
-      submitBtn.style.borderRadius = getComputedStyle(submitBtn).borderRadius || RADIUS.control;
 
       const overlay = document.createElement('div');
       overlay.id = 'litos-autosubmit-overlay';
       overlay.style.cssText =
-        'position:fixed;inset:0;z-index:2147483647;pointer-events:none;' +
-        `font-family:${FONT.sans};`;
+        `position:fixed;inset:0;z-index:${OVERLAY.z};pointer-events:none;` +
+        `font-family:${FONT.sans};color-scheme:only light;`;
       overlay.innerHTML = `
         <div id="wp-as-panel" style="
           pointer-events:auto;position:absolute;display:flex;align-items:center;gap:12px;
@@ -1298,7 +1309,7 @@ export default defineContentScript({
           <button id="wp-as-cancel" style="
             pointer-events:auto;background:${COLOR.ink};color:#fff;border:none;border-radius:${RADIUS.control};
             padding:9px 16px;font-size:12px;font-weight:500;cursor:pointer;
-            font-family:${FONT.sans};
+            font-family:${FONT.sans};color-scheme:only light;
           ">Cancel</button>
         </div>
       `;
@@ -1353,7 +1364,7 @@ export default defineContentScript({
         restoreSubmitButton();
         if (statusEl) statusEl.textContent = msg;
         reportEvent(false);
-        setTimeout(() => card.remove(), 4000);
+        setTimeout(() => card.remove(), DISMISS_MS.handoff);
       };
 
       // Anything that changes the context the student was watching cancels the pending submit: the
@@ -1381,7 +1392,7 @@ export default defineContentScript({
           )
             return;
         }
-        cancel('You edited the form, so auto-submit was cancelled. Submit it yourself when ready.');
+        cancel('You changed an answer, so Litos stopped. Send it yourself when you are ready.');
       };
       window.addEventListener('keydown', onKey);
       document.addEventListener('visibilitychange', onVisibility);
@@ -1390,11 +1401,11 @@ export default defineContentScript({
       document.addEventListener('pointerdown', onUserInteract, true);
       // Let a SPA navigation elsewhere in the content script tear this countdown down too.
       activeAutoSubmitCancel = () =>
-        cancel('The form navigated, so auto-submit was cancelled. Submit it yourself when ready.');
+        cancel('The page moved on, so Litos stopped. Send it yourself when you are ready.');
       overlay.querySelector('#wp-as-cancel')?.addEventListener('click', () => cancel());
       if (noBtn) { noBtn.textContent = 'Cancel'; noBtn.onclick = () => cancel(); }
       if (statusEl) {
-        statusEl.textContent = `Filled ${fillResult.fields_filled} field${fillResult.fields_filled === 1 ? '' : 's'}. ${actionLabel} in ${remaining}s on the button - tap Cancel to review first.`;
+        statusEl.textContent = `Filled ${fillResult.fields_filled} box${fillResult.fields_filled === 1 ? '' : 'es'}. ${actionLabel} in ${remaining} seconds. Tap Cancel to check it first.`;
       }
 
       const interval = setInterval(() => {
@@ -1431,12 +1442,11 @@ export default defineContentScript({
             !hasEmptyRequiredFields();
           if (!portalStillSafe) {
             cleanupChrome();
-            submitBtn.style.outline = '';
-            submitBtn.style.outlineOffset = '';
+            restoreSubmitButton();
             if (statusEl) {
               statusEl.textContent = tabActive
-                ? 'The form changed before submitting. Review and submit it yourself.'
-                : 'The tab was not in focus, so auto-submit was held. Come back and submit it yourself.';
+                ? 'The page changed at the last moment. Check it over, then send it yourself.'
+                : 'You were on another tab, so Litos held off. Open this one and send it yourself.';
             }
             reportEvent(false);
             setTimeout(() => card.remove(), 2000);
@@ -1444,7 +1454,7 @@ export default defineContentScript({
           }
           // The server is the authority for standing consent. Recheck after the countdown and
           // immediately before the click so revoking permission in Settings stops an open tab too.
-          if (statusEl) statusEl.textContent = 'Checking your automatic submission permission. You can still cancel.';
+          if (statusEl) statusEl.textContent = 'Checking your settings. You can still cancel.';
           let permissionSettled = false;
           const finishPermissionCheck = (settings: { automatic_submission_enabled?: boolean } | undefined) => {
             if (permissionSettled || cancelled) return;
@@ -1452,16 +1462,15 @@ export default defineContentScript({
             window.clearTimeout(permissionTimer);
             const stillSafe = target.isConnected && isElementVisible(target) && !document.hidden && document.hasFocus() && !hasEmptyRequiredFields();
             cleanupChrome();
-            submitBtn.style.outline = '';
-            submitBtn.style.outlineOffset = '';
+            restoreSubmitButton();
             if (settings?.automatic_submission_enabled === true && stillSafe) {
               if (statusEl) statusEl.textContent = `${actionLabel}...`;
               target.click();
               reportEvent(true);
             } else {
               if (statusEl) statusEl.textContent = settings?.automatic_submission_enabled === true
-                ? 'The form changed before submitting. Review and submit it yourself.'
-                : 'Automatic submission is off, so the application was held for you.';
+                ? 'The page changed at the last moment. Check it over, then send it yourself.'
+                : 'You asked to check every application first, so this one is waiting for you.';
               reportEvent(false);
             }
             setTimeout(() => card.remove(), 2000);
@@ -1487,8 +1496,8 @@ export default defineContentScript({
       return `
         <div style="
           position: relative;
-          background: white; border: 1px solid #e8e6e1; border-radius: ${RADIUS.card};
-          padding: 16px 16px 14px; font-family: ${FONT.sans};
+          background: white; border: 1px solid ${COLOR.border}; border-radius: ${RADIUS.card};
+          padding: 16px 16px 14px; font-family: ${FONT.sans}; color-scheme: only light;
           font-size: 13px; line-height: 1.4; box-shadow: none;
           width: 272px; box-sizing: border-box; animation: wp-slide-in 0.25s ease-out;
         ">
@@ -1496,24 +1505,24 @@ export default defineContentScript({
           <div style="display:flex;align-items:flex-start;gap:9px;margin-bottom:12px;line-height:1.4;">
             <span style="font-size:20px;flex-shrink:0;margin-top:1px;line-height:1;">⚡</span>
             <div>
-              <div style="font-weight:500;font-size:13px;color:#12120f;line-height:1.4;">Fill in your email here?</div>
-              <div style="font-size:12px;color:#6b6a64;margin-top:2px;line-height:1.4;">You'll still set your own password and click Create Account.</div>
+              <div style="font-weight:500;font-size:13px;color:${COLOR.ink};line-height:1.4;">Fill in your email here?</div>
+              <div style="font-size:12px;color:${COLOR.muted};margin-top:2px;line-height:1.4;">You'll still set your own password and click Create Account.</div>
             </div>
           </div>
           <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;min-width:0;">
             <canvas id="wp-account-orb" style="display:none;flex-shrink:0;"></canvas>
-            <div id="wp-account-status" style="font-size:11px;color:#6b6a64;display:none;line-height:1.4;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></div>
+            <div id="wp-account-status" style="font-size:11px;color:${COLOR.muted};display:none;line-height:1.4;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></div>
           </div>
           <div style="display:flex;gap:8px;">
             <button id="wp-account-yes" style="
-              flex:1;background:#6b84e8;color:white;border:none;border-radius:${RADIUS.control};
+              flex:1;background:${COLOR.brand};color:white;border:none;border-radius:${RADIUS.control};
               padding:9px 0;font-size:12px;font-weight:500;cursor:pointer;
-              font-family:${FONT.sans};
+              font-family:${FONT.sans};color-scheme:only light;
             ">Yes, fill it</button>
             <button id="wp-account-no" style="
-              flex:1;background:#faf9f7;color:#12120f;border:none;border-radius:${RADIUS.control};
+              flex:1;background:${COLOR.surfaceAlt};color:${COLOR.ink};border:none;border-radius:${RADIUS.control};
               padding:9px 0;font-size:12px;font-weight:500;cursor:pointer;
-              font-family:${FONT.sans};
+              font-family:${FONT.sans};color-scheme:only light;
             ">No thanks</button>
           </div>
         </div>
@@ -1602,7 +1611,7 @@ export default defineContentScript({
             stopOrbAnd(() => {
               if (statusEl) {
                 statusEl.textContent = fillResult.fields_filled > 0
-                  ? 'Email filled. Set your own password and click Create Account when ready.'
+                  ? 'Email filled in. Choose your own password, then create the account.'
                   : 'No email on file yet - fill it in yourself, then set your password and click Create Account.';
               }
             });
@@ -1624,8 +1633,8 @@ export default defineContentScript({
       card.innerHTML = `
         <div style="
           position: relative;
-          background: white; border: 1px solid #e8e6e1; border-radius: ${RADIUS.card};
-          padding: 16px 16px 14px; font-family: ${FONT.sans};
+          background: white; border: 1px solid ${COLOR.border}; border-radius: ${RADIUS.card};
+          padding: 16px 16px 14px; font-family: ${FONT.sans}; color-scheme: only light;
           font-size: 13px; line-height: 1.4; box-shadow: none;
           width: 272px; box-sizing: border-box; animation: wp-slide-in 0.25s ease-out;
         ">
@@ -1633,8 +1642,8 @@ export default defineContentScript({
           <div style="display:flex;align-items:flex-start;gap:9px;margin-bottom:12px;line-height:1.4;">
             <span style="font-size:20px;flex-shrink:0;margin-top:1px;line-height:1;">👋</span>
             <div>
-              <div style="font-weight:500;font-size:13px;color:#12120f;line-height:1.4;">This employer uses Workday</div>
-              <div style="font-size:12px;color:#6b6a64;margin-top:2px;line-height:1.4;">
+              <div style="font-weight:500;font-size:13px;color:${COLOR.ink};line-height:1.4;">This employer uses Workday</div>
+              <div style="font-size:12px;color:${COLOR.muted};margin-top:2px;line-height:1.4;">
                 You'll need to sign in or create an account first - that part's still on you. Tap below
                 and Litos will take you to the right screen, then speed up account setup and the
                 application from there.
@@ -1642,9 +1651,9 @@ export default defineContentScript({
             </div>
           </div>
           <button id="wp-start-go" style="
-            width:100%;background:#6b84e8;color:white;border:none;border-radius:${RADIUS.control};
+            width:100%;background:${COLOR.brand};color:white;border:none;border-radius:${RADIUS.control};
             padding:9px 0;font-size:12px;font-weight:500;cursor:pointer;
-            font-family:${FONT.sans};
+            font-family:${FONT.sans};color-scheme:only light;
           ">Take me there</button>
         </div>
       `;
@@ -1676,8 +1685,8 @@ export default defineContentScript({
         const note = document.createElement('div');
         note.id = 'litos-generic-note';
         note.style.cssText =
-          `position:fixed;bottom:72px;right:20px;z-index:2147483647;background:${COLOR.surface};border:1px solid ${COLOR.border};` +
-          `border-radius:${RADIUS.card};padding:12px 16px;font-family:${FONT.sans};` +
+          `position:fixed;bottom:${OVERLAY.bottom};right:${OVERLAY.right};z-index:${OVERLAY.z};background:${COLOR.surface};border:1px solid ${COLOR.border};` +
+          `border-radius:${RADIUS.card};padding:12px 16px;font-family:${FONT.sans};color-scheme:only light;` +
           `font-size:12px;line-height:1.4;color:${COLOR.ink};max-width:272px;`;
         note.textContent = "Litos couldn't find an application form on this page. Open the page with the actual form fields, then try again.";
         document.getElementById('litos-generic-note')?.remove();

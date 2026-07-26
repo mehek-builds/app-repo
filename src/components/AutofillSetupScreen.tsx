@@ -15,6 +15,7 @@ import LoadingSpinner from './LoadingSpinner';
 import {
   PopupHeader,
   StatusDot,
+  StepProgress,
   fieldClass,
   primaryButtonClass,
   secondaryButtonClass,
@@ -51,6 +52,7 @@ interface AutofillSetupScreenProps {
   token: string;
   profile: Profile;
   onBack: () => void;
+  onLogout: () => void;
 }
 
 const cardClass = 'group border-b border-gray-200 py-3';
@@ -61,26 +63,12 @@ function ResumePill() {
   );
 }
 
-function StepHeader({ title, subtitle, step, total }: { title: string; subtitle: string; step: number; total: number }) {
+function StepHeader({ title, subtitle, step, total, showProgress }: { title: string; subtitle: string; step: number; total: number; showProgress: boolean }) {
   return (
     <div className="animate-fade-in-up">
-      <div className="mb-2 flex items-center gap-3">
-        <div
-          className="h-1 flex-1 overflow-hidden rounded-full bg-gray-200"
-          role="progressbar"
-          aria-label={`Step ${step} of ${total}`}
-          aria-valuemin={1}
-          aria-valuemax={total}
-          aria-valuenow={step}
-        >
-          <span
-            className="block h-full rounded-full bg-brand-600 transition-[width]"
-            style={{ width: `${(step / total) * 100}%` }}
-          />
-        </div>
-        <span className="text-xs font-medium text-gray-600">{step} of {total}</span>
-      </div>
-      <h2 className="text-base font-semibold text-gray-900">{title}</h2>
+      {showProgress && <StepProgress step={step} total={total} />}
+      {/* gray-950 is the product's ink; this was the one heading at gray-900. */}
+      <h2 className="text-base font-semibold text-gray-950">{title}</h2>
       <p className="mt-1 text-xs leading-5 text-gray-600">{subtitle}</p>
     </div>
   );
@@ -105,7 +93,7 @@ function YesNoDecline({
           type="button"
           onClick={() => onChange(opt)}
           aria-pressed={value === opt}
-          className={`min-h-11 rounded-inner border px-3 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 ${
+          className={`min-h-11 rounded-inner border px-3 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 ${
             value === opt
               ? 'border-brand-400 bg-brand-50 text-brand-700'
               : 'border-gray-300 bg-white text-gray-700 hover:border-gray-400 hover:bg-gray-50'
@@ -143,12 +131,16 @@ export function seedExperienceBank(profile: Profile): ExperienceBankEntry[] {
   return [...jobs, ...projects];
 }
 
-export default function AutofillSetupScreen({ token, profile, onBack }: AutofillSetupScreenProps) {
+export default function AutofillSetupScreen({ token, profile, onBack, onLogout }: AutofillSetupScreenProps) {
   const [step, setStep] = useState<Step>('loading');
   const [error, setError] = useState<string | null>(null);
+  // Two taps, in our own UI, instead of a native OS dialog inside a 380px popup.
+  const [confirmSignOut, setConfirmSignOut] = useState(false);
 
   const [bank, setBank] = useState<ExperienceBankEntry[]>([]);
   const [bankIsSeeded, setBankIsSeeded] = useState(false);
+  /* Seeding only happens when the server had no bank at all, so it is our first-run signal. */
+  const firstRun = bankIsSeeded;
 
   const [appProfile, setAppProfile] = useState<ApplicationProfile>({});
   const [eeo, setEeo] = useState<Record<string, string>>({});
@@ -240,16 +232,43 @@ export default function AutofillSetupScreen({ token, profile, onBack }: Autofill
 
   return (
     <div className="flex min-h-full animate-fade-in flex-col bg-white">
-      <PopupHeader title="Your answers" subtitle="Litos reuses these on every form" onBack={onBack} />
+      <PopupHeader title="Answers" subtitle="Litos reuses these on every form" onBack={onBack} />
 
       <main className="flex flex-1 flex-col gap-4 px-4 py-4">
         {error && <WarningBanner message={error} variant="error" />}
 
+        {/* First run is a sequence, because the order is the point. Coming back is not: changing
+            a LinkedIn URL should not mean clicking through experience, location and EEO first.
+            After setup, the four sections become tabs. */}
+        {!firstRun && step !== 'saving' && step !== 'done' && (
+          <nav aria-label="Answer sections" className="-mx-1 flex gap-1 overflow-x-auto pb-1">
+            {([
+              ['experience', 'Experience'],
+              ['checks', 'About you'],
+              ['required', 'Every form'],
+              ['links', 'Links'],
+            ] as const).map(([key, label]) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setStep(key)}
+                aria-current={step === key ? 'true' : undefined}
+                className={`min-h-11 whitespace-nowrap rounded-control px-3 text-sm transition-colors ${
+                  step === key ? 'bg-gray-100 font-medium text-gray-950' : 'text-gray-600 hover:text-gray-950'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </nav>
+        )}
+
         {step === 'experience' && (
           <div className="flex flex-col gap-3">
             <StepHeader
-              step={3}
-              total={6}
+              showProgress={firstRun}
+              step={2}
+              total={5}
               title="Your experience"
               subtitle={
                 bankIsSeeded
@@ -335,8 +354,9 @@ export default function AutofillSetupScreen({ token, profile, onBack }: Autofill
         {step === 'checks' && (
           <div className="flex animate-fade-in-up flex-col gap-4">
             <StepHeader
-              step={4}
-              total={6}
+              showProgress={firstRun}
+              step={3}
+              total={5}
               title="A couple of quick checks"
               subtitle="Not usually on a resume, so we ask instead of guessing."
             />
@@ -382,8 +402,9 @@ export default function AutofillSetupScreen({ token, profile, onBack }: Autofill
         {step === 'required' && (
           <div className="flex animate-fade-in-up flex-col gap-4">
             <StepHeader
-              step={5}
-              total={6}
+              showProgress={firstRun}
+              step={4}
+              total={5}
               title="Things every form asks"
               subtitle="We never guess these, so we ask you once."
             />
@@ -492,7 +513,7 @@ export default function AutofillSetupScreen({ token, profile, onBack }: Autofill
                 id="application-salary"
                 value={appProfile.desired_salary ?? ''}
                 onChange={(e) => setAppProfile((p) => ({ ...p, desired_salary: e.target.value }))}
-                placeholder="Leave blank to skip"
+                placeholder="Leave blank"
                 className={fieldClass}
               />
             </div>
@@ -538,7 +559,7 @@ export default function AutofillSetupScreen({ token, profile, onBack }: Autofill
                         id={`eeo-${field}`}
                         value={eeo[field] ?? ''}
                         onChange={(e) => setEeo((p) => ({ ...p, [field]: e.target.value }))}
-                        placeholder="Leave blank to decline"
+                        placeholder="Leave blank"
                         className={fieldClass}
                       />
                     </div>
@@ -562,7 +583,7 @@ export default function AutofillSetupScreen({ token, profile, onBack }: Autofill
 
         {step === 'links' && (
           <div className="flex animate-fade-in-up flex-col gap-4">
-            <StepHeader step={6} total={6} title="Links and contact" subtitle="Leave anything you do not have blank." />
+            <StepHeader showProgress={firstRun} step={5} total={5} title="Links and contact" subtitle="Leave anything you do not have blank." />
 
             {(
               [
@@ -597,7 +618,7 @@ export default function AutofillSetupScreen({ token, profile, onBack }: Autofill
                   type="button"
                   role="switch"
                   aria-checked={autoSubmit}
-                  aria-label="Automatically submit eligible applications"
+                  aria-label="Send an application without asking me again"
                   disabled={!automationSettingsLoaded}
                   onClick={() => setAutoSubmit((v) => !v)}
                   className="relative flex h-11 w-12 flex-shrink-0 items-center rounded-full disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2"
@@ -620,7 +641,7 @@ export default function AutofillSetupScreen({ token, profile, onBack }: Autofill
             <div className="border-b border-gray-200 py-3">
               <div className="flex items-start justify-between gap-3">
                 <div><p className="text-xs font-medium text-gray-700">Use application verification codes</p><p className="mt-1 text-xs leading-5 text-gray-600">Litos may use connected Gmail or Outlook to find a code for an active application. Codes are not saved.</p></div>
-                <button type="button" role="switch" aria-checked={automaticVerification} aria-label="Use application verification codes" disabled={!automationSettingsLoaded} onClick={() => setAutomaticVerification((value) => !value)} className="relative flex h-11 w-12 flex-shrink-0 items-center rounded-full disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2">
+                <button type="button" role="switch" aria-checked={automaticVerification} aria-label="Read the code a company emails me" disabled={!automationSettingsLoaded} onClick={() => setAutomaticVerification((value) => !value)} className="relative flex h-11 w-12 flex-shrink-0 items-center rounded-full disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2">
                   <span className={`relative block h-7 w-12 rounded-full transition-colors ${automaticVerification ? 'bg-brand-600' : 'bg-gray-200'}`}><span className={`absolute top-0.5 h-6 w-6 rounded-full border border-gray-200 bg-white transition-transform ${automaticVerification ? 'translate-x-5' : 'translate-x-0.5'}`} /></span>
                 </button>
               </div>
@@ -634,6 +655,30 @@ export default function AutofillSetupScreen({ token, profile, onBack }: Autofill
             >
               Save and finish
             </button>
+
+            {/* Sign out lives here, at the end of the settings screen, rather than one mis-click
+                away in the header between two navigation items. The confirm is our own two-tap
+                control: a native window.confirm was the only piece of OS chrome in the product. */}
+            <div className="mt-2 border-t border-gray-200 pt-4">
+              {confirmSignOut ? (
+                <div className="flex flex-col gap-2" role="group" aria-label="Confirm sign out">
+                  <p className="text-sm text-gray-950">Sign out of Litos?</p>
+                  <p className="text-xs leading-5 text-gray-600">Your saved answers stay on your account. You will need your email again to get back in.</p>
+                  <div className="flex gap-2">
+                    <button type="button" onClick={onLogout} className={`${secondaryButtonClass} flex-1 border-danger-200 text-danger-700 hover:border-danger-600 hover:bg-danger-50`}>
+                      Sign out
+                    </button>
+                    <button type="button" onClick={() => setConfirmSignOut(false)} className={`${secondaryButtonClass} flex-1`}>
+                      Stay signed in
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <button type="button" onClick={() => setConfirmSignOut(true)} className="min-h-11 text-sm font-medium text-gray-600 hover:text-gray-950">
+                  Sign out
+                </button>
+              )}
+            </div>
           </div>
         )}
 

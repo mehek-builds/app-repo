@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { getEvents, resolveContacts } from '../lib/api';
 import type { Contact, JobContext, OutreachEvent } from '../lib/types';
+import { outreachStatus } from '../lib/outreach-status';
 import Avatar from './Avatar';
 import { SkeletonBar } from './Skeleton';
 import WarningBanner from './WarningBanner';
@@ -10,6 +11,7 @@ import {
   PopupHeader,
   primaryButtonClass,
   secondaryButtonClass,
+  quietButtonClass,
   SectionLabel,
   StatusDot,
   textButtonClass,
@@ -23,16 +25,16 @@ interface MainScreenProps {
   onContactsFound: (contacts: Contact[], job: JobContext) => void;
   onViewTracking: () => void;
   onViewAutofillSetup: () => void;
-  onLogout: () => void;
   userSchool?: string;
 }
 
 function EventStatus({ status }: { status: string }) {
-  const tone = status === 'replied' ? 'success' : status === 'sent' ? 'warning' : 'neutral';
+  // Same map the Emails screen uses. This used to invent its own tones and print the raw enum.
+  const { tone, className, label } = outreachStatus(status);
   return (
-    <span className="inline-flex items-center gap-1.5 text-xs capitalize text-gray-600">
+    <span className={`inline-flex items-center gap-1.5 text-xs ${className}`}>
       <StatusDot tone={tone} />
-      {status}
+      {label}
     </span>
   );
 }
@@ -71,7 +73,6 @@ export default function MainScreen({
   onContactsFound,
   onViewTracking,
   onViewAutofillSetup,
-  onLogout,
   userSchool,
 }: MainScreenProps) {
   const [jobUrl, setJobUrl] = useState(detectedJob?.url ?? '');
@@ -79,6 +80,7 @@ export default function MainScreen({
   const [role, setRole] = useState(detectedJob?.role ?? '');
   const [editingJob, setEditingJob] = useState(!detectedJob);
   const [jobDetailsTouched, setJobDetailsTouched] = useState(false);
+  const [companyWasGuessed, setCompanyWasGuessed] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [recentEvents, setRecentEvents] = useState<OutreachEvent[]>([]);
@@ -91,7 +93,7 @@ export default function MainScreen({
     try {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (!tab?.id) {
-        setFillError('Could not find the current tab.');
+        setFillError('Litos lost track of this tab. Close this popup and open it again.');
         return;
       }
       await chrome.scripting.executeScript({
@@ -100,14 +102,14 @@ export default function MainScreen({
       });
       window.close();
     } catch {
-      setFillError("Chrome does not let Litos work on this page.");
+      setFillError('Chrome blocks extensions on this page. Open the job on the company\u2019s own site and try again.');
     }
   };
 
   useEffect(() => {
     getEvents(token)
       .then((events) => setRecentEvents(events.slice(0, 3)))
-      .catch((err) => setEventsError(err instanceof Error ? err.message : 'Could not load recent outreach.'))
+      .catch((err) => setEventsError(err instanceof Error ? err.message : 'We could not load your recent emails.'))
       .finally(() => setEventsLoading(false));
   }, [token]);
 
@@ -125,7 +127,12 @@ export default function MainScreen({
     setJobDetailsTouched(true);
     setError(null);
     const parsed = parseJobUrl(value);
-    if (parsed.company && !company) setCompany(parsed.company);
+    if (parsed.company && !company) {
+      setCompany(parsed.company);
+      // A name pulled out of a URL slug is a guess, and Workday subdomains in particular produce
+      // junk. Say so, rather than presenting it as something we read off the posting.
+      setCompanyWasGuessed(true);
+    }
   };
 
   const handleFind = async (e: React.FormEvent) => {
@@ -162,21 +169,19 @@ export default function MainScreen({
 
   return (
     <div className="flex min-h-full animate-fade-in flex-col bg-white">
-      <PopupHeader>
+      {/* The h1 says what this screen is for. It used to say "Litos" on every screen, so the
+          popup's heading never once told you where you were.
+
+          Two destinations, and they are named the same thing here, in the tracking screen's own
+          title, and on the website: Answers and Emails. Sign out is not a destination and no
+          longer sits between them - it lives at the foot of Answers, behind an inline confirm,
+          because a native window.confirm is the one piece of OS chrome in the product. */}
+      <PopupHeader title="This job">
         <button type="button" onClick={onViewAutofillSetup} className="min-h-11 px-1.5 text-xs font-medium text-gray-600 hover:text-gray-950">
-          Profile
+          Answers
         </button>
         <button type="button" onClick={onViewTracking} className="min-h-11 px-1.5 text-xs font-medium text-gray-600 hover:text-gray-950">
-          Activity
-        </button>
-        <button
-          type="button"
-          onClick={() => {
-            if (window.confirm('Sign out of Litos? Your saved answers stay on your account.')) onLogout();
-          }}
-          className="min-h-11 px-1.5 text-xs font-medium text-gray-600 hover:text-gray-950"
-        >
-          Sign out
+          Emails
         </button>
       </PopupHeader>
 
@@ -202,7 +207,7 @@ export default function MainScreen({
           <div className="flex items-center justify-between gap-3">
             <SectionLabel>{hasJob ? 'Current job' : 'Add a job'}</SectionLabel>
             {hasJob && !editingJob && (
-              <button type="button" onClick={() => setEditingJob(true)} className={textButtonClass}>
+              <button type="button" onClick={() => setEditingJob(true)} className={quietButtonClass}>
                 Edit
               </button>
             )}
@@ -215,7 +220,7 @@ export default function MainScreen({
                 <h2 className="truncate text-base font-semibold text-gray-950">{company}</h2>
                 <p className="truncate text-sm text-gray-600">{role}</p>
               </div>
-              <span className="text-xs font-medium text-gray-600">Detected</span>
+              <span className="text-xs text-gray-600">Found on this page</span>
             </div>
           ) : (
             <div className="flex flex-col gap-3 border-b border-gray-200 pb-4">
@@ -239,10 +244,14 @@ export default function MainScreen({
                     onChange={(e) => {
                       setCompany(e.target.value);
                       setJobDetailsTouched(true);
+                      setCompanyWasGuessed(false);
                     }}
                     placeholder="Figma"
                     className={fieldClass}
                   />
+                  {companyWasGuessed && (
+                    <p className="text-xs leading-5 text-gray-600">We guessed this from the link. Fix it if it is wrong.</p>
+                  )}
                 </div>
                 <div className="flex flex-col gap-1.5">
                   <label htmlFor="job-role" className="text-sm font-medium text-gray-800">Role</label>
@@ -277,24 +286,26 @@ export default function MainScreen({
               </div>
               <div className="flex min-h-16 items-center gap-3 py-2">
                 <div className="min-w-0 flex-1">
-                  <p className="text-sm font-medium text-gray-950">Outreach</p>
-                  <p className="text-xs text-gray-600">Find people to email about this job</p>
+                  <p className="text-sm font-medium text-gray-950">Emails to people here</p>
+                  <p className="text-xs text-gray-600">Find someone at this company to write to</p>
                 </div>
-                <span className="text-xs text-gray-600">{loading ? 'Looking…' : 'Not started'}</span>
+                {/* The row that describes the job now carries the button that does it. This row's
+                    only affordance used to be the words "Not started", with its actual control a
+                    hundred pixels below as a full-width outlined button - which read as the
+                    screen's primary while the real primary sat inside the row above. */}
+                <button type="submit" aria-label="Find people to email" disabled={loading} className={secondaryButtonClass}>
+                  {loading ? <PendingLabel state="searching">Looking…</PendingLabel> : 'Find people'}
+                </button>
               </div>
             </div>
             {fillError && <p className="mt-2 text-xs text-danger-700" role="alert">{fillError}</p>}
           </section>
-
-          <button type="submit" disabled={loading} className={secondaryButtonClass}>
-            {loading ? <PendingLabel state="searching">Looking…</PendingLabel> : 'Find people to email'}
-          </button>
         </form>
 
-        <section className="flex flex-col gap-2" aria-labelledby="recent-outreach-heading">
+        <section className="flex flex-col gap-2" aria-labelledby="recent-emails-heading">
           <div className="flex items-center justify-between gap-3">
-            <div id="recent-outreach-heading"><SectionLabel>Recent outreach</SectionLabel></div>
-            <button type="button" onClick={onViewTracking} className={textButtonClass}>View all</button>
+            <div id="recent-emails-heading"><SectionLabel>Recent emails</SectionLabel></div>
+            <button type="button" onClick={onViewTracking} className={quietButtonClass}>View all</button>
           </div>
 
           {eventsLoading ? (
@@ -306,7 +317,7 @@ export default function MainScreen({
             <WarningBanner message={eventsError} variant="error" />
           ) : recentEvents.length === 0 ? (
             <p className="border-y border-gray-200 py-4 text-sm text-gray-600">
-              Nothing here yet. Find someone to email and it shows up here.
+              No emails yet. Find someone to write to and they show up here.
             </p>
           ) : (
             <div className="divide-y divide-gray-200 border-y border-gray-200">

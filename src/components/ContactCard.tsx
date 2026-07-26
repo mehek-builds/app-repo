@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import type { Contact, Persona } from '../lib/types';
 import Avatar from './Avatar';
-import { StatusDot, textButtonClass } from './ui';
+import { secondaryButtonClass, StatusDot } from './ui';
 
 interface ContactCardProps {
   contact: Contact;
@@ -20,7 +20,7 @@ const PERSONA_LABELS: Record<Persona, string> = {
    values; a student reading them cannot tell what to do differently. */
 const STATUS_LABELS: Record<Contact['status'], string> = {
   verified: 'Email checked',
-  likely: 'Email is a guess',
+  likely: 'Email is a guess, so it may bounce',
   linkedin_only: 'No email, LinkedIn only',
   none: 'No way to reach them',
 };
@@ -44,7 +44,8 @@ export default function ContactCard({ contact, onDraft }: ContactCardProps) {
 
   // Who they are and how good the email is are two different facts, and joining them with a dot
   // put them on one line under a single coloured dot that only described the second one.
-  const whoTheyAre = contact.school_match ? 'Went to your school' : PERSONA_LABELS[contact.persona];
+  const role = PERSONA_LABELS[contact.persona];
+  const whoTheyAre = contact.school_match ? `${role} · Went to your school` : role;
 
   return (
     <article className="flex min-h-[88px] items-start gap-3 py-3">
@@ -59,7 +60,7 @@ export default function ContactCard({ contact, onDraft }: ContactCardProps) {
           <button
             type="button"
             onClick={() => onDraft(contact)}
-            className={textButtonClass}
+            className={secondaryButtonClass}
             aria-label={`${isLinkedInOnly ? 'Draft a LinkedIn message to' : 'Draft an email to'} ${contact.full_name}`}
           >
             Draft
@@ -74,7 +75,7 @@ export default function ContactCard({ contact, onDraft }: ContactCardProps) {
 
         {contactLine && (
           <div className="mt-1 flex min-h-11 items-center gap-2">
-            <span className="min-w-0 flex-1 truncate text-xs text-gray-600">{contactLine}</span>
+            <span className="min-w-0 flex-1 truncate text-xs text-gray-600">{copied ? 'Copied' : contactLine}</span>
             {!isLinkedInOnly && (
               <button
                 type="button"
@@ -94,10 +95,6 @@ export default function ContactCard({ contact, onDraft }: ContactCardProps) {
               </button>
             )}
           </div>
-        )}
-
-        {contact.status === 'likely' && (
-          <p className="text-xs text-warning-700">Verify this address before sending.</p>
         )}
 
         {copied && <span className="sr-only" role="status" aria-live="polite">Email copied</span>}

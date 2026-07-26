@@ -153,7 +153,7 @@ describe('redesigned popup workflows', () => {
 
     await user.click(screen.getByRole('button', { name: 'Fill this form' }));
 
-    expect(await screen.findByText('Could not find the current tab.')).toBeTruthy();
+    expect(await screen.findByText('Litos lost track of this tab. Close this popup and open it again.')).toBeTruthy();
   });
 
   it('reports Gmail launch failures and does not show false success', async () => {
@@ -214,7 +214,7 @@ describe('redesigned popup workflows', () => {
       />,
     );
 
-    await user.click(await screen.findByRole('button', { name: 'Mark as sent' }));
+    await user.click(await screen.findByRole('button', { name: 'I sent it' }));
 
     await waitFor(() => {
       expect(api.trackEvent).toHaveBeenCalledWith('token', {
@@ -241,7 +241,7 @@ describe('redesigned popup workflows', () => {
     render(<TrackingDashboard token="token" onBack={vi.fn()} />);
 
     expect(await screen.findByText('Unknown')).toBeTruthy();
-    expect(screen.getByRole('heading', { level: 1, name: 'Outreach' })).toBeTruthy();
+    expect(screen.getByRole('heading', { level: 1, name: 'Emails' })).toBeTruthy();
   });
 
   it('updates a sent outreach event to replied', async () => {

@@ -12,10 +12,16 @@ export const primaryButtonClass =
   'inline-flex min-h-11 items-center justify-center rounded-control bg-brand-600 px-4 text-sm font-semibold text-white transition-[background-color,transform] hover:bg-brand-700 active:translate-y-px focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50';
 
 export const secondaryButtonClass =
-  'inline-flex min-h-11 items-center justify-center rounded-control border border-gray-300 bg-white px-4 text-sm font-semibold text-gray-800 transition-[background-color,border-color] hover:border-gray-400 hover:bg-gray-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50';
+  'inline-flex min-h-11 items-center justify-center rounded-control border border-gray-300 bg-white px-4 text-sm font-medium text-gray-800 transition-[background-color,border-color] hover:border-gray-400 hover:bg-gray-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50';
 
+/* Blue is the action colour, so it belongs to the ONE action a screen is asking for. A row of
+   blue "Draft" links made eight of them per screen and the eye stopped reading any as special. */
 export const textButtonClass =
   'inline-flex min-h-11 items-center justify-center rounded-control px-2 text-sm font-medium text-brand-800 transition-colors hover:bg-brand-50 hover:text-brand-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500';
+
+/** A tertiary action that is not the screen's point: navigation, undo, "view all". Ink, not blue. */
+export const quietButtonClass =
+  'inline-flex min-h-11 items-center justify-center rounded-control px-2 text-sm font-medium text-gray-700 underline-offset-4 transition-colors hover:text-gray-950 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500';
 
 export const iconButtonClass =
   'inline-flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-control text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500';
@@ -51,6 +57,24 @@ export function PopupHeader({ title = 'Litos', subtitle, onBack, children }: Pop
 
       {children && <div className="flex items-center gap-0.5">{children}</div>}
     </header>
+  );
+}
+
+export function StepProgress({ step, total }: { step: number; total: number }) {
+  return (
+    <div className="mb-2 flex items-center gap-3">
+      <div
+        className="h-1 flex-1 overflow-hidden rounded-full bg-gray-200"
+        role="progressbar"
+        aria-label={`Step ${step} of ${total}`}
+        aria-valuemin={1}
+        aria-valuemax={total}
+        aria-valuenow={step}
+      >
+        <span className="block h-full rounded-full bg-brand-600 transition-[width]" style={{ width: `${(step / total) * 100}%` }} />
+      </div>
+      <span className="text-xs font-medium text-gray-600">{step} of {total}</span>
+    </div>
   );
 }
 

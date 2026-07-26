@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { getEvents, trackEvent } from '../lib/api';
-import type { OutreachEvent, OutreachStatus } from '../lib/types';
+import type { OutreachEvent } from '../lib/types';
+import { outreachStatus } from '../lib/outreach-status';
 import Avatar from './Avatar';
 import { SkeletonBar } from './Skeleton';
 import WarningBanner from './WarningBanner';
@@ -10,17 +11,6 @@ interface TrackingDashboardProps {
   token: string;
   onBack: () => void;
 }
-
-/* Status is a fact about what happened, not a judgement. "Sent" was amber, which reads as a
-   warning about an email that went out exactly as intended; only a bounce is actually bad. */
-type StatusTone = 'neutral' | 'success' | 'warning' | 'danger' | 'brand';
-
-const STATUS_STYLE: Record<OutreachStatus, { tone: StatusTone; className: string; label: string }> = {
-  drafted: { tone: 'neutral', className: 'text-gray-600', label: 'Written, not sent' },
-  sent: { tone: 'brand', className: 'text-gray-950', label: 'Sent' },
-  replied: { tone: 'success', className: 'text-success-700', label: 'They replied' },
-  bounced: { tone: 'danger', className: 'text-danger-700', label: 'Did not arrive' },
-};
 
 function formatDate(iso?: string): string {
   if (!iso) return 'Not sent';
@@ -41,7 +31,7 @@ export default function TrackingDashboard({ token, onBack }: TrackingDashboardPr
     setLoading(true);
     getEvents(token)
       .then(setEvents)
-      .catch((err) => setError(err instanceof Error ? err.message : 'Could not load outreach.'))
+      .catch((err) => setError(err instanceof Error ? err.message : 'We could not load your emails. Open this again in a moment.'))
       .finally(() => setLoading(false));
   };
 
@@ -61,7 +51,7 @@ export default function TrackingDashboard({ token, onBack }: TrackingDashboardPr
         current.map((item) => (item.id === event.id ? { ...item, status: outcome } : item)),
       );
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not update the status.');
+      setError(err instanceof Error ? err.message : 'That did not save. Try marking it again.');
     } finally {
       setUpdating(null);
     }
@@ -69,7 +59,7 @@ export default function TrackingDashboard({ token, onBack }: TrackingDashboardPr
 
   return (
     <div className="flex min-h-full animate-slide-in-right flex-col bg-white">
-      <PopupHeader title="Outreach" subtitle="Emails you wrote and what happened" onBack={onBack} />
+      <PopupHeader title="Emails" subtitle="What you sent and what came back" onBack={onBack} />
 
       <main className="flex flex-1 flex-col px-4 py-4">
         {loading ? (
@@ -91,9 +81,9 @@ export default function TrackingDashboard({ token, onBack }: TrackingDashboardPr
 
             {events.length === 0 ? (
               <div className="flex flex-1 flex-col items-start justify-center gap-3 py-12">
-                <SectionLabel>No outreach yet</SectionLabel>
-                <h2 className="text-xl font-medium text-gray-950">Nothing here yet</h2>
-                <p className="text-sm leading-5 text-gray-600">Find someone at a company, write an email, and it shows up here.</p>
+                {/* One heading, not a label AND a heading saying the same thing twice. */}
+                <h2 className="text-xl font-medium text-gray-950">No emails yet</h2>
+                <p className="text-sm leading-5 text-gray-600">Find someone to write to and they show up here.</p>
                 <button type="button" onClick={onBack} className={textButtonClass}>Find contacts</button>
               </div>
             ) : (
@@ -104,7 +94,7 @@ export default function TrackingDashboard({ token, onBack }: TrackingDashboardPr
                 </div>
                 <div className="divide-y divide-gray-200 border-y border-gray-200">
                   {events.map((event) => {
-                    const statusStyle = STATUS_STYLE[event.status] ?? { tone: 'neutral' as StatusTone, className: 'text-gray-600', label: 'Unknown' };
+                    const statusStyle = outreachStatus(event.status);
                     return (
                       <article key={event.id} className="flex flex-col gap-2 py-3">
                         <div className="flex items-start gap-3">

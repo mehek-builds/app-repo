@@ -131,7 +131,6 @@ const storeScreens = {
         onContactsFound={noop}
         onViewTracking={noop}
         onViewAutofillSetup={noop}
-        onLogout={noop}
         userSchool={profile.school}
       />
     ),
@@ -213,7 +212,6 @@ function Preview() {
           onContactsFound={noop}
           onViewTracking={noop}
           onViewAutofillSetup={noop}
-          onLogout={noop}
           userSchool={profile.school}
         />
       </Frame>
@@ -235,7 +233,7 @@ function Preview() {
       </Frame>
 
       <Frame label="7 · Autofill setup (v2, seeded from resume)">
-        <AutofillSetupScreen token={TOKEN} profile={profile} onBack={noop} />
+        <AutofillSetupScreen token={TOKEN} profile={profile} onBack={noop} onLogout={noop} />
       </Frame>
     </div>
   );

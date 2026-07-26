@@ -65,3 +65,34 @@ export const FONT = {
  * setting 700 on every headline.
  */
 export const WEIGHT = { display: 450, body: 400, medium: 500 } as const;
+
+/**
+ * Layout and timing for the cards injected into an employer's page.
+ *
+ * These were literals scattered through content.ts and they disagreed with each other: the
+ * validation card sat at right:16px/bottom:16px on z-index 2147483646 while the action stack sat
+ * at right:20px/bottom:72px on 2147483647, so whenever both were up they were offset by 4px and
+ * stacked in an order nobody chose. Auto-dismiss ran at 3500ms, 4000ms and 8000ms depending on
+ * which branch wrote the card, with the most important warning getting neither the longest nor
+ * the shortest.
+ *
+ * One anchor, one layer, and three named durations that say what they are for.
+ */
+export const OVERLAY = {
+  /** Every Litos card shares one bottom-right anchor so a second card lines up under the first. */
+  right: '20px',
+  bottom: '20px',
+  /** One layer for all Litos surfaces. Max int, because employer portals use large z-indexes. */
+  z: 2147483647,
+  /** The gap between stacked cards. */
+  gap: '12px',
+} as const;
+
+export const DISMISS_MS = {
+  /** A confirmation you do not need to act on. */
+  confirmation: 6000,
+  /** Something went wrong and the next step is yours: stays long enough to read twice. */
+  problem: 12000,
+  /** A card that is being replaced by another card. */
+  handoff: 4000,
+} as const;

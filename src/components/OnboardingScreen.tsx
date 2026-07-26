@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { createSession, requestCode, uploadProfile, verifyCode } from '../lib/api';
+import { createSession, getProfile as fetchProfile, requestCode, uploadProfile, verifyCode } from '../lib/api';
 import { setProfile, setToken } from '../lib/storage';
 import type { Profile } from '../lib/types';
 import WarningBanner from './WarningBanner';
@@ -8,12 +8,15 @@ import {
   PendingLabel,
   PopupHeader,
   primaryButtonClass,
-  textButtonClass,
+  quietButtonClass,
+  StepProgress,
 } from './ui';
 import { ThinkingOrb } from 'thinking-orbs';
 
 interface OnboardingScreenProps {
-  onComplete: (profile: Profile, token: string) => void;
+  /** `returning` is true when someone signed in to an account that already exists, so the popup
+   *  can drop them on the main screen instead of walking them back through setup. */
+  onComplete: (profile: Profile, token: string, returning?: boolean) => void;
 }
 
 export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) {
@@ -23,6 +26,11 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [step, setStep] = useState<'form' | 'code' | 'uploading'>('form');
+  /* E2-12: there was no way into an account you already had. Someone who signed up on the
+     website was shown "Set up Litos" and asked for their email and resume a second time. Signing
+     in needs no resume: the server already has the parsed profile. */
+  const [mode, setMode] = useState<'signup' | 'signin'>('signup');
+  const signingIn = mode === 'signin';
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const nextFile = e.target.files?.[0];
@@ -45,6 +53,14 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
   const finishSignup = async (sessionToken: string) => {
     setStep('uploading');
     await setToken(sessionToken);
+    if (signingIn) {
+      // The account exists, so read the profile the server already holds rather than asking for
+      // the resume again.
+      const profile = await fetchProfile(sessionToken);
+      await setProfile(profile);
+      onComplete(profile, sessionToken, true);
+      return;
+    }
     const profile = await uploadProfile(sessionToken, file!);
     await setProfile(profile);
     onComplete(profile, sessionToken);
@@ -56,7 +72,7 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
       setError('Enter your email.');
       return;
     }
-    if (!file) {
+    if (!signingIn && !file) {
       setError('Add your resume.');
       return;
     }
@@ -136,17 +152,19 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
           <div className="flex flex-1 flex-col items-start justify-center gap-4" role="status" aria-live="polite">
             <ThinkingOrb state="composing" size={64} />
             <div>
-              <h2 className="text-xl font-medium text-gray-950">Reading your resume</h2>
+              <h2 className="text-xl font-medium text-gray-950">{signingIn ? 'Signing you in' : 'Reading your resume'}</h2>
               <p className="mt-1 text-sm leading-5 text-gray-600">
-                Pulling out your jobs, projects and skills.
+                {signingIn
+                  ? 'Getting your saved answers.'
+                  : 'Pulling out your jobs, projects and skills. This takes a few seconds.'}
               </p>
             </div>
           </div>
         ) : step === 'code' ? (
           <form onSubmit={handleVerify} className="flex flex-col gap-5">
             <div>
-              <p className="text-xs font-medium text-gray-600">Step 2 of 6</p>
-              <h2 className="mt-2 text-xl font-medium text-gray-950">Check your email</h2>
+              {/* No step number. Typing a code we just emailed you is a door, not a room. */}
+              <h2 className="text-xl font-medium text-gray-950">Check your email</h2>
               <p id="code-help" className="mt-1 text-sm leading-5 text-gray-600">
                 Enter the code sent to <span className="font-medium text-gray-800">{email}</span>.
               </p>
@@ -178,7 +196,7 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
             </button>
 
             <div className="flex items-center gap-2">
-              <button type="button" onClick={handleResend} disabled={loading} className={textButtonClass}>
+              <button type="button" onClick={handleResend} disabled={loading} className={quietButtonClass}>
                 Resend code
               </button>
               <span className="text-gray-400" aria-hidden="true">·</span>
@@ -188,7 +206,7 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
                   setStep('form');
                   setError(null);
                 }}
-                className={textButtonClass}
+                className={quietButtonClass}
               >
                 Change email
               </button>
@@ -197,10 +215,12 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
         ) : (
           <form onSubmit={handleSubmit} className="flex flex-col gap-5">
             <div>
-              <p className="text-xs font-medium text-gray-600">Step 1 of 6</p>
-              <h2 className="mt-2 text-xl font-medium text-gray-950">Set up Litos</h2>
+              {!signingIn && <StepProgress step={1} total={5} />}
+              <h2 className="mt-2 text-xl font-medium text-gray-950">{signingIn ? 'Sign in' : 'Set up Litos'}</h2>
               <p className="mt-1 text-sm leading-5 text-gray-600">
-                Add your email and resume. You can review everything Litos creates.
+                {signingIn
+                  ? 'Use the email you signed up with. We will send you a code.'
+                  : 'Add your email and resume. You can review everything Litos creates.'}
               </p>
             </div>
 
@@ -221,6 +241,7 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
               />
             </div>
 
+            {!signingIn && (
             <div className="flex flex-col gap-2">
               <div>
                 <p className="text-sm font-medium text-gray-800">Resume</p>
@@ -252,18 +273,34 @@ export default function OnboardingScreen({ onComplete }: OnboardingScreenProps) 
                     {file ? file.name : 'Choose your resume'}
                   </span>
                   <span className="mt-0.5 block text-xs text-gray-600">
-                    {file ? 'Pick a different file' : 'Click or press Enter to browse'}
+                    {file ? 'Pick a different file' : 'PDF or Word, up to 10 MB'}
                   </span>
                 </span>
               </label>
             </div>
+            )}
+
+            {/* E2-16: the promise about their resume belongs BEFORE the button that acts on it,
+                not below it in the smallest type on the screen. */}
+            {!signingIn && (
+              <p className="text-xs leading-5 text-gray-600">
+                Your resume stays private and is used only to build your applications and drafts.
+              </p>
+            )}
 
             <button type="submit" disabled={loading} className={primaryButtonClass}>
-              {loading ? <PendingLabel onColor>Sending code…</PendingLabel> : 'Continue'}
+              {loading ? <PendingLabel onColor>Sending code…</PendingLabel> : signingIn ? 'Send me a code' : 'Continue'}
             </button>
 
-            <p className="border-t border-gray-200 pt-4 text-xs leading-5 text-gray-600">
-              Your resume stays private and is used only to build your applications and drafts.
+            <p className="border-t border-gray-200 pt-4 text-sm text-gray-600">
+              {signingIn ? 'New to Litos? ' : 'Already have an account? '}
+              <button
+                type="button"
+                onClick={() => { setMode(signingIn ? 'signup' : 'signin'); setError(null); }}
+                className="font-medium text-brand-800 underline-offset-4 hover:underline"
+              >
+                {signingIn ? 'Create one' : 'Sign in'}
+              </button>
             </p>
           </form>
         )}
