@@ -3,28 +3,28 @@ import BrandMark from './BrandMark';
 import { ThinkingOrb, type OrbState } from 'thinking-orbs';
 
 export const fieldClass =
-  'min-h-11 w-full rounded-inner border border-gray-300 bg-white px-3 text-sm text-gray-950 placeholder:text-gray-500 transition-[border-color,box-shadow] focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-100';
+  'min-h-11 w-full rounded-inner border border-gray-300 bg-white px-3 text-sm text-gray-950 placeholder:text-gray-500 transition-[border-color] focus:border-brand-500';
 
 export const textAreaClass =
   `${fieldClass} resize-none py-2.5 leading-6`;
 
 export const primaryButtonClass =
-  'inline-flex min-h-11 items-center justify-center rounded-control bg-brand-600 px-4 text-sm font-semibold text-white transition-[background-color,transform] hover:bg-brand-700 active:translate-y-px focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50';
+  'inline-flex min-h-11 items-center justify-center rounded-control bg-brand-600 px-4 text-sm font-medium text-white transition-[background-color,transform] hover:bg-brand-700 active:translate-y-px disabled:cursor-not-allowed disabled:opacity-50';
 
 export const secondaryButtonClass =
-  'inline-flex min-h-11 items-center justify-center rounded-control border border-gray-300 bg-white px-4 text-sm font-medium text-gray-800 transition-[background-color,border-color] hover:border-gray-400 hover:bg-gray-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50';
+  'inline-flex min-h-11 items-center justify-center rounded-control border border-gray-300 bg-white px-4 text-sm font-medium text-gray-800 transition-[background-color,border-color] hover:border-gray-400 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50';
 
 /* Blue is the action colour, so it belongs to the ONE action a screen is asking for. A row of
    blue "Draft" links made eight of them per screen and the eye stopped reading any as special. */
 export const textButtonClass =
-  'inline-flex min-h-11 items-center justify-center rounded-control px-2 text-sm font-medium text-brand-800 transition-colors hover:bg-brand-50 hover:text-brand-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500';
+  'inline-flex min-h-11 items-center justify-center rounded-control px-2 text-sm font-medium text-brand-800 transition-colors hover:bg-brand-50 hover:text-brand-800';
 
 /** A tertiary action that is not the screen's point: navigation, undo, "view all". Ink, not blue. */
 export const quietButtonClass =
-  'inline-flex min-h-11 items-center justify-center rounded-control px-2 text-sm font-medium text-gray-700 underline-offset-4 transition-colors hover:text-gray-950 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500';
+  'inline-flex min-h-11 items-center justify-center rounded-control px-2 text-sm font-medium text-gray-700 underline-offset-4 transition-colors hover:text-gray-950 hover:underline';
 
 export const iconButtonClass =
-  'inline-flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-control text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500';
+  'inline-flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-control text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-950';
 
 interface PopupHeaderProps {
   title?: string;
@@ -73,7 +73,7 @@ export function StepProgress({ step, total }: { step: number; total: number }) {
       >
         <span className="block h-full rounded-full bg-brand-600 transition-[width]" style={{ width: `${(step / total) * 100}%` }} />
       </div>
-      <span className="text-xs font-medium text-gray-600">{step} of {total}</span>
+      <span className="font-mono text-[11px] font-medium uppercase tracking-[0.05em] text-gray-600">{step} of {total}</span>
     </div>
   );
 }
@@ -101,6 +101,34 @@ export function PendingLabel({
     <span className="inline-flex min-w-0 items-center gap-1.5 whitespace-nowrap">
       <ThinkingOrb state={state} size={20} theme={onColor ? 'dark' : 'auto'} />
       <span className="whitespace-nowrap">{children}</span>
+    </span>
+  );
+}
+
+/* The dashboard's five-look chip system, mirrored, so a student who learns
+   "blue means your turn, green means it happened, amber means it stopped" in the
+   web app reads the same thing in the popup. Keys mirror components/app/ui.tsx.
+   Before this the extension had no chip at all and drew the identical statuses as
+   a dot plus sans text (audit findings 35, 36). */
+const QUIET = 'bg-gray-50 text-gray-600';
+const YOUR_TURN = 'bg-brand-100 text-brand-800';
+const HAPPENED = 'bg-success-50 text-success-700';
+const STOPPED = 'bg-warning-50 text-warning-700';
+const FAILED = 'bg-danger-50 text-danger-700';
+
+const CHIP_STYLES: Record<string, string> = {
+  draft: QUIET, generating: QUIET, drafted: QUIET, linkedin_only: QUIET,
+  ready: YOUR_TURN,
+  sent: HAPPENED, replied: HAPPENED, verified: HAPPENED, checked: HAPPENED,
+  warn: STOPPED, likely: STOPPED,
+  bounced: FAILED,
+};
+
+export function Chip({ label, kind }: { label: string; kind?: string }) {
+  const style = CHIP_STYLES[kind ?? label.toLowerCase()] ?? QUIET;
+  return (
+    <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 font-mono text-[11px] font-medium uppercase tracking-[0.05em] ${style}`}>
+      {label}
     </span>
   );
 }

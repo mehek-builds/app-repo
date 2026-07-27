@@ -5,7 +5,7 @@ import { outreachStatus } from '../lib/outreach-status';
 import Avatar from './Avatar';
 import { SkeletonBar } from './Skeleton';
 import WarningBanner from './WarningBanner';
-import { PendingLabel, PopupHeader, SectionLabel, StatusDot, textButtonClass } from './ui';
+import { Chip, PendingLabel, PopupHeader, SectionLabel, textButtonClass } from './ui';
 
 interface TrackingDashboardProps {
   token: string;
@@ -105,11 +105,8 @@ export default function TrackingDashboard({ token, onBack }: TrackingDashboardPr
                             {event.subject && <p className="mt-1 truncate text-xs text-gray-600">{event.subject}</p>}
                           </div>
                           <div className="flex flex-shrink-0 flex-col items-end gap-1">
-                            <span className={`inline-flex items-center gap-1.5 text-xs font-medium ${statusStyle.className}`}>
-                              <StatusDot tone={statusStyle.tone} />
-                              {statusStyle.label}
-                            </span>
-                            <time className="text-xs tabular-nums text-gray-600">{formatDate(event.sent_at)}</time>
+                            <Chip label={statusStyle.label} kind={event.status} />
+                            <time className="font-mono text-[11px] tabular-nums text-gray-600">{formatDate(event.sent_at)}</time>
                           </div>
                         </div>
 

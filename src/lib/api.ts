@@ -106,9 +106,18 @@ export async function getProfile(token: string): Promise<Profile> {
   return request<Profile>('/profile', {}, token);
 }
 
+export type StandingConsentEligibility = {
+  eligible: boolean;
+  reviewed_submits: number;
+  required: number;
+  remaining: number;
+};
+
 export type AutomationSettings = {
   automatic_submission_enabled: boolean;
   automatic_verification_enabled: boolean;
+  /** Unattended submission is earned, not offered. The server is the authority. */
+  standing_consent_eligibility?: StandingConsentEligibility | null;
 };
 
 export async function getAutomationSettings(token: string): Promise<AutomationSettings> {
@@ -116,6 +125,7 @@ export async function getAutomationSettings(token: string): Promise<AutomationSe
   return {
     automatic_submission_enabled: state.automatic_submission_enabled,
     automatic_verification_enabled: state.automatic_verification_enabled,
+    standing_consent_eligibility: state.standing_consent_eligibility ?? null,
   };
 }
 

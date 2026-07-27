@@ -82,6 +82,12 @@ export const OVERLAY = {
   /** Every Litos card shares one bottom-right anchor so a second card lines up under the first. */
   right: '20px',
   bottom: '20px',
+  /**
+   * One width for every injected card. They shipped at 340px, 272px and 272px, so two cards
+   * stacked on the same anchor stepped in and out by 68px. Sized to the popup's 380px minus its
+   * chrome, so the card a student meets on an employer's page is the width they already know.
+   */
+  width: '340px',
   /** One layer for all Litos surfaces. Max int, because employer portals use large z-indexes. */
   z: 2147483647,
   /** The gap between stacked cards. */
@@ -96,3 +102,36 @@ export const DISMISS_MS = {
   /** A card that is being replaced by another card. */
   handoff: 4000,
 } as const;
+
+/**
+ * Elevation for the injected cards.
+ *
+ * They shipped with three different answers on one anchor: `0 2px 10px` on the validation card,
+ * `0 8px 28px` on the auto-submit card, and `box-shadow: none` on four others. On an employer's
+ * page the card has no border to sit against, so depth is the only thing separating it from
+ * whatever is underneath. One value, matching the website's --shadow-raised.
+ */
+export const SHADOW = {
+  raised: '0 1px 2px rgba(18,18,15,0.04), 0 12px 32px -16px rgba(18,18,15,0.12)',
+} as const;
+
+/**
+ * The mark, inline, for surfaces that cannot import a component.
+ *
+ * The injected cards used to identify themselves with three different emoji (a page, a lightning
+ * bolt, a waving hand) and never showed the Litos mark at all, so on the one surface an employer
+ * sees, the product had no identity and no two cards agreed on what it looked like. Same artwork
+ * as BrandMark.tsx and the website's generator.
+ */
+export const MARK_PATH =
+  'M32.81 8 L76.01 8 L75.17 16 L31.97 16 Z M27.53 24 L77.93 24 L77.09 32 L26.69 32 Z ' +
+  'M22.25 40 L79.85 40 L79.01 48 L21.41 48 Z M16.97 56 L81.77 56 L80.93 64 L16.13 64 Z ' +
+  'M11.69 72 L83.69 72 L81.59 92 L9.59 92 Z';
+
+export function markSvg(size = 18): string {
+  return (
+    `<svg width="${size}" height="${size}" viewBox="0 0 100 100" aria-hidden="true" ` +
+    `style="flex-shrink:0;margin-top:1px;display:block;">` +
+    `<path fill="${COLOR.ink}" d="${MARK_PATH}"/></svg>`
+  );
+}
