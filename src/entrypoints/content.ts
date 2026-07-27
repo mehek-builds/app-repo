@@ -912,7 +912,7 @@ export default defineContentScript({
               // result), rather than the response object - treat both as a recoverable error
               // instead of letting `undefined` fall through as a fake success.
               if (chrome.runtime.lastError || !result) {
-                done({ error: chrome.runtime.lastError?.message || 'Litos is not responding. Fill this form yourself.' });
+                done({ error: chrome.runtime.lastError?.message || 'Litos could not finish. Fill this form in yourself.' });
               } else {
                 done(result);
               }
@@ -999,7 +999,7 @@ export default defineContentScript({
         const { profile, applicationProfile, resume } = result;
 
         if (!result.resume.quality?.ready_to_attach || result.resume.quality.issues.length > 0) {
-          if (statusEl) statusEl.textContent = 'The resume did not come out right. Nothing was attached or sent.';
+          if (statusEl) statusEl.textContent = 'The resume did not come out right, so nothing was attached and nothing was sent.';
           generationController.announce('The resume did not come out right. Try again.');
           if (yesBtn) {
             yesBtn.disabled = false;
@@ -1506,7 +1506,7 @@ export default defineContentScript({
             <span style="font-size:20px;flex-shrink:0;margin-top:1px;line-height:1;">⚡</span>
             <div>
               <div style="font-weight:500;font-size:13px;color:${COLOR.ink};line-height:1.4;">Fill in your email here?</div>
-              <div style="font-size:12px;color:${COLOR.muted};margin-top:2px;line-height:1.4;">You'll still set your own password and click Create Account.</div>
+              <div style="font-size:12px;color:${COLOR.muted};margin-top:2px;line-height:1.4;">You still choose your own password and click Create Account.</div>
             </div>
           </div>
           <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;min-width:0;">
@@ -1580,7 +1580,7 @@ export default defineContentScript({
                 password = await derivePortalPassword(portalHost);
               } else {
                 passwordWithheldReason =
-                  'password: left for you to enter - this account was set up on another device, so Litos cannot reproduce its password here';
+                  'You set this account up on another device, so type your password in yourself.';
               }
               if (creatingAccount && password) {
                 await recordPortalAccount({ host: portalHost, saltFingerprint, createdAt: Date.now() });
@@ -1589,7 +1589,7 @@ export default defineContentScript({
               // Signing in to an account Litos never provisioned: created by hand, created before
               // this feature, or created through Workday's "Sign in with Google" path, where there
               // is no password at all. Guessing here is what locks students out.
-              passwordWithheldReason = 'password: left for you to enter - Litos did not create this account';
+              passwordWithheldReason = 'Litos did not make this account, so type your password in yourself.';
             }
             const fillResult = await fillWorkdayAccountCreation({
               email: result.email,
@@ -1644,7 +1644,7 @@ export default defineContentScript({
             <div>
               <div style="font-weight:500;font-size:13px;color:${COLOR.ink};line-height:1.4;">This employer uses Workday</div>
               <div style="font-size:12px;color:${COLOR.muted};margin-top:2px;line-height:1.4;">
-                You'll need to sign in or create an account first - that part's still on you. Tap below
+                You need to sign in or make an account first. That part is yours. Tap below
                 and Litos will take you to the right screen, then speed up account setup and the
                 application from there.
               </div>
@@ -1688,7 +1688,7 @@ export default defineContentScript({
           `position:fixed;bottom:${OVERLAY.bottom};right:${OVERLAY.right};z-index:${OVERLAY.z};background:${COLOR.surface};border:1px solid ${COLOR.border};` +
           `border-radius:${RADIUS.card};padding:12px 16px;font-family:${FONT.sans};color-scheme:only light;` +
           `font-size:12px;line-height:1.4;color:${COLOR.ink};max-width:272px;`;
-        note.textContent = "Litos couldn't find an application form on this page. Open the page with the actual form fields, then try again.";
+        note.textContent = "Litos could not find an application form on this page. Open the page that has the boxes to fill in, then try again.";
         document.getElementById('litos-generic-note')?.remove();
         document.body.appendChild(note);
         setTimeout(() => note.remove(), 6000);

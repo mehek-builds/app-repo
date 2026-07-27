@@ -77,7 +77,7 @@ function StepHeader({ title, subtitle, step, total, showProgress }: { title: str
 function YesNoDecline({
   value,
   onChange,
-  options = ['Yes', 'No', 'Prefer not to answer'],
+  options = ['Yes', 'No', 'I would rather not say'],
   labelledBy,
 }: {
   value: string | undefined;
@@ -432,7 +432,7 @@ export default function AutofillSetupScreen({ token, profile, onBack, onLogout }
                   questions are location-specific, so Litos always leaves them for you (see
                   WORK_ELIGIBILITY_QUESTION in adapters/generic.ts). Do not re-wire this into an adapter. */}
               <p className="text-xs leading-5 text-gray-600">
-                Kept on your profile for reference. Applications ask this per location, so Litos
+                Saved on your profile so you can see it. Every country has different rules, so Litos
                 always leaves work-authorization questions for you to answer.
               </p>
             </div>
@@ -449,7 +449,7 @@ export default function AutofillSetupScreen({ token, profile, onBack, onLogout }
                   location-specific, so Litos never answers them from this flag (see
                   WORK_ELIGIBILITY_QUESTION in adapters/generic.ts). Do not re-wire. */}
               <p className="text-xs leading-5 text-gray-600">
-                Kept on your profile for reference. Sponsorship questions are asked per location,
+                Saved on your profile so you can see it. Sponsorship rules differ by country,
                 so Litos always leaves them for you to answer.
               </p>
             </div>
@@ -546,7 +546,7 @@ export default function AutofillSetupScreen({ token, profile, onBack, onLogout }
                 className="flex min-h-11 w-full items-center justify-between rounded-inner text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
               >
                 <span className="text-xs font-medium text-gray-700">
-                  EEO voluntary disclosures <span className="text-gray-600">(optional)</span>
+                  Questions about race and gender <span className="text-gray-600">(optional)</span>
                 </span>
                 <span className="text-gray-600" aria-hidden="true">{eeoExpanded ? '-' : '+'}</span>
               </button>
@@ -565,7 +565,7 @@ export default function AutofillSetupScreen({ token, profile, onBack, onLogout }
                     </div>
                   ))}
                   <p className="text-xs leading-5 text-gray-600">
-                    Left blank means Litos selects "Prefer not to say" on every application.
+                    Leave these blank and Litos picks "I would rather not say" on every application.
                   </p>
                 </div>
               )}
@@ -607,10 +607,10 @@ export default function AutofillSetupScreen({ token, profile, onBack, onLogout }
             <div className="border-y border-gray-200 py-3">
               <div className="flex items-start justify-between gap-3">
                 <div>
-                  <p className="text-xs font-medium text-gray-700">Automatically submit eligible applications</p>
+                  <p className="text-xs font-medium text-gray-700">Send an application without asking me again</p>
                   <p className="mt-1 text-xs leading-5 text-gray-600">
-                    Litos may submit applications you start after a cancelable countdown. It still
-                    pauses for missing or conflicting facts, sensitive attestations, CAPTCHA, and
+                    Litos may send applications you start after a countdown you can cancel. It still
+                    stops when something is missing, when two answers do not match, when a question is one you have to swear to, when a site checks you are human, and
                     unsupported portal steps.
                   </p>
                 </div>
@@ -640,7 +640,7 @@ export default function AutofillSetupScreen({ token, profile, onBack, onLogout }
 
             <div className="border-b border-gray-200 py-3">
               <div className="flex items-start justify-between gap-3">
-                <div><p className="text-xs font-medium text-gray-700">Use application verification codes</p><p className="mt-1 text-xs leading-5 text-gray-600">Litos may use connected Gmail or Outlook to find a code for an active application. Codes are not saved.</p></div>
+                <div><p className="text-xs font-medium text-gray-700">Read the code a company emails me</p><p className="mt-1 text-xs leading-5 text-gray-600">Litos can look in the Gmail or Outlook you connected to find a code for an application that is running. Codes are never saved.</p></div>
                 <button type="button" role="switch" aria-checked={automaticVerification} aria-label="Read the code a company emails me" disabled={!automationSettingsLoaded} onClick={() => setAutomaticVerification((value) => !value)} className="relative flex h-11 w-12 flex-shrink-0 items-center rounded-full disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2">
                   <span className={`relative block h-7 w-12 rounded-full transition-colors ${automaticVerification ? 'bg-brand-600' : 'bg-gray-200'}`}><span className={`absolute top-0.5 h-6 w-6 rounded-full border border-gray-200 bg-white transition-transform ${automaticVerification ? 'translate-x-5' : 'translate-x-0.5'}`} /></span>
                 </button>
@@ -697,7 +697,7 @@ export default function AutofillSetupScreen({ token, profile, onBack, onLogout }
               </p>
               <p className="mt-2 text-sm leading-6 text-gray-600">
                 Next application, Litos will tailor a resume and fill the form for you
-                {autoSubmit ? ', then submit it after a countdown you can cancel.' : '.'}
+                {autoSubmit ? ', then send it after a countdown you can cancel.' : '.'}
               </p>
             </div>
             <button
