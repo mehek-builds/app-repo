@@ -243,7 +243,19 @@ export async function verifyFieldPersists(
 export function splitName(fullName: string): { first: string; last: string } {
   const parts = fullName.trim().split(/\s+/).filter(Boolean);
   if (parts.length === 0) return { first: '', last: '' };
-  const isInitial = (token: string) => /^\p{L}\.?$/u.test(token);
+  /* An initial is a single letter, CAPITALISED. The capital is what distinguishes "W." in
+   * "Miranda W. Hudson" from the one-letter words that join two surnames in Iberian names: the
+   * Portuguese "e", the Spanish "y", the Catalan "i".
+   *
+   * Without that, "Maria Silva e Costa" came back as a Silva Costa and "Jose Garcia y Lopez" as a
+   * Garcia Lopez - half a surname dropped, which is the precise outcome the rule below refuses to
+   * cause. It matters where it is stored: a legal-name field feeds a background check, and a name
+   * that no longer matches a passport is a real problem for a real applicant.
+   *
+   * The asymmetry is deliberate and is the same one as the middle-name rule. A middle initial typed
+   * in lowercase keeps its period essentially always, and losing the tidy-up on the rare bare
+   * lowercase initial costs nothing; mangling a surname costs the application. */
+  const isInitial = (token: string) => /^\p{Lu}\.?$/u.test(token) || /^\p{L}\.$/u.test(token);
   // Never strip the first or the last token, however short: a surname really can be one letter,
   // and a first name given as an initial is the student's own choice about how to be addressed.
   const middle = parts.slice(1, -1).filter((token) => !isInitial(token));

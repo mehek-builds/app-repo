@@ -32,3 +32,31 @@ describe('splitName', () => {
     expect(splitName('  Miranda   W.   Hudson  ')).toEqual({ first: 'Miranda', last: 'Hudson' });
   });
 });
+
+/* Findings from the code review of this branch. */
+describe('splitName, Iberian and script edge cases', () => {
+  it('does not eat the conjunction that joins two surnames', () => {
+    expect(splitName('Maria Silva e Costa')).toEqual({ first: 'Maria', last: 'Silva e Costa' });
+    expect(splitName('Jose Garcia y Lopez')).toEqual({ first: 'Jose', last: 'Garcia y Lopez' });
+    expect(splitName('Francesc Puig i Serra')).toEqual({ first: 'Francesc', last: 'Puig i Serra' });
+  });
+
+  it('still drops a capitalised middle initial, with or without the period', () => {
+    expect(splitName('Miranda W Hudson')).toEqual({ first: 'Miranda', last: 'Hudson' });
+    expect(splitName('Miranda W. Hudson')).toEqual({ first: 'Miranda', last: 'Hudson' });
+  });
+
+  it('drops a lowercase initial only when it carries its period', () => {
+    expect(splitName('Miranda w. Hudson')).toEqual({ first: 'Miranda', last: 'Hudson' });
+  });
+
+  it('leaves non-Latin names whole', () => {
+    expect(splitName('Иван И. Петров')).toEqual({ first: 'Иван', last: 'Петров' });
+    expect(splitName('José M. Rodríguez-Peña')).toEqual({ first: 'José', last: 'Rodríguez-Peña' });
+  });
+
+  it('keeps suffixes on the surname', () => {
+    expect(splitName('Robert Downey Jr.')).toEqual({ first: 'Robert', last: 'Downey Jr.' });
+    expect(splitName('Martin Luther King III')).toEqual({ first: 'Martin', last: 'Luther King III' });
+  });
+});

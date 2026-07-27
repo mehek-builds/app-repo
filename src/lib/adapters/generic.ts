@@ -7,6 +7,7 @@ import {
   closeOpenCombobox,
   unattachableDocumentReasons,
   isHoneypotField,
+  splitName,
 } from './shared/dom';
 import {
   dateOrderCandidates,
@@ -1342,9 +1343,11 @@ export async function fillGenericApplication(params: GenericFillParams): Promise
   let jdTextCache: string | null = null;
   const jdText = () => (jdTextCache ??= extractGenericJdText());
 
-  const nameParts = fullName.trim().split(/\s+/);
-  const firstName = nameParts[0] ?? '';
-  const lastName = nameParts.length > 1 ? nameParts.slice(1).join(' ') : '';
+  /* splitName, not a second copy of it. This adapter had its own inline version of exactly the
+   * code the shared one replaced, so "Miranda W. Hudson" kept filling a surname of "W. Hudson"
+   * here after Greenhouse and Workday were fixed - on the BROADEST path in the extension, since
+   * generic runs on every company-hosted careers page outside the ATS allowlist. */
+  const { first: firstName, last: lastName } = splitName(fullName);
 
   // ── Text / email / tel / url inputs and textareas ──
   for (const el of candidateInputs()) {
