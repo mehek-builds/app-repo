@@ -1,12 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import {
-  getExperienceBank,
-  putExperienceBank,
-  getApplicationProfile,
-  putApplicationProfile,
-  getAutomationSettings,
-  putAutomationSettings,
-} from '../lib/api';
+import { getExperienceBank, putExperienceBank, getApplicationProfile, putApplicationProfile, getAutomationSettings, putAutomationSettings, type StandingConsentEligibility } from '../lib/api';
 import { setAutoSubmitEnabled } from '../lib/storage';
 import type { ExperienceBankEntry, ApplicationProfile, Profile } from '../lib/types';
 import { parseStoredDate, formatDate } from '../lib/adapters/shared/dates';
@@ -148,6 +141,11 @@ export default function AutofillSetupScreen({ token, profile, onBack, onLogout }
   const [autoSubmit, setAutoSubmit] = useState(false);
   const [automaticVerification, setAutomaticVerification] = useState(false);
   const [automationSettingsLoaded, setAutomationSettingsLoaded] = useState(false);
+  /* Referenced by the consent copy below but never declared, so main has not
+     typechecked since that change landed. The server is the authority on
+     whether unattended submission has been earned; this only explains the
+     state so the toggle is not an unexplained dead control. */
+  const [consentEligibility, setConsentEligibility] = useState<StandingConsentEligibility | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -170,6 +168,7 @@ export default function AutofillSetupScreen({ token, profile, onBack, onLogout }
         if (automation) {
           setAutoSubmit(automation.automatic_submission_enabled);
           setAutomaticVerification(automation.automatic_verification_enabled);
+          setConsentEligibility(automation.standing_consent_eligibility ?? null);
           setAutomationSettingsLoaded(true);
         } else {
           setAutoSubmit(false);
