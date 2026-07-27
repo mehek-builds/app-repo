@@ -273,7 +273,7 @@ export default function MainScreen({
           {error && <WarningBanner message={error} variant="error" />}
 
           <section aria-labelledby="workflow-heading">
-            <div id="workflow-heading"><SectionLabel>Workflow</SectionLabel></div>
+            <div id="workflow-heading"><SectionLabel>What Litos can do here</SectionLabel></div>
             <div className="mt-2 divide-y divide-gray-200 border-y border-gray-200">
               <div className="flex min-h-16 items-center gap-3 py-2">
                 <div className="min-w-0 flex-1">
