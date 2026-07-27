@@ -2,6 +2,23 @@
 
 All notable changes to the Litos extension are documented here.
 
+## [0.5.1] - 2026-07-27
+
+### Fixed
+
+- Your middle initial no longer ends up in the employer's "Last name" box. A
+  resume header reading "Miranda W. Hudson" was filling a surname of
+  "W. Hudson". You never see that box, but the employer's system stores it, and
+  an offer letter and a background check are cut from what it stored. Only
+  initials are dropped now, never the first or last part of your name.
+- Compound surnames survive. The word that joins two surnames in Portuguese,
+  Spanish and Catalan names ("Silva e Costa", "Garcia y Lopez", "Puig i Serra")
+  was being read as a middle initial and thrown away, which quietly turned half
+  a surname into none.
+- The same fix now applies on company-hosted careers pages, not just Greenhouse,
+  Lever, Ashby and Workday. Those pages are the broadest path the extension
+  takes, and they had their own older copy of the name-splitting code.
+
 ## [0.5.0] - 2026-07-27
 
 Minor rather than patch: this changes how you get into the extension, and renames
