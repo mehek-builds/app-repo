@@ -2,6 +2,24 @@
 
 All notable changes to the Litos extension are documented here.
 
+## [0.5.4] - 2026-07-27
+
+### Changed
+- Terminology, the last three "Beyond 50" findings from the 2026-07-27 audit. `Never ask on this
+  site` sat beside `No thanks` with nothing to say one was permanent, so the transient answer now
+  says it is transient (`Not this time`) on all three dismissal prompts. One action carried three
+  names (`Find people to email` on the aria-label, `Find people` on the button, `Yes, find people`
+  on the injected card) and is now `Find people` everywhere. The setup's four sections each carried
+  a DIFFERENT name in their tab and in their own header, eight names for four sections; one each now.
+- Store screenshots re-rendered so their baked copy matches their sources ("job seekers", and the
+  mock role is no longer an intern).
+
+### Note on the version number
+- **0.5.3 was cut and merged, then three more changes landed on `main` before it was ever
+  uploaded.** The artifact staged as 0.5.3 therefore does not match the tree now tagged 0.5.3.
+  Rather than ship an ambiguous number, this is 0.5.4. Nothing that was in 0.5.3 is lost; 0.5.4
+  contains all of it.
+
 ## [0.5.3] - 2026-07-27
 
 ### Fixed
