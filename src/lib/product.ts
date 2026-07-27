@@ -1,6 +1,6 @@
 export const PRODUCT_NAME = 'Litos';
 export const API_VERSION = '1';
-export const EXTENSION_VERSION = '0.5.3';
+export const EXTENSION_VERSION = '0.5.4';
 
 export function litosClientHeaders(): Record<string, string> {
   const version =
