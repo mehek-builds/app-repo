@@ -2,6 +2,38 @@
 
 All notable changes to the Litos extension are documented here.
 
+## [0.5.3] - 2026-07-27
+
+### Fixed
+- The setup screen threw `ReferenceError: consentEligibility is not defined` the moment a student
+  reached the step holding the auto-submit toggle, so the earned-consent lock never rendered and
+  the screen every new user walks through was broken. `main` did not typecheck. Restored the state
+  declaration, the loader assignment and the `StandingConsentEligibility` / `AutomationState` types.
+
+### Changed
+- The automation permissions are saved separately from the experience bank and the application
+  profile. Unattended submission is now refused by the backend until the student has personally
+  approved three real submissions, and that refusal used to throw inside the same try as the data
+  save: it reported "Could not save your setup" and bounced the student back to a form whose
+  contents had already been written. A refusal now keeps the data save, forces the local
+  auto-submit switch off so the extension cannot count down and click submit on a permission the
+  server never granted, and shows the server's own sentence.
+- The auto-submit toggle is disabled while the student is short of the bar, with the count and the
+  reason, and is never disabled while it is ON so it can always be turned back off.
+
+### Added
+- `/onboarding/state` in the preview mock backend now serves `standing_consent_eligibility`, so the
+  harness renders the locked toggle rather than the unlocked state no new student ever sees.
+
+## [0.5.2] - 2026-07-27
+
+### Changed
+- Design consistency between the extension, the injected cards and the site.
+- A CI gate that fails on retired vocabulary.
+
+_Never released. The version pin was assigned while `main` carried the setup-screen crash above, so
+0.5.3 supersedes it rather than reusing the number for a different tree._
+
 ## [0.5.1] - 2026-07-27
 
 ### Fixed
