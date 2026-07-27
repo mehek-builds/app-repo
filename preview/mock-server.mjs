@@ -46,6 +46,18 @@ createServer((req, res) => {
   // v2 autofill-setup screen: empty bank (so it seeds from the mock profile) and a
   // 404 application profile (so the screen falls back to blank fields, same as a
   // first-time visit) unless the preview wants to demo the pre-filled case.
+  // The setup screen reads /onboarding/state for the automation permissions AND, since the
+  // earned-consent gate, for standing_consent_eligibility. Without it the harness rendered the
+  // auto-submit toggle in its unlocked state, which is the ONE state a new student never sees, so
+  // the screen you could eyeball was the screen nobody gets. Ineligible is the honest default here:
+  // a preview account has approved nothing.
+  if (url.startsWith('/onboarding/state')) {
+    return send(res, 200, {
+      automatic_submission_enabled: false,
+      automatic_verification_enabled: false,
+      standing_consent_eligibility: { eligible: false, reviewed_submits: 0, required: 3, remaining: 3 },
+    });
+  }
   if (url.startsWith('/profile/experience-bank')) return send(res, 200, { entries: [] });
   if (url.startsWith('/profile/application')) {
     // GET simulates a first-time visit (no profile saved yet); PUT (the save step) succeeds.

@@ -648,7 +648,7 @@ export default defineBackground(() => {
     Promise.all([getStoredToken(), chrome.storage.session.get('litos_application_tabs')])
       .then(async ([token, stored]) => {
         const tabId = ((stored.litos_application_tabs ?? {}) as Record<string, number>)[applicationId];
-        if (!token || tabId === undefined) throw new Error('The company portal tab is no longer open. Return to the posting and prepare it again.');
+        if (!token || tabId === undefined) throw new Error('That tab is no longer open. Go back to the job and start it again.');
         await timeoutFetch(`${API_BASE}/applications/${applicationId}/status`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
@@ -663,7 +663,7 @@ export default defineBackground(() => {
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
           body: JSON.stringify(result?.ok ? { status: 'submitted' } : { status: 'failed', error: result?.error }),
         });
-        if (!result?.ok) throw new Error(result?.error ?? 'The company portal did not confirm submission.');
+        if (!result?.ok) throw new Error(result?.error ?? 'The company never confirmed it arrived.');
         sendResponse({ ok: true });
       })
       .catch((error) => sendResponse({ error: error instanceof Error ? error.message : 'Submission failed.' }));

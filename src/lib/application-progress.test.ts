@@ -19,9 +19,9 @@ describe('application progress copy', () => {
   });
 
   it('turns an extended submission wait into an explicit unknown state', () => {
-    expect(submissionProgress(8)).toContain('Waiting for the company portal');
+    expect(submissionProgress(8)).toContain('Waiting for the company');
     expect(submissionProgress(20)).toContain('Keep this tab open');
-    expect(submissionProgress(46)).toContain('Do not submit again');
+    expect(submissionProgress(46)).toContain('Do not send it again');
   });
 
   it('recognizes common ATS confirmation language without matching a generic form', () => {
@@ -55,7 +55,7 @@ describe('application progress copy', () => {
       "Application submitted. We couldn't submit your application because it was possible spam.",
     )).toEqual({
       kind: 'failure',
-      message: 'The company portal rejected this submission as possible spam. Review the form before trying again.',
+      message: 'The company turned this down as possible spam. Look over the form before trying again.',
     });
     expect(classifySubmissionOutcome('Thank you for applying.')).toEqual({ kind: 'confirmed' });
     expect(classifySubmissionOutcome('Application form')).toBeNull();

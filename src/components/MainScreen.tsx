@@ -262,7 +262,7 @@ export default function MainScreen({
                       setRole(e.target.value);
                       setJobDetailsTouched(true);
                     }}
-                    placeholder="SWE intern"
+                    placeholder="Software Engineer"
                     className={fieldClass}
                   />
                 </div>
