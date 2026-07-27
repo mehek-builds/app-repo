@@ -2,6 +2,44 @@
 
 All notable changes to the Litos extension are documented here.
 
+## [0.5.3] - 2026-07-27
+
+### Fixed
+- The setup screen threw `ReferenceError: consentEligibility is not defined` the moment a student
+  reached the step holding the auto-submit toggle, so the earned-consent lock never rendered and
+  the screen every new user walks through was broken. `main` did not typecheck. Restored the state
+  declaration, the loader assignment and the `StandingConsentEligibility` / `AutomationState` types.
+
+### Changed
+- The automation permissions are saved separately from the experience bank and the application
+  profile. Unattended submission is now refused by the backend until the student has personally
+  approved three real submissions, and that refusal used to throw inside the same try as the data
+  save: it reported "Could not save your setup" and bounced the student back to a form whose
+  contents had already been written. A refusal now keeps the data save, forces the local
+  auto-submit switch off so the extension cannot count down and click submit on a permission the
+  server never granted, and shows the server's own sentence.
+- The auto-submit toggle is disabled while the student is short of the bar, with the count and the
+  reason, and is never disabled while it is ON so it can always be turned back off.
+
+### Added
+- `/onboarding/state` in the preview mock backend now serves `standing_consent_eligibility`, so the
+  harness renders the locked toggle rather than the unlocked state no new student ever sees.
+
+Also carries the design-consistency pass and the vocabulary CI gate, which landed after the 0.5.2
+package was submitted and are therefore not in the version currently with Google.
+
+## [0.5.2] - 2026-07-27
+
+Submitted to the Chrome Web Store on 2026-07-27 and pending review at the time 0.5.3 was cut.
+
+### Changed
+- Terminology pass across the extension and the store images, plus a rewritten listing description.
+
+_The repo kept moving after that zip was packaged: the design-consistency pass, the vocabulary CI
+gate and the earned-consent work all landed while the version pin still read `0.5.2`. So the tree
+tagged 0.5.2 here is **not** the tree Google is reviewing. 0.5.3 exists to end that ambiguity rather
+than ship a second, different 0.5.2._
+
 ## [0.5.1] - 2026-07-27
 
 ### Fixed
