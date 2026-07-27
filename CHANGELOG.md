@@ -25,14 +25,20 @@ All notable changes to the Litos extension are documented here.
 - `/onboarding/state` in the preview mock backend now serves `standing_consent_eligibility`, so the
   harness renders the locked toggle rather than the unlocked state no new student ever sees.
 
+Also carries the design-consistency pass and the vocabulary CI gate, which landed after the 0.5.2
+package was submitted and are therefore not in the version currently with Google.
+
 ## [0.5.2] - 2026-07-27
 
-### Changed
-- Design consistency between the extension, the injected cards and the site.
-- A CI gate that fails on retired vocabulary.
+Submitted to the Chrome Web Store on 2026-07-27 and pending review at the time 0.5.3 was cut.
 
-_Never released. The version pin was assigned while `main` carried the setup-screen crash above, so
-0.5.3 supersedes it rather than reusing the number for a different tree._
+### Changed
+- Terminology pass across the extension and the store images, plus a rewritten listing description.
+
+_The repo kept moving after that zip was packaged: the design-consistency pass, the vocabulary CI
+gate and the earned-consent work all landed while the version pin still read `0.5.2`. So the tree
+tagged 0.5.2 here is **not** the tree Google is reviewing. 0.5.3 exists to end that ambiguity rather
+than ship a second, different 0.5.2._
 
 ## [0.5.1] - 2026-07-27
 
