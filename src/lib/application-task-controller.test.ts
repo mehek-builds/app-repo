@@ -54,7 +54,7 @@ describe('application task orchestration', () => {
 
     expect(outcomes).toEqual([{
       kind: 'failure',
-      message: 'The company portal rejected this submission as possible spam. Review the form before trying again.',
+      message: 'The company turned this down as possible spam. Look over the form before trying again.',
     }]);
     expect(onStop).toHaveBeenCalledTimes(1);
   });

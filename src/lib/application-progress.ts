@@ -20,9 +20,9 @@ export const SUBMISSION_MONITOR_TIMEOUT_MS = 60_000;
 
 export function submissionProgress(elapsedSeconds: number): string {
   const elapsed = Math.max(0, Math.floor(elapsedSeconds));
-  if (elapsed < 15) return `Waiting for the company portal · ${elapsed}s`;
+  if (elapsed < 15) return `Waiting for the company · ${elapsed}s`;
   if (elapsed < 45) return `Still waiting for confirmation · ${elapsed}s. Keep this tab open.`;
-  return 'Confirmation has not arrived yet. Do not submit again. Check the portal or your email before retrying.';
+  return 'No confirmation yet. Do not send it again. Check the company page or your email first.';
 }
 
 export function pageShowsSubmissionConfirmation(text: string): boolean {
@@ -33,10 +33,10 @@ export function pageShowsSubmissionConfirmation(text: string): boolean {
 export function pageSubmissionFailureMessage(text: string): string | null {
   const normalized = text.replace(/\s+/g, ' ');
   if (/possible spam/i.test(normalized)) {
-    return 'The company portal rejected this submission as possible spam. Review the form before trying again.';
+    return 'The company turned this down as possible spam. Look over the form before trying again.';
   }
   if (/couldn['’]t submit your application|unable to submit (?:your )?application/i.test(normalized)) {
-    return 'The company portal rejected the submission. Review its error message before trying again.';
+    return 'The company turned this down. Read their message before trying again.';
   }
   return null;
 }
