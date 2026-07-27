@@ -226,9 +226,41 @@ export async function verifyFieldPersists(
   return holdsValue(el, value);
 }
 
+/* First and last name, from the one name string a resume gives us.
+ *
+ * A MIDDLE INITIAL IS NOT PART OF A SURNAME. Resume headers print one constantly, and everything
+ * after the first token used to be handed to the Last name box: "Miranda W. Hudson" (a real
+ * University of Washington sample resume, measured 2026-07-27) filled a surname of "W. Hudson".
+ * That is not a cosmetic slip - an employer's ATS stores it, an offer letter and a background check
+ * are cut from it, and the student never sees the box we filled.
+ *
+ * Only INITIALS are dropped: a single letter, with or without a period. A spelled-out middle token
+ * is kept in the surname on purpose, because it cannot be told apart from the second half of a
+ * compound surname. "Maria Garcia Lopez" is a Garcia Lopez, and guessing otherwise would break a
+ * real name to tidy a rarer one. The failure modes are not symmetric: keeping a middle name is
+ * merely untidy, while dropping half of someone's surname is wrong.
+ */
 export function splitName(fullName: string): { first: string; last: string } {
-  const parts = fullName.trim().split(/\s+/);
-  return { first: parts[0] ?? '', last: parts.slice(1).join(' ') };
+  const parts = fullName.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return { first: '', last: '' };
+  /* An initial is a single letter, CAPITALISED. The capital is what distinguishes "W." in
+   * "Miranda W. Hudson" from the one-letter words that join two surnames in Iberian names: the
+   * Portuguese "e", the Spanish "y", the Catalan "i".
+   *
+   * Without that, "Maria Silva e Costa" came back as a Silva Costa and "Jose Garcia y Lopez" as a
+   * Garcia Lopez - half a surname dropped, which is the precise outcome the rule below refuses to
+   * cause. It matters where it is stored: a legal-name field feeds a background check, and a name
+   * that no longer matches a passport is a real problem for a real applicant.
+   *
+   * The asymmetry is deliberate and is the same one as the middle-name rule. A middle initial typed
+   * in lowercase keeps its period essentially always, and losing the tidy-up on the rare bare
+   * lowercase initial costs nothing; mangling a surname costs the application. */
+  const isInitial = (token: string) => /^\p{Lu}\.?$/u.test(token) || /^\p{L}\.$/u.test(token);
+  // Never strip the first or the last token, however short: a surname really can be one letter,
+  // and a first name given as an initial is the student's own choice about how to be addressed.
+  const middle = parts.slice(1, -1).filter((token) => !isInitial(token));
+  const last = parts.length > 1 ? [...middle, parts[parts.length - 1]].join(' ') : '';
+  return { first: parts[0], last };
 }
 
 // ATS labels are author-written, so a phone field is not reliably labelled "Phone". Live-caught
