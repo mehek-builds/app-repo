@@ -66,7 +66,11 @@ const profile: Profile = {
   grad_year: 2027,
 };
 
-const job: JobContext = { company: 'Figma', role: 'Software Engineer Intern', url: 'https://linkedin.com/jobs/view/123' };
+/* The role here is what the website's "real captures" section photographs
+   (role-quick-website public/product/extension-job.png). Keep it open-level:
+   an internship title here made the only real screenshots of the product on
+   the marketing site say Litos is an internship tool. */
+const job: JobContext = { company: 'Figma', role: 'Software Engineer', url: 'https://linkedin.com/jobs/view/123' };
 
 const contacts: Contact[] = [
   { id: 'c2', full_name: 'Marcus Lee', title: 'Software Engineer', persona: 'alumni', company_domain: 'figma.com', school_match: true, email: 'marcus.lee@figma.com', tier: 'green', status: 'verified' },
