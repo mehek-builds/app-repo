@@ -122,7 +122,7 @@ describe('redesigned popup workflows', () => {
     const user = userEvent.setup();
     render(<MainScreen {...mainProps} detectedJob={null} />);
 
-    await user.click(screen.getByRole('button', { name: 'Find people to email' }));
+    await user.click(screen.getByRole('button', { name: 'Find people' }));
 
     expect(screen.getByRole('alert')).toHaveProperty('textContent', 'Enter both the company and role.');
     expect(api.resolveContacts).not.toHaveBeenCalled();
@@ -134,7 +134,7 @@ describe('redesigned popup workflows', () => {
     vi.mocked(api.resolveContacts).mockResolvedValueOnce([contact]);
     render(<MainScreen {...mainProps} detectedJob={job} onContactsFound={onContactsFound} />);
 
-    await user.click(screen.getByRole('button', { name: 'Find people to email' }));
+    await user.click(screen.getByRole('button', { name: 'Find people' }));
 
     await waitFor(() => {
       expect(api.resolveContacts).toHaveBeenCalledWith('token', {

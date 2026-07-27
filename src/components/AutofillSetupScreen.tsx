@@ -267,10 +267,10 @@ export default function AutofillSetupScreen({ token, profile, onBack, onLogout }
         {!firstRun && step !== 'saving' && step !== 'done' && (
           <nav aria-label="Answer sections" className="-mx-1 flex gap-1 overflow-x-auto pb-1">
             {([
-              ['experience', 'Experience'],
+              ['experience', 'Your experience'],
               ['checks', 'About you'],
-              ['required', 'Every form'],
-              ['links', 'Links'],
+              ['required', 'Every form asks these'],
+              ['links', 'Your links'],
             ] as const).map(([key, label]) => (
               <button
                 key={key}
@@ -381,7 +381,7 @@ export default function AutofillSetupScreen({ token, profile, onBack, onLogout }
               showProgress={firstRun}
               step={3}
               total={5}
-              title="A couple of quick checks"
+              title="About you"
               subtitle="Not usually on a resume, so we ask instead of guessing."
             />
 
@@ -429,7 +429,7 @@ export default function AutofillSetupScreen({ token, profile, onBack, onLogout }
               showProgress={firstRun}
               step={4}
               total={5}
-              title="Things every form asks"
+              title="Every form asks these"
               subtitle="We never guess these, so we ask you once."
             />
 
@@ -607,7 +607,7 @@ export default function AutofillSetupScreen({ token, profile, onBack, onLogout }
 
         {step === 'links' && (
           <div className="flex animate-fade-in-up flex-col gap-4">
-            <StepHeader showProgress={firstRun} step={5} total={5} title="Links and contact" subtitle="Leave anything you do not have blank." />
+            <StepHeader showProgress={firstRun} step={5} total={5} title="Your links" subtitle="Leave anything you do not have blank." />
 
             {(
               [
