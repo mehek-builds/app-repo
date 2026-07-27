@@ -210,16 +210,41 @@ export default function AutofillSetupScreen({ token, profile, onBack, onLogout }
         ...appProfile,
         eeo_prefs: Object.keys(eeo).length > 0 ? eeo : null,
       });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not save your setup.');
+      setStep('links');
+      return;
+    }
+
+    // The automation permissions are saved SEPARATELY, and their failure is NOT a setup failure.
+    //
+    // The backend now refuses to enable unattended submission until the student has approved a few
+    // applications themselves. This call used to sit inside the same try as the experience bank and
+    // the application profile, so a refused toggle threw, reported "Could not save your setup", and
+    // bounced the student back to a form whose contents had in fact already been written. They
+    // would have saved it a second time to fix a problem that did not exist.
+    try {
       await putAutomationSettings(token, {
         automatic_submission_enabled: autoSubmit,
         automatic_verification_enabled: automaticVerification,
       });
       await setAutoSubmitEnabled(autoSubmit);
-      setStep('done');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not save your setup.');
-      setStep('links');
+      // Keep the LOCAL switch in step with what the server actually holds. Otherwise the extension
+      // counts down and clicks submit on a permission the backend never granted, which is the exact
+      // outcome the gate exists to prevent.
+      setAutoSubmit(false);
+      await setAutoSubmitEnabled(false);
+      setError(
+        err instanceof Error
+          ? err.message
+          : 'Your answers are saved. The automation setting was not changed.',
+      );
+      setStep('done');
+      return;
     }
+
+    setStep('done');
   };
 
   if (step === 'loading') {
@@ -619,7 +644,10 @@ export default function AutofillSetupScreen({ token, profile, onBack, onLogout }
                   role="switch"
                   aria-checked={autoSubmit}
                   aria-label="Send an application without asking me again"
-                  disabled={!automationSettingsLoaded}
+                  // Locked until earned, mirroring the dashboard, and NEVER locked while it is on
+                  // so the student can always turn it back off from here. Without this the toggle
+                  // flipped freely and the save then 403d, which is a worse way to learn the rule.
+                  disabled={!automationSettingsLoaded || (!autoSubmit && consentEligibility?.eligible === false)}
                   onClick={() => setAutoSubmit((v) => !v)}
                   className="relative flex h-11 w-12 flex-shrink-0 items-center rounded-full disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2"
                 >
@@ -646,6 +674,15 @@ export default function AutofillSetupScreen({ token, profile, onBack, onLogout }
                 </button>
               </div>
             </div>
+
+            {consentEligibility && !consentEligibility.eligible && !autoSubmit && (
+              <p className="-mt-2 text-xs leading-5 text-amber-700">
+                Sending without asking is available after you have approved{' '}
+                {consentEligibility.required} applications yourself. {consentEligibility.remaining} to
+                go. That way you have seen what Litos fills in on a real form before it sends one
+                without you.
+              </p>
+            )}
 
             <button
               type="button"
