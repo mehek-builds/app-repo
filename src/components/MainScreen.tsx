@@ -293,7 +293,7 @@ export default function MainScreen({
                     only affordance used to be the words "Not started", with its actual control a
                     hundred pixels below as a full-width outlined button - which read as the
                     screen's primary while the real primary sat inside the row above. */}
-                <button type="submit" aria-label="Find people to email" disabled={loading} className={secondaryButtonClass}>
+                <button type="submit" aria-label="Find people" disabled={loading} className={secondaryButtonClass}>
                   {loading ? <PendingLabel state="searching">Looking…</PendingLabel> : 'Find people'}
                 </button>
               </div>

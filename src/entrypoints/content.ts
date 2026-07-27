@@ -589,12 +589,12 @@ export default defineContentScript({
               flex:1;background:${COLOR.brand};color:white;border:none;border-radius:${RADIUS.control};
               min-height:44px;padding:0 12px;font-size:13px;font-weight:500;cursor:pointer;
               font-family:${FONT.sans};color-scheme:only light;
-            ">Yes, find people</button>
+            ">Find people</button>
             <button id="wp-no" style="
               flex:1;background:${COLOR.surfaceAlt};color:${COLOR.ink};border:none;border-radius:${RADIUS.control};
               min-height:44px;padding:0 12px;font-size:13px;font-weight:500;cursor:pointer;
               font-family:${FONT.sans};color-scheme:only light;
-            ">No thanks</button>
+            ">Not this time</button>
           </div>
           <!-- A forced yes/no on someone's own application page left no way to stop being
                interrupted short of uninstalling. This is the third answer. -->
@@ -602,7 +602,7 @@ export default defineContentScript({
             margin-top:10px;background:none;border:none;padding:0;cursor:pointer;
             font-size:11px;color:${COLOR.faint};text-decoration:underline;text-underline-offset:2px;
             font-family:${FONT.sans};color-scheme:only light;
-          ">Never ask on this site</button>
+          ">Never ask me on this site again</button>
         </div>
         <style>
           @keyframes wp-slide-in {
@@ -816,7 +816,7 @@ export default defineContentScript({
               flex:1;background:${COLOR.surfaceAlt};color:${COLOR.ink};border:none;border-radius:${RADIUS.control};
               min-height:44px;padding:0 12px;font-size:13px;font-weight:500;cursor:pointer;
               font-family:${FONT.sans};color-scheme:only light;
-            ">No thanks</button>
+            ">Not this time</button>
           </div>
         </div>
       `;
@@ -1523,7 +1523,7 @@ export default defineContentScript({
               flex:1;background:${COLOR.surfaceAlt};color:${COLOR.ink};border:none;border-radius:${RADIUS.control};
               min-height:44px;padding:0 12px;font-size:13px;font-weight:500;cursor:pointer;
               font-family:${FONT.sans};color-scheme:only light;
-            ">No thanks</button>
+            ">Not this time</button>
           </div>
         </div>
       `;
