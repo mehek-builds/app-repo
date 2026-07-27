@@ -1,3 +1,4 @@
+import { COLOR, FONT } from '../../styles/tokens';
 import type { ApplicationProfile, AutofillResult, Profile } from '../types';
 
 // LinkedIn Easy Apply adapter (PRD-v2-resume-autofill.md Section 7). Originally scoped as
@@ -158,11 +159,11 @@ async function answerChoiceBlock(block: Element, desired: Desired): Promise<bool
 // grade (R-005) is a deterministic band mapping, not model output, and calling it an "AI
 // draft" would tell the student an LLM invented their GPA.
 function markForReview(el: HTMLElement, note = 'AI draft: review before submitting'): void {
-  el.style.outline = '2px solid #f59e0b';
+  el.style.outline = `2px solid ${COLOR.warn}`;
   el.style.outlineOffset = '1px';
   const badge = document.createElement('div');
   badge.textContent = note;
-  badge.style.cssText = 'font:500 11px "Hanken Grotesk Variable","Hanken Grotesk",sans-serif;color:#b45309;margin-top:4px;';
+  badge.style.cssText = `font:500 11px ${FONT.sans};color:${COLOR.warn};margin-top:4px;`;
   el.insertAdjacentElement('afterend', badge);
 }
 

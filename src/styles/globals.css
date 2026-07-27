@@ -40,7 +40,6 @@ body {
   font-family: 'Hanken Grotesk Variable', 'Hanken Grotesk', sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  font-feature-settings: 'ss01', 'ss03';
   color: var(--litos-ink);
   background: var(--litos-surface);
 }
@@ -55,6 +54,20 @@ select {
 button,
 [role='button'] {
   cursor: pointer;
+}
+
+/* Same focus as the website (role-quick-website/app/globals.css): a 2px brand
+   outline, offset 2. The extension used to draw a ring with its own offset per
+   control, so the two halves of one product highlighted focus differently
+   (audit finding 29). */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--litos-accent);
+  outline-offset: 2px;
 }
 
 button:disabled,

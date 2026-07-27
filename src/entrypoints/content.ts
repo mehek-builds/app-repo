@@ -9,7 +9,7 @@ import {
 import { isLinkedInApplicationPage, extractLinkedInJdText, fillLinkedInApplication } from '../lib/adapters/linkedin';
 import { isLikelyApplicationForm, extractGenericJdText, getGenericJobDetails, fillGenericApplication, drainR030CandidateLabels } from '../lib/adapters/generic';
 import { getPortalAccounts, recordPortalAccount } from '../lib/storage';
-import { COLOR, FONT, RADIUS , OVERLAY, DISMISS_MS } from '../styles/tokens';
+import { COLOR, DISMISS_MS, FONT, OVERLAY, RADIUS, SHADOW, markSvg } from '../styles/tokens';
 
 /* Status icons drawn as SVG.
  *
@@ -433,8 +433,8 @@ export default defineContentScript({
             const host = document.createElement('div');
             host.id = 'litos-validation-card';
             host.style.cssText =
-              `position:fixed;right:${OVERLAY.right};bottom:${OVERLAY.bottom};z-index:${OVERLAY.z};max-width:340px;` +
-              `background:#fff;border:1px solid ${COLOR.border};border-radius:${RADIUS.card};box-shadow:0 2px 10px rgba(18,18,15,.08);` +
+              `position:fixed;right:${OVERLAY.right};bottom:${OVERLAY.bottom};z-index:${OVERLAY.z};width:${OVERLAY.width};` +
+              `background:#fff;border:1px solid ${COLOR.border};border-radius:${RADIUS.card};box-shadow:${SHADOW.raised};` +
               `padding:12px 14px;font:13px/1.45 ${FONT.sans};color:${COLOR.ink};`;
             document.documentElement.appendChild(host);
             state.statusEl = host;
@@ -572,12 +572,12 @@ export default defineContentScript({
           font-family: ${FONT.sans}; color-scheme: only light;
           font-size: 13px;
           line-height: 1.4;
-          box-shadow: none;
+          box-shadow: ${SHADOW.raised};
           width: 272px;
           box-sizing: border-box;
           animation: wp-slide-in 0.25s ease-out;
         ">
-          <button id="wp-close" style="position:absolute;top:10px;right:12px;background:none;border:none;cursor:pointer;font-size:17px;opacity:0.4;color:#333;padding:0;line-height:1;">×</button>
+          <button id="wp-close" style="position:absolute;top:10px;right:12px;background:none;border:none;cursor:pointer;font-size:17px;opacity:0.55;color:${COLOR.muted};padding:0;line-height:1;">×</button>
           <div style="display:flex;align-items:flex-start;gap:9px;margin-bottom:12px;line-height:1.4;">
             <div>
               <div style="font-weight:500;font-size:13px;color:${COLOR.ink};line-height:1.4;">${escapeHtml(headline)}</div>
@@ -587,12 +587,12 @@ export default defineContentScript({
           <div style="display:flex;gap:8px;">
             <button id="wp-yes" style="
               flex:1;background:${COLOR.brand};color:white;border:none;border-radius:${RADIUS.control};
-              padding:9px 0;font-size:12px;font-weight:500;cursor:pointer;
+              min-height:44px;padding:0 12px;font-size:13px;font-weight:500;cursor:pointer;
               font-family:${FONT.sans};color-scheme:only light;
             ">Yes, find people</button>
             <button id="wp-no" style="
               flex:1;background:${COLOR.surfaceAlt};color:${COLOR.ink};border:none;border-radius:${RADIUS.control};
-              padding:9px 0;font-size:12px;font-weight:500;cursor:pointer;
+              min-height:44px;padding:0 12px;font-size:13px;font-weight:500;cursor:pointer;
               font-family:${FONT.sans};color-scheme:only light;
             ">No thanks</button>
           </div>
@@ -684,14 +684,14 @@ export default defineContentScript({
       const card = document.createElement('div');
       card.id = 'litos-submit-card';
       card.innerHTML = `
-        <div style="position:relative;background:white;border:1px solid ${COLOR.border};border-radius:${RADIUS.card};padding:16px;font-family:${FONT.sans};color-scheme:only light;font-size:13px;line-height:1.4;box-shadow:none;width:272px;box-sizing:border-box;animation:wp-slide-in 0.25s ease-out;">
-          <button id="wp-submit-close" aria-label="Close Litos submission status" style="position:absolute;top:10px;right:12px;background:none;border:none;cursor:pointer;font-size:17px;opacity:0.4;color:#333;padding:0;line-height:1;">×</button>
+        <div style="position:relative;background:white;border:1px solid ${COLOR.border};border-radius:${RADIUS.card};padding:16px;font-family:${FONT.sans};color-scheme:only light;font-size:13px;line-height:1.4;box-shadow:${SHADOW.raised};width:${OVERLAY.width};box-sizing:border-box;animation:wp-slide-in 0.25s ease-out;">
+          <button id="wp-submit-close" aria-label="Close Litos submission status" style="position:absolute;top:10px;right:12px;background:none;border:none;cursor:pointer;font-size:17px;opacity:0.55;color:${COLOR.muted};padding:0;line-height:1;">×</button>
           <div style="display:flex;align-items:flex-start;gap:9px;line-height:1.4;">
             <span id="wp-submit-icon" style="font-size:20px;flex-shrink:0;line-height:1.4;"><canvas id="wp-submit-orb"></canvas></span>
             <div style="line-height:1.4;">
               <div id="wp-submit-title" style="font-weight:500;font-size:13px;color:${COLOR.ink};line-height:1.4;">Sending</div>
               <div style="font-size:12px;color:${COLOR.muted};margin-top:2px;word-break:break-word;line-height:1.4;">${escapeHtml(title)} at ${escapeHtml(company)}</div>
-              <div id="wp-submit-status" role="status" aria-live="polite" style="font-size:11px;color:${COLOR.muted};margin-top:8px;line-height:1.4;">${submissionProgress(0)}</div>
+              <div id="wp-submit-status" role="status" aria-live="polite" style="font-size:12.5px;font-family:${FONT.mono};color:${COLOR.muted};margin-top:8px;line-height:1.4;">${submissionProgress(0)}</div>
             </div>
           </div>
         </div>
@@ -790,12 +790,12 @@ export default defineContentScript({
           position: relative;
           background: white; border: 1px solid ${COLOR.border}; border-radius: ${RADIUS.card};
           padding: 16px 16px 14px; font-family: ${FONT.sans}; color-scheme: only light;
-          font-size: 13px; line-height: 1.4; box-shadow: none;
+          font-size: 13px; line-height: 1.4; box-shadow: ${SHADOW.raised};
           width: 300px; box-sizing: border-box; animation: wp-slide-in 0.25s ease-out;
         ">
-          <button id="wp-resume-close" aria-label="Close Litos resume assistant" style="position:absolute;top:10px;right:12px;background:none;border:none;cursor:pointer;font-size:17px;opacity:0.4;color:#333;padding:0;line-height:1;">×</button>
+          <button id="wp-resume-close" aria-label="Close Litos resume assistant" style="position:absolute;top:10px;right:12px;background:none;border:none;cursor:pointer;font-size:17px;opacity:0.55;color:${COLOR.muted};padding:0;line-height:1;">×</button>
           <div style="display:flex;align-items:flex-start;gap:9px;margin-bottom:12px;line-height:1.4;">
-            <span style="font-size:20px;flex-shrink:0;margin-top:1px;line-height:1;">📄</span>
+            ${markSvg()}
             <div>
               <div style="font-weight:500;font-size:13px;color:${COLOR.ink};line-height:1.4;">Fill this application for you?</div>
               <div style="font-size:12px;color:${COLOR.muted};margin-top:2px;word-break:break-word;line-height:1.4;">${escapeHtml(title)} at ${escapeHtml(company)}</div>
@@ -809,12 +809,12 @@ export default defineContentScript({
           <div style="display:flex;gap:8px;">
             <button id="wp-resume-yes" style="
               flex:1;background:${COLOR.brand};color:white;border:none;border-radius:${RADIUS.control};
-              padding:9px 0;font-size:12px;font-weight:500;cursor:pointer;
+              min-height:44px;padding:0 12px;font-size:13px;font-weight:500;cursor:pointer;
               font-family:${FONT.sans};color-scheme:only light;
             ">Yes, fill it</button>
             <button id="wp-resume-no" style="
               flex:1;background:${COLOR.surfaceAlt};color:${COLOR.ink};border:none;border-radius:${RADIUS.control};
-              padding:9px 0;font-size:12px;font-weight:500;cursor:pointer;
+              min-height:44px;padding:0 12px;font-size:13px;font-weight:500;cursor:pointer;
               font-family:${FONT.sans};color-scheme:only light;
             ">No thanks</button>
           </div>
@@ -1290,7 +1290,7 @@ export default defineContentScript({
           pointer-events:auto;position:absolute;display:flex;align-items:center;gap:12px;
           background:${COLOR.surface};color:${COLOR.ink};border:1px solid ${COLOR.border};
           border-radius:${RADIUS.card};padding:10px 12px;
-          box-shadow:0 8px 28px rgba(18,18,15,0.10);white-space:nowrap;
+          box-shadow:${SHADOW.raised};white-space:nowrap;
           animation:wp-slide-in 0.2s ease-out;
         ">
           <div style="position:relative;width:46px;height:46px;flex-shrink:0;">
@@ -1300,15 +1300,15 @@ export default defineContentScript({
                 stroke-width="4" stroke-linecap="round" stroke-dasharray="${CIRC}"
                 stroke-dashoffset="0" style="transition:stroke-dashoffset 1s linear;"/>
             </svg>
-            <div id="wp-as-num" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:500;">${remaining}</div>
+            <div id="wp-as-num" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:500;font-family:${FONT.mono};">${remaining}</div>
           </div>
           <div style="display:flex;flex-direction:column;gap:2px;">
             <div style="font-size:12px;font-weight:500;">${actionLabel} your application</div>
             <div id="wp-as-sub" style="font-size:11px;color:${COLOR.muted};">${fillResult.fields_filled} field${fillResult.fields_filled === 1 ? '' : 's'} filled. Auto-submits in ${remaining}s.</div>
           </div>
           <button id="wp-as-cancel" style="
-            pointer-events:auto;background:${COLOR.ink};color:#fff;border:none;border-radius:${RADIUS.control};
-            padding:9px 16px;font-size:12px;font-weight:500;cursor:pointer;
+            pointer-events:auto;background:${COLOR.brand};color:#fff;border:none;border-radius:${RADIUS.control};
+            min-height:44px;padding:0 18px;font-size:13px;font-weight:500;cursor:pointer;
             font-family:${FONT.sans};color-scheme:only light;
           ">Cancel</button>
         </div>
@@ -1498,12 +1498,12 @@ export default defineContentScript({
           position: relative;
           background: white; border: 1px solid ${COLOR.border}; border-radius: ${RADIUS.card};
           padding: 16px 16px 14px; font-family: ${FONT.sans}; color-scheme: only light;
-          font-size: 13px; line-height: 1.4; box-shadow: none;
+          font-size: 13px; line-height: 1.4; box-shadow: ${SHADOW.raised};
           width: 272px; box-sizing: border-box; animation: wp-slide-in 0.25s ease-out;
         ">
-          <button id="wp-account-close" style="position:absolute;top:10px;right:12px;background:none;border:none;cursor:pointer;font-size:17px;opacity:0.4;color:#333;padding:0;line-height:1;">×</button>
+          <button id="wp-account-close" style="position:absolute;top:10px;right:12px;background:none;border:none;cursor:pointer;font-size:17px;opacity:0.55;color:${COLOR.muted};padding:0;line-height:1;">×</button>
           <div style="display:flex;align-items:flex-start;gap:9px;margin-bottom:12px;line-height:1.4;">
-            <span style="font-size:20px;flex-shrink:0;margin-top:1px;line-height:1;">⚡</span>
+            ${markSvg()}
             <div>
               <div style="font-weight:500;font-size:13px;color:${COLOR.ink};line-height:1.4;">Fill in your email here?</div>
               <div style="font-size:12px;color:${COLOR.muted};margin-top:2px;line-height:1.4;">You still choose your own password and click Create Account.</div>
@@ -1516,12 +1516,12 @@ export default defineContentScript({
           <div style="display:flex;gap:8px;">
             <button id="wp-account-yes" style="
               flex:1;background:${COLOR.brand};color:white;border:none;border-radius:${RADIUS.control};
-              padding:9px 0;font-size:12px;font-weight:500;cursor:pointer;
+              min-height:44px;padding:0 12px;font-size:13px;font-weight:500;cursor:pointer;
               font-family:${FONT.sans};color-scheme:only light;
             ">Yes, fill it</button>
             <button id="wp-account-no" style="
               flex:1;background:${COLOR.surfaceAlt};color:${COLOR.ink};border:none;border-radius:${RADIUS.control};
-              padding:9px 0;font-size:12px;font-weight:500;cursor:pointer;
+              min-height:44px;padding:0 12px;font-size:13px;font-weight:500;cursor:pointer;
               font-family:${FONT.sans};color-scheme:only light;
             ">No thanks</button>
           </div>
@@ -1635,12 +1635,12 @@ export default defineContentScript({
           position: relative;
           background: white; border: 1px solid ${COLOR.border}; border-radius: ${RADIUS.card};
           padding: 16px 16px 14px; font-family: ${FONT.sans}; color-scheme: only light;
-          font-size: 13px; line-height: 1.4; box-shadow: none;
+          font-size: 13px; line-height: 1.4; box-shadow: ${SHADOW.raised};
           width: 272px; box-sizing: border-box; animation: wp-slide-in 0.25s ease-out;
         ">
-          <button id="wp-start-close" style="position:absolute;top:10px;right:12px;background:none;border:none;cursor:pointer;font-size:17px;opacity:0.4;color:#333;padding:0;line-height:1;">×</button>
+          <button id="wp-start-close" style="position:absolute;top:10px;right:12px;background:none;border:none;cursor:pointer;font-size:17px;opacity:0.55;color:${COLOR.muted};padding:0;line-height:1;">×</button>
           <div style="display:flex;align-items:flex-start;gap:9px;margin-bottom:12px;line-height:1.4;">
-            <span style="font-size:20px;flex-shrink:0;margin-top:1px;line-height:1;">👋</span>
+            ${markSvg()}
             <div>
               <div style="font-weight:500;font-size:13px;color:${COLOR.ink};line-height:1.4;">This employer uses Workday</div>
               <div style="font-size:12px;color:${COLOR.muted};margin-top:2px;line-height:1.4;">
@@ -1652,7 +1652,7 @@ export default defineContentScript({
           </div>
           <button id="wp-start-go" style="
             width:100%;background:${COLOR.brand};color:white;border:none;border-radius:${RADIUS.control};
-            padding:9px 0;font-size:12px;font-weight:500;cursor:pointer;
+            min-height:44px;padding:0 12px;font-size:13px;font-weight:500;cursor:pointer;
             font-family:${FONT.sans};color-scheme:only light;
           ">Take me there</button>
         </div>
@@ -1687,7 +1687,7 @@ export default defineContentScript({
         note.style.cssText =
           `position:fixed;bottom:${OVERLAY.bottom};right:${OVERLAY.right};z-index:${OVERLAY.z};background:${COLOR.surface};border:1px solid ${COLOR.border};` +
           `border-radius:${RADIUS.card};padding:12px 16px;font-family:${FONT.sans};color-scheme:only light;` +
-          `font-size:12px;line-height:1.4;color:${COLOR.ink};max-width:272px;`;
+          `font-size:12px;line-height:1.4;color:${COLOR.ink};max-width:${OVERLAY.width};`;
         note.textContent = "Litos could not find an application form on this page. Open the page that has the boxes to fill in, then try again.";
         document.getElementById('litos-generic-note')?.remove();
         document.body.appendChild(note);

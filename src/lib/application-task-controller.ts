@@ -1,3 +1,4 @@
+import { COLOR, FONT, RADIUS } from '../styles/tokens';
 import {
   classifySubmissionOutcome,
   resumeGenerationStatus,
@@ -97,7 +98,10 @@ export function createResumeReviewPrompt(options: {
   const cancel = document.createElement('button');
   cancel.type = 'button';
   cancel.textContent = 'Not now';
-  cancel.style.cssText = 'flex:1;background:#f3f4f6;color:#374151;border:none;border-radius:999px;padding:8px 6px;font-size:11px;font-weight:500;cursor:pointer;line-height:1.4;';
+  cancel.style.cssText =
+    `flex:1;background:${COLOR.surfaceAlt};color:${COLOR.ink};border:none;border-radius:${RADIUS.control};` +
+    `min-height:44px;padding:0 12px;font-size:13px;font-weight:500;cursor:pointer;line-height:1.4;` +
+    `font-family:${FONT.sans};`;
   actions.append(attach, cancel);
   options.statusElement.appendChild(actions);
   options.yesButton.style.display = 'none';

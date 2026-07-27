@@ -1,3 +1,4 @@
+import { COLOR, FONT } from '../../styles/tokens';
 import type { ApplicationProfile, AutofillResult, Profile } from '../types';
 import {
   commitChoice as checkChoice,
@@ -1771,11 +1772,11 @@ export async function fillGenericApplication(params: GenericFillParams): Promise
 // grade (R-005) is a deterministic band mapping, not model output, and calling it an "AI
 // draft" would tell the student an LLM invented their GPA.
 function markForReview(el: HTMLElement, note = '✎ AI draft: review before submitting') {
-  el.style.outline = '2px solid #f59e0b';
+  el.style.outline = `2px solid ${COLOR.warn}`;
   el.style.outlineOffset = '1px';
   const badge = document.createElement('div');
   badge.textContent = note;
   badge.style.cssText =
-    'font:500 11px "Hanken Grotesk Variable","Hanken Grotesk",sans-serif;color:#b45309;margin-top:4px;';
+    `font:500 11px ${FONT.sans};color:${COLOR.warn};margin-top:4px;`;
   el.insertAdjacentElement('afterend', badge);
 }
