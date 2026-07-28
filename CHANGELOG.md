@@ -2,6 +2,26 @@
 
 All notable changes to the Litos extension are documented here.
 
+## [0.5.5] - 2026-07-28
+
+### Changed
+- Terminology, found by hand-scanning the extension's own copy rather than trusting the CI gate,
+  which only catches words already on its list. **Three of these had already been fixed in the
+  STORE IMAGES and never in the product**, the per-surface-instead-of-per-product failure the
+  round-2 UX register warned about:
+  - "Ranked by likelihood of a reply" and "Best matches" on the contact list
+  - "Email is a guess, so it may bounce" on the contact card ("bounce" is email-ops jargon)
+- "Senior IC" and "Near peer" were unexplained industry shorthand on every contact card. They now
+  say what they mean: "Senior on the team", "Doing the job you want".
+- One name for the thing being found. The button and aria-label said "Find people" while the
+  loading and empty states said "contacts".
+- "automation permissions" in an error a user actually reads.
+
+### Fixed
+- The vocabulary gate's own extractor. Its JSX text-node regex spanned newlines, so a `>` and a
+  `<` several lines apart swallowed the code between them and reported identifiers as copy. A gate
+  with false positives gets switched off, which defeats its purpose. Ported from the website fix.
+
 ## [0.5.4] - 2026-07-27
 
 ### Changed

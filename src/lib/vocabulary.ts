@@ -45,6 +45,13 @@ export const RETIRED: [string, string][] = [
   ["job-board scan", "we check for new ones"],
   ["monitored jobs", "the jobs we watch for you"],
   ["throughput", "applications you sent"],
+  // Found 2026-07-28 by hand-scanning the extension. All three had already been
+  // fixed in the STORE IMAGES and never in the product itself, which is the
+  // per-surface-instead-of-per-product failure the round-2 UX register warned about.
+  ["likelihood", "most likely to reply"],
+  ["may bounce", "it may not arrive"],
+  ["best matches", "most likely to reply"],
+  ["senior ic", "senior on the team"],
   ["filler verb", "a weak word"],
   // Compliance vocabulary shown raw
   ["attestation", "something you have to swear to"],
@@ -86,7 +93,14 @@ const TAILWINDISH =
 export function userFacingStrings(src: string): string[] {
   const code = stripComments(src);
   const out: string[] = [];
-  for (const m of code.matchAll(/>([^<>{}]{4,})</g)) out.push(m[1]);
+  /* JSX text nodes. The `[^<>{}]` class alone spans newlines, so a `>` and a `<`
+     several lines apart swallow the code between them and the whole blob counts
+     as visible text, reporting identifiers as copy. A gate that cries wolf gets
+     switched off. Prose does not contain `;` or `=`. */
+  for (const m of code.matchAll(/>([^<>{}]{4,})</g)) {
+    if (/[;=]/.test(m[1])) continue;
+    out.push(m[1]);
+  }
   for (const m of code.matchAll(/(['"`])([^'"`\\\n]{6,})\1/g)) {
     const t = m[2];
     if (!t.includes(" ")) continue;

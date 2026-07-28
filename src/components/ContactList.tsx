@@ -20,12 +20,12 @@ export default function ContactList({ contacts, job, loading, onDraft, onBack }:
       <main className="flex flex-1 flex-col px-4 py-4">
         {loading ? (
           <div className="flex flex-col gap-3" role="status" aria-live="polite">
-            <p className="text-sm text-gray-600">Finding contacts…</p>
+            <p className="text-sm text-gray-600">Finding people…</p>
             <SkeletonContactList count={3} />
           </div>
         ) : contacts.length === 0 ? (
           <div className="flex flex-1 flex-col items-start justify-center gap-3">
-            <SectionLabel>No contacts found</SectionLabel>
+            <SectionLabel>No people found</SectionLabel>
             <h2 className="text-xl font-semibold text-gray-950">Try a broader search</h2>
             <p className="text-sm leading-5 text-gray-600">
               Use the parent company name or a less specific role title.
@@ -37,10 +37,10 @@ export default function ContactList({ contacts, job, loading, onDraft, onBack }:
         ) : (
           <section aria-labelledby="contact-results-heading">
             <div className="mb-2 flex items-center justify-between gap-3">
-              <div id="contact-results-heading"><SectionLabel>Best matches</SectionLabel></div>
+              <div id="contact-results-heading"><SectionLabel>Most likely to reply</SectionLabel></div>
               <span className="text-xs text-gray-600">{contacts.length} found</span>
             </div>
-            <p className="mb-2 text-sm text-gray-600">Ranked by likelihood of a reply.</p>
+            <p className="mb-2 text-sm text-gray-600">The people most likely to write back are first.</p>
             <div className="divide-y divide-gray-200 border-y border-gray-200">
               {contacts.map((contact) => (
                 <ContactCard key={contact.id} contact={contact} onDraft={onDraft} />

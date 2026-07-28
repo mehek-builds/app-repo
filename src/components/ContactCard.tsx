@@ -10,8 +10,8 @@ interface ContactCardProps {
 
 const PERSONA_LABELS: Record<Persona, string> = {
   alumni: 'Alum',
-  near_peer: 'Near peer',
-  senior_ic: 'Senior IC',
+  near_peer: 'Doing the job you want',
+  senior_ic: 'Senior on the team',
   hiring_manager: 'Hiring manager',
   recruiter: 'Recruiter',
 };
@@ -20,7 +20,7 @@ const PERSONA_LABELS: Record<Persona, string> = {
    values; a student reading them cannot tell what to do differently. */
 const STATUS_LABELS: Record<Contact['status'], string> = {
   verified: 'Email checked',
-  likely: 'Email is a guess, so it may bounce',
+  likely: 'We could not check this email, so it may not arrive',
   linkedin_only: 'No email, LinkedIn only',
   none: 'No way to reach them',
 };
