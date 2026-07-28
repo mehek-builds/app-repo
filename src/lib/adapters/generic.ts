@@ -1285,7 +1285,20 @@ async function fillTextField(
   return true;
 }
 
-function findResumeFileInput(): HTMLInputElement | null {
+function findResumeFileInput(preferred?: string): HTMLInputElement | null {
+  // An exact selector captured off the real form beats the heuristic below, and on some platforms
+  // the heuristic cannot work at all. Rippling is the proof: its two file inputs (resume and cover
+  // letter) have no name, no id, no aria-label and no placeholder, and both sit next to the same
+  // "Drop or select (.doc / .docx / .pdf)" text - so controlIdentity() is empty for both, both score
+  // 0, and the winner is whichever comes FIRST IN THE DOM. That is correct today by luck of ordering
+  // and files the resume as a cover letter the day Rippling reorders the form.
+  //
+  // data-testid is deliberately not added to controlIdentity() instead: that would change scoring
+  // for every adapter on every site, to fix a problem only the caller has the real answer to.
+  if (preferred) {
+    const exact = document.querySelector<HTMLInputElement>(preferred);
+    if (exact) return exact;
+  }
   const fileInputs = [...document.querySelectorAll<HTMLInputElement>('input[type="file"]')].filter(
     (el) => !el.closest('[id*="litos"]'),
   );
@@ -1310,6 +1323,9 @@ export interface GenericFillParams {
   eeo?: Record<string, string>;
   resumeBlob?: Blob;
   resumeFileName?: string;
+  // An exact resume-input selector captured off the real form, when the caller has one. Optional:
+  // the generic adapter runs on company-hosted forms where nobody does, and falls back to scoring.
+  resumeSelector?: string;
   draftAnswer?: (question: string) => Promise<string | null>;
   signal?: AbortSignal;
   onProgress?: (partial: { fields_filled: number; fields_skipped: number; ai_drafted: number; pendingEssays: number }) => void;
@@ -1705,7 +1721,7 @@ export async function fillGenericApplication(params: GenericFillParams): Promise
 
   // ── Resume file ──
   if (resumeBlob && resumeFileName) {
-    const input = findResumeFileInput();
+    const input = findResumeFileInput(params.resumeSelector);
     if (input) {
       await randomDelay();
       const file = new File([resumeBlob], resumeFileName, { type: 'application/pdf' });

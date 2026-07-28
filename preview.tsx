@@ -147,6 +147,58 @@ const storeScreens = {
   },
 } as const;
 
+/* `?shot=<name>` renders ONE shipped screen, bare, at the real popup size and
+   nothing else on the page: no gallery, no Frame label, no drop shadow, no
+   surrounding canvas. It exists so the marketing site's capture script
+   (role-quick-website scripts/capture-product.mjs) can screenshot the actual
+   component instead of a person cropping a gallery by hand.
+
+   These are the SAME component instances the gallery and the store shots
+   render. If you change a fixture above, every downstream capture changes with
+   it, which is the point: there is one fixture and one interface, so the
+   pictures on the marketing site cannot drift away from the product. */
+const shotScreens = {
+  job: (
+    <MainScreen
+      token={TOKEN}
+      detectedJob={job}
+      pendingDraftCount={2}
+      onViewDrafts={noop}
+      onContactsFound={noop}
+      onViewTracking={noop}
+      onViewAutofillSetup={noop}
+      userSchool={profile.school}
+    />
+  ),
+  contacts: <ContactList contacts={contacts} job={job} loading={false} onDraft={noop} onBack={noop} />,
+  draft: <DraftEditor contact={contacts[0]} job={job} token={TOKEN} profile={profile} onBack={noop} onDraftAnother={noop} />,
+} as const;
+
+/* The popup's real dimensions. MainScreen and friends are laid out for this
+   box in Chrome; capturing them at any other width photographs a layout the
+   user will never see. */
+const POPUP_W = 380;
+const POPUP_H = 580;
+
+function ShotPreview({ screen }: { screen: keyof typeof shotScreens }) {
+  return (
+    <div
+      id="shot"
+      style={{
+        boxSizing: 'border-box',
+        width: POPUP_W,
+        height: POPUP_H,
+        overflow: 'hidden',
+        background: PREVIEW_COLORS.surface,
+      }}
+    >
+      <div className="font-sans text-gray-900 antialiased" style={{ minHeight: '100%', display: 'flex', flexDirection: 'column' }}>
+        {shotScreens[screen]}
+      </div>
+    </div>
+  );
+}
+
 function StorePreview({ screen }: { screen: keyof typeof storeScreens }) {
   const content = storeScreens[screen];
 
@@ -243,10 +295,26 @@ function Preview() {
   );
 }
 
-const storeScreen = new URLSearchParams(window.location.search).get('store') as keyof typeof storeScreens | null;
+const params = new URLSearchParams(window.location.search);
+const storeScreen = params.get('store') as keyof typeof storeScreens | null;
+const shotScreen = params.get('shot') as keyof typeof shotScreens | null;
+
+/* The gallery paints its own canvas colour on <body>. A bare shot must not
+   inherit it, or every capture arrives with a grey band down whichever side
+   the popup does not fill. */
+if (shotScreen && shotScreens[shotScreen]) {
+  document.body.style.background = PREVIEW_COLORS.surface;
+  document.body.style.margin = '0';
+}
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    {storeScreen && storeScreens[storeScreen] ? <StorePreview screen={storeScreen} /> : <Preview />}
+    {shotScreen && shotScreens[shotScreen] ? (
+      <ShotPreview screen={shotScreen} />
+    ) : storeScreen && storeScreens[storeScreen] ? (
+      <StorePreview screen={storeScreen} />
+    ) : (
+      <Preview />
+    )}
   </React.StrictMode>,
 );

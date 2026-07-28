@@ -8,6 +8,7 @@ import {
 } from '../lib/adapters/workday';
 import { isLinkedInApplicationPage, extractLinkedInJdText, fillLinkedInApplication } from '../lib/adapters/linkedin';
 import { isLikelyApplicationForm, extractGenericJdText, getGenericJobDetails, fillGenericApplication, drainR030CandidateLabels } from '../lib/adapters/generic';
+import { isAtsApplicationPage, extractAtsJdText, fillAtsApplication, gatedPortalNotice, specForCurrentPage } from '../lib/adapters/ats-2026-07';
 import { getPortalAccounts, recordPortalAccount } from '../lib/storage';
 import { COLOR, DISMISS_MS, FONT, OVERLAY, RADIUS, SHADOW, markSvg } from '../styles/tokens';
 
@@ -65,6 +66,27 @@ export default defineContentScript({
     'https://www.indeed.com/*',
     'https://app.joinhandshake.com/*',
     'https://joinhandshake.com/*',
+    // Added 2026-07-29. Each host is pinned as tightly as the platform allows, because several of
+    // them share a host space with a LOGIN page: app.rippling.com is Rippling's HR product and
+    // ultipro.com is UKG's employee sign-in, so a loose match would inject the card onto a
+    // credential form. See ats-2026-07.ts, whose host predicates mirror these.
+    'https://ats.rippling.com/*',
+    // Path-scoped, not host-scoped. Every one of these hosts serves far more than job pages, and a
+    // content script injects on every URL it matches - which both widens the install warning the
+    // Chrome Web Store shows and puts Litos on pages it has no business seeing. /p/ is Breezy's
+    // posting route and /careers/ is BambooHR's; both also cover the JD page, so nothing is lost.
+    'https://*.breezy.hr/p/*',
+    'https://*.bamboohr.com/careers/*',
+    // The four below have no adapter and never will until their gates change. They are matched so
+    // Litos can RECOGNISE the page and say plainly why it cannot fill it, which is worth more to a
+    // job seeker than a card that never appears. See gatedPortalNotice.
+    'https://jobs.jobvite.com/*/job/*',
+    'https://*.icims.com/jobs/*',
+    // The one that matters most. oraclecloud.com hosts EVERY Oracle Cloud application - payroll,
+    // ERP, finance - so a bare host match would inject this script into somebody's payroll session.
+    // /hcmUI/CandidateExperience/ is the candidate-facing recruiting app and nothing else.
+    'https://*.oraclecloud.com/hcmUI/CandidateExperience/*',
+    'https://recruiting.ultipro.com/*/JobBoard/*',
   ],
   // Some companies embed their Greenhouse board in an iframe hosted on greenhouse.io while the
   // parent page is on the company's own domain (Section 9/12.3 of PRD-v2). `matches` is evaluated
@@ -197,6 +219,21 @@ export default defineContentScript({
         if (title && company) return { title, company };
       }
 
+      // Rippling / BreezyHR / BambooHR. All three put the role in the page's only h1 and none names
+      // the employer in the DOM reliably, so the company comes from the tenant subdomain, which IS
+      // the employer on every one of them (zinier.breezy.hr, prentkeromich.bamboohr.com). Rippling
+      // is the exception - ats.rippling.com/{tenant}/... carries it in the first path segment.
+      if (specForCurrentPage()) {
+        const title =
+          document.querySelector<HTMLElement>('h1')?.textContent?.trim() ??
+          document.title.replace(/^apply\s*[-|]\s*/i, '').trim();
+        const tenant = h === 'ats.rippling.com'
+          ? window.location.pathname.split('/').filter(Boolean)[0]
+          : h.split('.')[0];
+        const company = tenant ? tenant.replace(/[-_]+/g, ' ').trim() : undefined;
+        if (title && company) return { title, company };
+      }
+
       return null;
     }
 
@@ -226,6 +263,10 @@ export default defineContentScript({
       if (h.includes('indeed.com')) {
         return path.includes('/apply') || !!document.querySelector('[id*="apply"], [class*="apply-form"]');
       }
+
+      // Rippling / BreezyHR / BambooHR. Their host and path rules live with their selectors rather
+      // than here, so there is one place to read when a platform changes its URL shape.
+      if (isAtsApplicationPage()) return true;
 
       return false;
     }
@@ -1672,6 +1713,12 @@ export default defineContentScript({
     const KNOWN_ATS_HOSTS = [
       'linkedin.com', 'greenhouse.io', 'lever.co', 'myworkdayjobs.com',
       'workday.com', 'ashbyhq.com', 'indeed.com', 'joinhandshake.com',
+      // 2026-07-29. These must be listed here as well as in `matches`, or init() sends them to
+      // genericInit(), which returns early on any known ATS host and would leave them with no card
+      // at all. The four gated platforms are included for the same reason: their notice is shown on
+      // the ATS path.
+      'ats.rippling.com', 'breezy.hr', 'bamboohr.com',
+      'jobs.jobvite.com', 'icims.com', 'oraclecloud.com', 'recruiting.ultipro.com',
     ];
 
     // Company-hosted application forms (vercel.com/careers, lifeatspotify.com, ...): this
@@ -1704,8 +1751,45 @@ export default defineContentScript({
     }
     w.__litosGenericInit = genericInit;
 
+    // Jobvite / iCIMS / Oracle Cloud / UltiPro: say plainly why this page cannot be filled.
+    //
+    // Shown INSTEAD of the fill card, not alongside it, and it is the whole of Litos's behaviour on
+    // these four. Each puts a data-consent choice, an account wall or an emailed one-time code
+    // before any application field exists, so there is nothing to fill and a card offering to fill
+    // it would be a promise Litos cannot keep. A job seeker who is told which gate she is facing can
+    // clear it in seconds; one shown nothing assumes the extension is broken.
+    function injectGatedPortalNotice(notice: string): void {
+      if (document.getElementById('litos-gated-note')) return;
+      const note = document.createElement('div');
+      note.id = 'litos-gated-note';
+      note.style.cssText =
+        `position:fixed;bottom:${OVERLAY.bottom};right:${OVERLAY.right};z-index:${OVERLAY.z};background:${COLOR.surface};border:1px solid ${COLOR.border};` +
+        `border-radius:${RADIUS.card};padding:12px 16px;font-family:${FONT.sans};color-scheme:only light;` +
+        `font-size:12px;line-height:1.4;color:${COLOR.ink};max-width:${OVERLAY.width};`;
+      note.textContent = notice;
+      document.body.appendChild(note);
+    }
+
     function init() {
       const h = window.location.hostname;
+
+      // Checked before every other branch. These hosts are in KNOWN_ATS_HOSTS so they do not fall
+      // through to genericInit, but they have no adapter, so without this they would reach
+      // getJobDetails(), return null and go silent.
+      const gated = gatedPortalNotice(h);
+      if (gated) {
+        injectGatedPortalNotice(gated);
+        const job = getJobDetails();
+        // The job is still worth capturing even though the form cannot be filled: it feeds the
+        // dashboard and the outreach draft, which are useful on a page the student finishes by hand.
+        if (job) {
+          chrome.runtime.sendMessage({
+            type: 'JOB_DETECTED',
+            payload: { title: job.title, company: job.company, url: window.location.href },
+          });
+        }
+        return;
+      }
 
       if (!KNOWN_ATS_HOSTS.some((k) => h.includes(k))) {
         genericInit();
@@ -1767,6 +1851,8 @@ export default defineContentScript({
           injectResumeFillCard(job.title, job.company, extractGreenhouseJdText, fillGreenhouseApplication);
         } else if (isAshbyApplicationPage()) {
           injectResumeFillCard(job.title, job.company, extractAshbyJdText, fillAshbyApplication);
+        } else if (isAtsApplicationPage()) {
+          injectResumeFillCard(job.title, job.company, extractAtsJdText, fillAtsApplication);
         }
       } else {
         // Job listing page: silently notify the popup so it can pre-fill fields

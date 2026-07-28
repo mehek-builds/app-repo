@@ -58,8 +58,41 @@ export const NEVER_FILL_LABEL_PATTERNS = [/social security/i, /ssn\b/i, /driver'
 //
 // Scoped to free-text controls. Natively hidden radios and checkboxes are a legitimate, widespread
 // pattern (see isVisibleControl in generic.ts) and must not be swept up here.
-const HONEYPOT_IDENTITY = /beecatcher|honeypot|bot-?trap|\bhp[-_]?field\b/i;
+// `honey-?pot` rather than `honeypot`: Oracle Cloud's candidate experience names its trap
+// `honey-pot` / `honey-pot-0`, WITH the hyphen, which the un-hyphenated form missed entirely.
+// `\bhp[-_]\w` catches Breezy's `hp_7f2b`, whose suffix is randomised per render so only the prefix
+// is matchable. Both read live 2026-07-29.
+const HONEYPOT_IDENTITY = /beecatcher|honey-?pot|bot-?trap|\bhp[-_]\w|\bhp[-_]?field\b/i;
 const HONEYPOT_COPY = /for robots only|do not enter if you'?re human|leave this (field |input )?(blank|empty)/i;
+
+// A control concealed by an ANCESTOR collapsed to nothing, rather than by its own style.
+//
+// This is the gap the 2026-07-29 capture found, and it was measured rather than reasoned about.
+// Breezy and BambooHR both ship a trap whose input computes to opacity 1, visibility visible,
+// display block, ~250x40px, and `position: static`. The structural check below returns early on
+// anything not absolutely positioned, so it never even looked at these. Playwright's isVisible()
+// also returns TRUE for them. The only thing that gives them away is an ancestor with height 0 and
+// overflow hidden (Breezy's is `.apply-field-extra`).
+//
+// tabIndex < 0 is required as well, and that requirement is what keeps this from eating real fields.
+// A collapsed accordion section or a not-yet-expanded step also has a zero-height overflow-hidden
+// ancestor, but its inputs stay keyboard-reachable because they are meant to be filled once opened.
+// A honeypot is deliberately pulled out of the tab order so a human never lands on it. Both traps
+// captured carry tabindex="-1"; Workday's beecatcher does not, but it is already caught by identity
+// and by the clip geometry, so nothing regresses.
+function isConcealedByCollapsedAncestor(el: HTMLElement): boolean {
+  if (el.tabIndex >= 0) return false;
+  let node = el.parentElement;
+  // Bounded: a trap's collapsing wrapper is its immediate container in every case seen, and walking
+  // to <body> would eventually hit any element inside a zero-height region during a transition.
+  for (let depth = 0; node && depth < 4; depth += 1, node = node.parentElement) {
+    const style = getComputedStyle(node);
+    if (style.overflow !== 'hidden' && style.overflowY !== 'hidden') continue;
+    const rect = node.getBoundingClientRect();
+    if (rect.height <= 1 || style.height === '0px') return true;
+  }
+  return false;
+}
 
 export function isHoneypotField(el: HTMLElement): boolean {
   if (el instanceof HTMLInputElement && /^(radio|checkbox|file|submit|button)$/.test(el.type)) return false;
@@ -82,6 +115,10 @@ export function isHoneypotField(el: HTMLElement): boolean {
   ) {
     return false;
   }
+
+  // Checked BEFORE the position gate below, because the traps this catches are position:static and
+  // the gate returns early on them. See isConcealedByCollapsedAncestor.
+  if (isConcealedByCollapsedAncestor(el)) return true;
 
   // Structural: an absolutely-positioned control collapsed to roughly nothing is being hidden from
   // humans while staying in the DOM for scripts to trip over.
