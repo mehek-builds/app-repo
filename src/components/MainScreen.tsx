@@ -159,7 +159,7 @@ export default function MainScreen({
         url: jobUrl || undefined,
       });
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not find contacts. Try again.');
+      setError(err instanceof Error ? err.message : 'Could not find anyone. Try again.');
     } finally {
       setLoading(false);
     }
@@ -335,7 +335,7 @@ export default function MainScreen({
           )}
         </section>
 
-        {loading && <p className="sr-only" role="status" aria-live="polite">Finding contacts</p>}
+        {loading && <p className="sr-only" role="status" aria-live="polite">Finding people</p>}
       </main>
     </div>
   );

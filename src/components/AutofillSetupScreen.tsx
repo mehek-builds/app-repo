@@ -173,7 +173,7 @@ export default function AutofillSetupScreen({ token, profile, onBack, onLogout }
         } else {
           setAutoSubmit(false);
           setAutomaticVerification(false);
-          setError('Could not load your current automation permissions. Reopen setup before changing them.');
+          setError('Could not load what Litos is allowed to do on its own. Reopen setup before changing it.');
         }
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Could not load your setup data.');
