@@ -208,3 +208,61 @@ describe('filling', () => {
     expect((await fillAtsApplication(params)).ats_name).toBe('breezy');
   });
 });
+
+describe('the captured resume selector is actually used, not decorative', () => {
+  // Caught in review. spec.resume was declared with carefully captured selectors and then never
+  // read, so the resume attached through generic.ts's scoring heuristic instead.
+  //
+  // On Rippling that heuristic cannot work: BOTH file inputs have no name, no id, no aria-label and
+  // no placeholder, and both sit beside the same "Drop or select (.doc / .docx / .pdf)" text. So
+  // controlIdentity() is empty for both, both score 0, and the winner is whichever is FIRST IN THE
+  // DOM. Correct today only because resume happens to come first.
+  const profile: Profile = { full_name: 'Mehek Mandal', email: 'm@usc.edu', experience: [], skills: [], school: 'USC', grad_year: 2028 };
+  const params = {
+    fullName: 'Mehek Mandal',
+    email: 'm@usc.edu',
+    profile,
+    applicationProfile: {} as ApplicationProfile,
+    resumeBlob: new Blob(['pdf'], { type: 'application/pdf' }),
+    resumeFileName: 'resume.pdf',
+  };
+
+  beforeEach(() => {
+    document.body.innerHTML = '';
+    // jsdom implements neither DataTransfer nor a writable input.files, so both are stubbed. The
+    // stub records WHICH input received the file, which is the entire thing under test here.
+    class FakeDataTransfer {
+      files: File[] = [];
+      items = { add: (file: File) => { this.files.push(file); } };
+    }
+    (globalThis as unknown as Record<string, unknown>).DataTransfer = FakeDataTransfer;
+    Object.defineProperty(HTMLInputElement.prototype, 'files', {
+      configurable: true,
+      get(this: HTMLInputElement) { return (this as unknown as Record<string, unknown>).__files ?? null; },
+      set(this: HTMLInputElement, value: unknown) { (this as unknown as Record<string, unknown>).__files = value; },
+    });
+  });
+
+  it('attaches to the resume input even when the cover-letter input comes FIRST', async () => {
+    at('https://ats.rippling.com/acme/jobs/1/apply');
+    // Deliberately reversed from the live DOM order. This is the exact scenario the heuristic gets
+    // wrong and the captured selector gets right.
+    document.body.innerHTML = `
+      <form>
+        <label>Drop or select (.doc / .docx / .pdf)<input type="file" data-testid="input-cover_letter" /></label>
+        <label>Drop or select (.doc / .docx / .pdf)<input type="file" data-testid="input-resume" /></label>
+      </form>`;
+    await fillAtsApplication(params);
+    const resume = document.querySelector<HTMLInputElement>('[data-testid="input-resume"]')!;
+    const cover = document.querySelector<HTMLInputElement>('[data-testid="input-cover_letter"]')!;
+    expect(resume.files?.length).toBe(1);
+    expect(cover.files?.length ?? 0).toBe(0);
+  });
+
+  it('attaches to BambooHR’s aria-labelled input', async () => {
+    at('https://acme.bamboohr.com/careers/480');
+    document.body.innerHTML = `<form><input type="file" aria-label="file-input" /></form>`;
+    await fillAtsApplication(params);
+    expect(document.querySelector<HTMLInputElement>('input[type="file"]')!.files?.length).toBe(1);
+  });
+});

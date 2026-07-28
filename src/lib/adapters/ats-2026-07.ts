@@ -31,6 +31,11 @@ interface AtsSpec {
   readonly jd?: string;
   /** A control that must be clicked before the form exists in the DOM at all. */
   readonly revealButton?: string;
+  /** Text on that control, and a selector proving the form arrived. Both belong to the spec, not to
+   *  revealAtsForm, which would otherwise hard-code one platform's button label and one platform's
+   *  field name inside a function named for all of them. */
+  readonly revealButtonText?: RegExp;
+  readonly revealConfirms?: string;
   /** Present when the platform stops short of a submit even after a perfect fill. */
   readonly ceiling?: string;
 }
@@ -98,6 +103,8 @@ export const ATS_SPECS: readonly AtsSpec[] = [
     jd: '.jss-job-description, main',
     // The fields do not exist in the DOM until this is pressed, and /careers/{id}/apply is blank.
     revealButton: 'button',
+    revealButtonText: /apply for this job/i,
+    revealConfirms: 'input[name="firstName"]',
     ceiling:
       'This company’s page asks you to prove you are human before it will send. Litos filled everything it could, so the check and the send button are what is left.',
     // NOT mapped: nickname_<hex> (honeypot), desiredPay (salary is R-031's currency-gated rule and
@@ -131,13 +138,15 @@ export function extractAtsJdText(): string {
 export async function revealAtsForm(spec: AtsSpec): Promise<boolean> {
   if (!spec.revealButton) return false;
   const button = [...document.querySelectorAll<HTMLElement>(spec.revealButton)]
-    .find((el) => /apply for this job/i.test(el.textContent ?? ''));
+    .find((el) => !spec.revealButtonText || spec.revealButtonText.test(el.textContent ?? ''));
   if (!button) return false;
   button.click();
-  // The form mounts client-side. Polling beats a fixed sleep: it returns as soon as the first field
-  // exists, and gives up rather than hanging if the click did nothing.
+  // The form mounts client-side with no navigation, so polling beats both a fixed sleep and any
+  // load-state wait: it returns as soon as the field exists, and gives up rather than hanging if the
+  // click did nothing.
+  if (!spec.revealConfirms) return true;
   for (let attempt = 0; attempt < 20; attempt += 1) {
-    if (document.querySelector('input[name="firstName"]')) return true;
+    if (document.querySelector(spec.revealConfirms)) return true;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   return true;
@@ -183,7 +192,12 @@ export async function fillAtsApplication(params: GenericFillParams): Promise<Aut
     if (await fillField(el, value)) filled += 1;
   }
 
-  const rest = await fillGenericApplication(params);
+  // spec.resume is threaded through rather than left decorative. Without this the resume attaches
+  // via generic's scoring heuristic, which cannot tell Rippling's two file inputs apart at all
+  // (neither has a name, id, aria-label or placeholder, and both sit by the same "Drop or select"
+  // text) and so picks whichever is first in the DOM. Right today, wrong the day Rippling reorders,
+  // and the failure mode is a resume filed as a cover letter.
+  const rest = await fillGenericApplication({ ...params, resumeSelector: spec.resume });
   return {
     ...rest,
     // Names the real platform rather than inheriting generic's label, so the run's own record says
