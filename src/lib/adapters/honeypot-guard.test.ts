@@ -170,3 +170,101 @@ describe('combobox typeahead inputs are never treated as bot traps', () => {
     expect(isHoneypotField(trap)).toBe(true);
   });
 });
+
+// ─── 2026-07-29: the collapsed-ancestor trap, from live Breezy / BambooHR / Oracle captures ───────
+//
+// A second shape of honeypot the guard did not catch. Unlike Workday's sr-only field, the input
+// itself is entirely ordinary by every style test:
+//
+//   display: block   visibility: visible   opacity: 1   position: STATIC   ~250 x 40 px
+//
+// and is concealed only by an ancestor with height 0 and overflow hidden. The old structural check
+// returned early on anything not absolutely positioned, so it never looked. Measured against the QA
+// fixture that reproduces Breezy's: Playwright's own isVisible() returns true for it too.
+describe('honeypots concealed by a collapsed ancestor rather than by their own style', () => {
+  function collapsedWrapper(input: HTMLInputElement): HTMLElement {
+    const wrap = document.createElement('div');
+    wrap.className = 'apply-field-extra';
+    // jsdom reports 0x0 for everything, so the real geometry is stubbed to make the test meaningful:
+    // the WRAPPER collapses, the INPUT does not. That asymmetry is the whole point.
+    wrap.style.overflow = 'hidden';
+    wrap.style.height = '0px';
+    wrap.getBoundingClientRect = () => ({ width: 250, height: 0, top: 0, left: 0, right: 250, bottom: 0, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect;
+    input.getBoundingClientRect = () => ({ width: 250, height: 43, top: 0, left: 0, right: 250, bottom: 43, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect;
+    wrap.appendChild(input);
+    document.body.appendChild(wrap);
+    return wrap;
+  }
+
+  beforeEach(() => { document.body.innerHTML = ''; });
+
+  it('catches Breezy’s hp_<hex>, which has no giveaway copy at all', () => {
+    // The hard case: the real Breezy trap carries NO label text and NO placeholder hint, so the copy
+    // pattern that saves us on BambooHR does nothing here. Only the prefix and the geometry give it
+    // away, and the suffix is randomised per render so the prefix is all there is to match.
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.name = 'hp_7f2b';
+    input.id = 'hp_7f2b';
+    input.tabIndex = -1;
+    collapsedWrapper(input);
+    expect(isHoneypotField(input)).toBe(true);
+  });
+
+  it('catches Oracle Cloud’s hyphenated honey-pot, which the un-hyphenated pattern missed', () => {
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.name = 'honey-pot';
+    input.id = 'honey-pot-0';
+    input.tabIndex = -1;
+    collapsedWrapper(input);
+    expect(isHoneypotField(input)).toBe(true);
+  });
+
+  it('catches BambooHR’s nickname_<hex> by its copy, geometry, or both', () => {
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.name = 'nickname_hpcsaf';
+    input.tabIndex = -1;
+    const wrap = collapsedWrapper(input);
+    const label = document.createElement('label');
+    label.textContent = 'Please leave this field blank';
+    wrap.prepend(label);
+    expect(isHoneypotField(input)).toBe(true);
+  });
+
+  it('refuses to write to one even when an adapter asks directly', () => {
+    // setNativeValue is the backstop every adapter's writes funnel through, so the guard has to hold
+    // there and not only at field collection.
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.name = 'hp_7f2b';
+    input.tabIndex = -1;
+    collapsedWrapper(input);
+    setNativeValue(input, 'https://mehek-site.vercel.app');
+    expect(input.value).toBe('');
+  });
+
+  it('does NOT eat a real field inside a collapsed accordion, which is the obvious false positive', () => {
+    // A not-yet-expanded section has exactly the same zero-height overflow-hidden ancestor. What it
+    // does not have is tabIndex -1: its inputs stay keyboard-reachable because they are meant to be
+    // filled once opened. That single requirement is what keeps this rule narrow, so it is worth a
+    // test of its own rather than trusting the comment.
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.name = 'linkedinUrl';
+    input.tabIndex = 0;
+    collapsedWrapper(input);
+    expect(isHoneypotField(input)).toBe(false);
+  });
+
+  it('leaves an ordinary visible field alone', () => {
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.name = 'cEmail';
+    const wrap = document.createElement('div');
+    wrap.appendChild(input);
+    document.body.appendChild(wrap);
+    expect(isHoneypotField(input)).toBe(false);
+  });
+});
