@@ -2,6 +2,22 @@
 
 All notable changes to the Litos extension are documented here.
 
+## [0.5.6] - 2026-07-30
+
+### Added
+- Fill support for Rippling and BreezyHR, and BambooHR now fills and stops at the point it cannot
+  go further rather than failing silently. Four more platforms are recognised and explained to the
+  user when they are not fillable (PR #62).
+
+### Fixed
+- The captured resume selectors were decorative and matched nothing on the live pages.
+
+### Note
+- Cut because PR #62 landed on `main` after 0.5.5 was tagged. Per the standing rule, a tree that has
+  moved gets a new number rather than reusing the old one. 0.5.3, 0.5.4 and 0.5.5 were all built and
+  never uploaded; this release carries everything from all three, so users moving from the published
+  0.5.2 receive the full terminology pass and the earned-consent gate as well.
+
 ## [0.5.5] - 2026-07-28
 
 ### Changed
