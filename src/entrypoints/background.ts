@@ -21,18 +21,23 @@ type PendingExtensionSubmission = {
   frameId: number;
 };
 
-const PENDING_SUBMISSIONS_KEY = 'litos_pending_extension_submissions';
+const PENDING_SUBMISSIONS_KEY = 'litos_pending_extension_submission';
+const PENDING_SUBMISSION_MAX_AGE_MS = 5 * 60_000;
 
-async function pendingSubmissions(): Promise<Record<string, PendingExtensionSubmission>> {
-  const stored = await chrome.storage.session.get(PENDING_SUBMISSIONS_KEY);
-  return (stored[PENDING_SUBMISSIONS_KEY] ?? {}) as Record<string, PendingExtensionSubmission>;
+function pendingSubmissionKey(tabId: number): string {
+  return `${PENDING_SUBMISSIONS_KEY}:${tabId}`;
+}
+
+async function pendingSubmission(tabId: number): Promise<PendingExtensionSubmission | null> {
+  const key = pendingSubmissionKey(tabId);
+  const stored = await chrome.storage.session.get(key);
+  return (stored[key] as PendingExtensionSubmission | undefined) ?? null;
 }
 
 async function setPendingSubmission(tabId: number, pending: PendingExtensionSubmission | null) {
-  const all = await pendingSubmissions();
-  if (pending) all[String(tabId)] = pending;
-  else delete all[String(tabId)];
-  await chrome.storage.session.set({ [PENDING_SUBMISSIONS_KEY]: all });
+  const key = pendingSubmissionKey(tabId);
+  if (pending) await chrome.storage.session.set({ [key]: pending });
+  else await chrome.storage.session.remove(key);
 }
 
 async function postExtensionOutcome(pending: PendingExtensionSubmission, outcome: 'confirmed' | 'failed' | 'unknown', finalUrl: string, confirmationText?: string) {
@@ -51,6 +56,17 @@ async function postExtensionOutcome(pending: PendingExtensionSubmission, outcome
   if (!response.ok) {
     const body = await response.json().catch(() => null) as { error?: string } | null;
     throw new Error(body?.error ?? `Could not update application (${response.status})`);
+  }
+}
+
+async function closePendingSubmission(tabId: number, finalUrl = 'https://trylitos.com') {
+  const pending = await pendingSubmission(tabId);
+  if (!pending) return;
+  try {
+    await postExtensionOutcome(pending, 'unknown', finalUrl);
+    await setPendingSubmission(tabId, null);
+  } catch {
+    // Keep the claim in session storage. A later page wake can retry the safe unknown outcome.
   }
 }
 
@@ -370,6 +386,9 @@ async function generateResumeAndProfile(
 }
 
 export default defineBackground(() => {
+  chrome.tabs.onRemoved.addListener((tabId) => {
+    closePendingSubmission(tabId).catch(() => {});
+  });
   // One-time copy of any legacy Volley-era storage keys to their new litos_* names, so a
   // published update never orphans an existing user's saved token/profile/settings.
   void migrateLegacyStorage();
@@ -469,8 +488,8 @@ export default defineBackground(() => {
           .then(async ([token, tabId]) => {
             if (!token || tabId === undefined) throw new Error('Litos could not identify this application tab.');
             const applicationId = String(message.payload?.applicationId ?? '');
-            const authorization = message.payload?.authorization === 'per_application_approval'
-              ? 'per_application_approval'
+            const authorization = message.payload?.authorization === 'user_initiated'
+              ? 'user_initiated'
               : 'standing_consent';
             const response = await timeoutFetch(`${API_BASE}/applications/${applicationId}/submission/extension-start`, {
               method: 'POST',
@@ -493,12 +512,17 @@ export default defineBackground(() => {
           sendResponse({ ok: false, error: 'Litos could not identify this application tab.' });
           return false;
         }
-        pendingSubmissions().then(async (all) => {
-          const pending = all[String(tabId)];
+        pendingSubmission(tabId).then(async (pending) => {
           if (!pending || pending.applicationId !== String(message.payload?.applicationId ?? '')) {
             throw new Error('This application is no longer waiting for a confirmation.');
           }
           if (pending.frameId !== (sender.frameId ?? 0)) throw new Error('This confirmation came from a different page frame.');
+          if (Date.now() - pending.startedAt > PENDING_SUBMISSION_MAX_AGE_MS) {
+            await postExtensionOutcome(pending, 'unknown', String(sender.tab?.url ?? 'https://trylitos.com'));
+            await setPendingSubmission(tabId, null);
+            sendResponse({ ok: false, error: 'The confirmation window expired. Check the employer portal.' });
+            return;
+          }
           await postExtensionOutcome(
             pending,
             message.payload?.outcome === 'confirmed' ? 'confirmed' : message.payload?.outcome === 'failed' ? 'failed' : 'unknown',
@@ -517,8 +541,12 @@ export default defineBackground(() => {
           sendResponse({ pending: null });
           return false;
         }
-        pendingSubmissions().then((all) => {
-          const pending = all[String(tabId)];
+        pendingSubmission(tabId).then((pending) => {
+          if (pending && Date.now() - pending.startedAt > PENDING_SUBMISSION_MAX_AGE_MS) {
+            closePendingSubmission(tabId, String(sender.tab?.url ?? 'https://trylitos.com'))
+              .finally(() => sendResponse({ pending: null }));
+            return;
+          }
           sendResponse({ pending: pending?.frameId === (sender.frameId ?? 0) ? pending : null });
         });
         return true;
@@ -688,9 +716,9 @@ export default defineBackground(() => {
             });
             if (!res.ok) throw new Error(`review handoff failed (${res.status})`);
             const stored = await chrome.storage.session.get('litos_application_tabs');
-            const tabs = (stored.litos_application_tabs ?? {}) as Record<string, number>;
+            const tabs = (stored.litos_application_tabs ?? {}) as Record<string, number | { tabId: number; frameId: number }>;
             await chrome.storage.session.set({
-              litos_application_tabs: { ...tabs, [payload.applicationId]: tabId },
+              litos_application_tabs: { ...tabs, [payload.applicationId]: { tabId, frameId: sender.frameId ?? 0 } },
             });
             await chrome.tabs.create({
               url: `https://trylitos.com/dashboard/applications?application=${encodeURIComponent(payload.applicationId)}`,
@@ -747,30 +775,45 @@ export default defineBackground(() => {
     const questions = Array.isArray(message.questions) ? message.questions : [];
     Promise.all([getStoredToken(), chrome.storage.session.get('litos_application_tabs')])
       .then(async ([token, stored]) => {
-        const tabId = ((stored.litos_application_tabs ?? {}) as Record<string, number>)[applicationId];
+        const storedTarget = ((stored.litos_application_tabs ?? {}) as Record<string, number | { tabId: number; frameId: number }>)[applicationId];
+        const tabId = typeof storedTarget === 'number' ? storedTarget : storedTarget?.tabId;
+        const frameId = typeof storedTarget === 'number' ? 0 : storedTarget?.frameId ?? 0;
         if (!token || tabId === undefined) throw new Error('That tab is no longer open. Go back to the job and start it again.');
         const startResponse = await timeoutFetch(`${API_BASE}/applications/${applicationId}/submission/extension-start`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-          body: JSON.stringify({ authorization: 'per_application_approval' }),
+          body: JSON.stringify({ authorization: 'user_initiated' }),
         });
         const started = await startResponse.json().catch(() => null) as { claim_id?: string; error?: string } | null;
         if (!startResponse.ok || !started?.claim_id) throw new Error(started?.error ?? 'Could not reserve this application.');
-        const pending = { applicationId, claimId: started.claim_id, startedAt: Date.now(), frameId: 0 };
+        const pending = { applicationId, claimId: started.claim_id, startedAt: Date.now(), frameId };
         await setPendingSubmission(tabId, pending);
-        const result = await chrome.tabs.sendMessage(tabId, {
-          type: 'SUBMIT_FROM_DASHBOARD',
-          payload: { applicationId, questions },
-        }) as { ok?: boolean; error?: string; finalUrl?: string; confirmationText?: string };
-        await postExtensionOutcome(
-          pending,
-          result?.ok ? 'confirmed' : 'unknown',
-          result?.finalUrl ?? sender.url ?? 'https://trylitos.com',
-          result?.confirmationText ?? result?.error,
-        );
-        await setPendingSubmission(tabId, null);
-        if (!result?.ok) throw new Error(result?.error ?? 'The company never confirmed it arrived.');
-        sendResponse({ ok: true });
+        try {
+          const result = await chrome.tabs.sendMessage(tabId, {
+            type: 'SUBMIT_FROM_DASHBOARD',
+            payload: { applicationId, questions },
+          }, { frameId }) as { ok?: boolean; error?: string; finalUrl?: string; confirmationText?: string };
+          await postExtensionOutcome(
+            pending,
+            result?.ok ? 'confirmed' : 'unknown',
+            result?.finalUrl ?? sender.url ?? 'https://trylitos.com',
+            result?.confirmationText ?? result?.error,
+          );
+          await setPendingSubmission(tabId, null);
+          if (!result?.ok) {
+            sendResponse({ error: result?.error ?? 'The company never confirmed it arrived.' });
+            return;
+          }
+          sendResponse({ ok: true });
+        } catch (error) {
+          try {
+            await postExtensionOutcome(pending, 'unknown', sender.url ?? 'https://trylitos.com');
+            await setPendingSubmission(tabId, null);
+          } catch {
+            // Retain the pending claim so a later tab wake can safely reconcile it.
+          }
+          throw error;
+        }
       })
       .catch((error) => sendResponse({ error: error instanceof Error ? error.message : 'Submission failed.' }));
     return true;

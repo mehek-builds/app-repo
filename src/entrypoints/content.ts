@@ -93,21 +93,30 @@ export default defineContentScript({
 
     const monitoredSubmissionIds = new Set<string>();
 
-    function monitorExtensionSubmission(applicationId: string) {
+    function visibleSubmissionOutcomeTexts(): string[] {
+      const selectors = '[role="alert"], [role="status"], [aria-live], h1, h2, [class*="error" i], [class*="success" i], [class*="confirm" i], [class*="thank" i]';
+      return [...document.querySelectorAll<HTMLElement>(selectors)]
+        .filter((element) => !element.closest('[id*="litos"]'))
+        .filter((element) => element.getClientRects().length > 0 && getComputedStyle(element).visibility !== 'hidden')
+        .map((element) => (element.textContent ?? '').replace(/\s+/g, ' ').trim())
+        .filter(Boolean);
+    }
+
+    function monitorExtensionSubmission(applicationId: string, baselineTexts: ReadonlySet<string> = new Set()) {
       if (monitoredSubmissionIds.has(applicationId)) return;
       monitoredSubmissionIds.add(applicationId);
-      const selectors = '[role="alert"], [role="status"], [aria-live], h1, h2, [class*="error" i], [class*="success" i], [class*="confirm" i], [class*="thank" i]';
-      const readText = () => [...document.querySelectorAll<HTMLElement>(selectors)]
-        .filter((element) => !element.closest('[id*="litos"]'))
-        .map((element) => element.textContent ?? '')
+      const readText = () => visibleSubmissionOutcomeTexts()
+        .filter((text) => !baselineTexts.has(text))
         .join(' ');
       let observer: MutationObserver | null = null;
       let interval: ReturnType<typeof setInterval>;
-      const report = (outcome: 'confirmed' | 'failed' | 'unknown', confirmationText?: string) => {
+      const report = (outcome: 'confirmed' | 'failed' | 'unknown', confirmationText?: string, attempt = 0) => {
         chrome.runtime.sendMessage({
           type: 'EXTENSION_SUBMISSION_OUTCOME',
           payload: { applicationId, outcome, finalUrl: window.location.href, confirmationText },
-        }).catch(() => {});
+        }, (response: { ok?: boolean } | undefined) => {
+          if (!response?.ok && attempt < 4) window.setTimeout(() => report(outcome, confirmationText, attempt + 1), 1000 * (attempt + 1));
+        });
       };
       const controller = createSubmissionOutcomeController({
         readText,
@@ -121,16 +130,30 @@ export default defineContentScript({
       controller.scan();
     }
 
-    function armManualSubmissionTracking(submitButton: HTMLElement, applicationId: string) {
-      submitButton.addEventListener('click', (event) => {
-        if (!event.isTrusted || hasEmptyRequiredFields()) return;
+    function armManualSubmissionTracking(submitButton: HTMLElement, applicationId: string, statusEl: HTMLElement | null) {
+      let reserving = false;
+      const onClick = (event: MouseEvent) => {
+        if (!event.isTrusted) return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        if (reserving || hasEmptyRequiredFields()) return;
+        reserving = true;
+        const baselineTexts = new Set(visibleSubmissionOutcomeTexts());
         chrome.runtime.sendMessage({
           type: 'EXTENSION_SUBMISSION_START',
-          payload: { applicationId, authorization: 'per_application_approval' },
-        }, (response: { ok?: boolean } | undefined) => {
-          if (response?.ok) monitorExtensionSubmission(applicationId);
+          payload: { applicationId, authorization: 'user_initiated' },
+        }, (response: { ok?: boolean; error?: string } | undefined) => {
+          reserving = false;
+          if (!response?.ok) {
+            if (statusEl) statusEl.textContent = response?.error ?? 'Litos could not safely track this submission. Try again.';
+            return;
+          }
+          submitButton.removeEventListener('click', onClick, true);
+          submitButton.click();
+          monitorExtensionSubmission(applicationId, baselineTexts);
         });
-      }, { capture: true, once: true });
+      };
+      submitButton.addEventListener('click', onClick, true);
     }
 
     // No top-frame gating: for a cross-origin Greenhouse iframe embed, this script's instance
@@ -1235,7 +1258,7 @@ export default defineContentScript({
           return;
         }
 
-        if (finalSubmitBtn) armManualSubmissionTracking(finalSubmitBtn, resume.resume_id);
+        if (finalSubmitBtn) armManualSubmissionTracking(finalSubmitBtn, resume.resume_id, statusEl);
 
         const dashboardQuestions = [
           ...draftedQuestions,
@@ -1534,8 +1557,9 @@ export default defineContentScript({
               const safeAfterReservation = target.isConnected && isElementVisible(target) && !document.hidden && document.hasFocus() && !hasEmptyRequiredFields();
               if (started.ok && safeAfterReservation) {
                 if (statusEl) statusEl.textContent = `${actionLabel}...`;
-                monitorExtensionSubmission(applicationId);
+                const baselineTexts = new Set(visibleSubmissionOutcomeTexts());
                 target.click();
+                monitorExtensionSubmission(applicationId, baselineTexts);
                 reportEvent(true);
               } else {
                 if (statusEl) statusEl.textContent = started.error ?? 'The page changed before Litos could submit. Check it yourself.';
