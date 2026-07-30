@@ -1722,16 +1722,14 @@ export default defineContentScript({
             const knownAccount = (await getPortalAccounts())[portalHost];
             let password: string | undefined;
             let passwordWithheldReason: string | undefined;
+            let saltFingerprint: string | undefined;
             if (creatingAccount || knownAccount) {
-              const saltFingerprint = await currentSaltFingerprint();
+              saltFingerprint = await currentSaltFingerprint();
               if (creatingAccount || knownAccount?.saltFingerprint === saltFingerprint) {
                 password = await derivePortalPassword(portalHost);
               } else {
                 passwordWithheldReason =
                   'You set this account up on another device, so type your password in yourself.';
-              }
-              if (creatingAccount && password) {
-                await recordPortalAccount({ host: portalHost, saltFingerprint, createdAt: Date.now() });
               }
             } else {
               // Signing in to an account Litos never provisioned: created by hand, created before
@@ -1744,6 +1742,17 @@ export default defineContentScript({
               password,
               passwordWithheldReason,
             });
+
+            // Only claim this account after Workday accepted a write to a password field. Recording
+            // earlier would make a changed or partially loaded page look like a Litos-managed
+            // account, causing future sign-in attempts to receive a password that was never used.
+            if (creatingAccount && password && saltFingerprint && fillResult.password_filled) {
+              await recordPortalAccount({
+                host: portalHost,
+                saltFingerprint,
+                createdAt: Date.now(),
+              });
+            }
 
             chrome.runtime.sendMessage({
               type: 'AUTOFILL_EVENT',
@@ -1758,10 +1767,12 @@ export default defineContentScript({
 
             stopOrbAnd(() => {
               if (statusEl) {
-                statusEl.textContent = workdayAccountCompletion(
-                  Boolean(result.email),
-                  Boolean(password),
-                );
+                statusEl.textContent = workdayAccountCompletion({
+                  creatingAccount,
+                  emailFilled: fillResult.email_filled,
+                  passwordFilled: fillResult.password_filled,
+                  passwordWithheldReason,
+                });
               }
             });
             setTimeout(dismiss, 6000);

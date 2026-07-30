@@ -583,6 +583,11 @@ export interface WorkdayAccountCreationParams {
   passwordWithheldReason?: string;
 }
 
+export interface WorkdayAccountCreationResult extends AutofillResult {
+  email_filled: boolean;
+  password_filled: boolean;
+}
+
 // Fills email, and the derived portal password ONLY when the caller passes one. Supersedes the
 // 2026-07-03 "password never touched, student sets their own" decision: email-only kept Litos out
 // of credential custody but stranded every Workday account behind a password Litos could never
@@ -594,10 +599,12 @@ export interface WorkdayAccountCreationParams {
 // Litos itself provisioned under the current salt. Everywhere else it passes nothing and this
 // degrades to the original email-only behavior. Still fill-and-stop, NOT auto-submit: Litos never
 // clicks Create Account and never touches email verification - the student completes both by hand.
-export async function fillWorkdayAccountCreation(params: WorkdayAccountCreationParams): Promise<AutofillResult> {
+export async function fillWorkdayAccountCreation(params: WorkdayAccountCreationParams): Promise<WorkdayAccountCreationResult> {
   const { email, password, passwordWithheldReason } = params;
   let fields_filled = 0;
   let fields_skipped = 0;
+  let email_filled = false;
+  let password_filled = false;
   const skipped_reasons: string[] = [];
 
   const emailEl = document.querySelector<HTMLInputElement>('input[data-automation-id="email"], input[type="email"]');
@@ -605,6 +612,7 @@ export async function fillWorkdayAccountCreation(params: WorkdayAccountCreationP
     if (email) {
       await fillField(emailEl, email);
       fields_filled++;
+      email_filled = true;
     } else {
       fields_skipped++;
       skipped_reasons.push('email: not present in stored profile');
@@ -636,7 +644,16 @@ export async function fillWorkdayAccountCreation(params: WorkdayAccountCreationP
       }
     }
     if (wrotePassword) fields_filled++;
+    password_filled = wrotePassword;
   }
 
-  return { ats_name: 'workday', fields_filled, fields_skipped, ai_drafted: 0, skipped_reasons };
+  return {
+    ats_name: 'workday',
+    fields_filled,
+    fields_skipped,
+    ai_drafted: 0,
+    skipped_reasons,
+    email_filled,
+    password_filled,
+  };
 }

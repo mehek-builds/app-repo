@@ -1,6 +1,8 @@
+import packageMetadata from '../../package.json';
+
 export const PRODUCT_NAME = 'Litos';
 export const API_VERSION = '1';
-export const EXTENSION_VERSION = '0.5.7';
+export const EXTENSION_VERSION = packageMetadata.version;
 
 export function litosClientHeaders(): Record<string, string> {
   const version =
