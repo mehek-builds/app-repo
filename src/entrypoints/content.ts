@@ -90,6 +90,49 @@ export default defineContentScript({
         );
       });
     }
+
+    const monitoredSubmissionIds = new Set<string>();
+
+    function monitorExtensionSubmission(applicationId: string) {
+      if (monitoredSubmissionIds.has(applicationId)) return;
+      monitoredSubmissionIds.add(applicationId);
+      const selectors = '[role="alert"], [role="status"], [aria-live], h1, h2, [class*="error" i], [class*="success" i], [class*="confirm" i], [class*="thank" i]';
+      const readText = () => [...document.querySelectorAll<HTMLElement>(selectors)]
+        .filter((element) => !element.closest('[id*="litos"]'))
+        .map((element) => element.textContent ?? '')
+        .join(' ');
+      let observer: MutationObserver | null = null;
+      let interval: ReturnType<typeof setInterval>;
+      const report = (outcome: 'confirmed' | 'failed' | 'unknown', confirmationText?: string) => {
+        chrome.runtime.sendMessage({
+          type: 'EXTENSION_SUBMISSION_OUTCOME',
+          payload: { applicationId, outcome, finalUrl: window.location.href, confirmationText },
+        }).catch(() => {});
+      };
+      const controller = createSubmissionOutcomeController({
+        readText,
+        onStop: () => { clearInterval(interval); observer?.disconnect(); },
+        onOutcome: (outcome) => report(outcome.kind === 'failure' ? 'failed' : 'confirmed', outcome.kind === 'failure' ? outcome.message : readText().slice(0, 2000)),
+        onUnknown: () => report('unknown'),
+      });
+      interval = setInterval(controller.scan, 1000);
+      observer = new MutationObserver(controller.queueScan);
+      observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+      controller.scan();
+    }
+
+    function armManualSubmissionTracking(submitButton: HTMLElement, applicationId: string) {
+      submitButton.addEventListener('click', (event) => {
+        if (!event.isTrusted || hasEmptyRequiredFields()) return;
+        chrome.runtime.sendMessage({
+          type: 'EXTENSION_SUBMISSION_START',
+          payload: { applicationId, authorization: 'per_application_approval' },
+        }, (response: { ok?: boolean } | undefined) => {
+          if (response?.ok) monitorExtensionSubmission(applicationId);
+        });
+      }, { capture: true, once: true });
+    }
+
     // No top-frame gating: for a cross-origin Greenhouse iframe embed, this script's instance
     // running INSIDE that iframe is the only one that ever matches `*.greenhouse.io/*` at all
     // (the parent page is on the company's own domain, which isn't in `matches`). That iframe
@@ -109,9 +152,23 @@ export default defineContentScript({
     }
     w.__litosLoaded = true;
 
+    const checkPendingSubmission = (attempt = 0) => {
+      chrome.runtime.sendMessage(
+        { type: 'GET_PENDING_EXTENSION_SUBMISSION' },
+        (response: { pending?: { applicationId?: string } | null } | undefined) => {
+          if (response?.pending?.applicationId) {
+            monitorExtensionSubmission(response.pending.applicationId);
+          } else if (attempt < 60) {
+            window.setTimeout(() => checkPendingSubmission(attempt + 1), 500);
+          }
+        },
+      );
+    };
+    checkPendingSubmission();
+
     let cardInjected = false;
     let approved = false; // true once user taps "Yes" on either card
-    let submitFromDashboard: ((questions: Array<{ id: string; question: string; answer: string }>) => Promise<{ ok: boolean; error?: string }>) | null = null;
+    let submitFromDashboard: ((questions: Array<{ id: string; question: string; answer: string }>) => Promise<{ ok: boolean; error?: string; finalUrl?: string; confirmationText?: string }>) | null = null;
 
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       if (message?.type !== 'SUBMIT_FROM_DASHBOARD') return false;
@@ -1174,9 +1231,11 @@ export default defineContentScript({
         reportEvent(false);
 
         if (autoSubmitOn && !autoSubmitHeld && finalSubmitBtn) {
-          runAutoSubmitCountdown(card, statusEl, yesBtn, noBtn, finalSubmitBtn, fillResult, reportEvent, 'Submitting');
+          runAutoSubmitCountdown(card, statusEl, yesBtn, noBtn, finalSubmitBtn, fillResult, resume.resume_id, reportEvent, 'Submitting');
           return;
         }
+
+        if (finalSubmitBtn) armManualSubmissionTracking(finalSubmitBtn, resume.resume_id);
 
         const dashboardQuestions = [
           ...draftedQuestions,
@@ -1210,8 +1269,8 @@ export default defineContentScript({
           while (Date.now() - started < 45_000) {
             const text = document.body.innerText;
             const failure = pageSubmissionFailureMessage(text);
-            if (failure) return { ok: false, error: failure };
-            if (pageShowsSubmissionConfirmation(text)) return { ok: true };
+            if (failure) return { ok: false, error: failure, finalUrl: window.location.href };
+            if (pageShowsSubmissionConfirmation(text)) return { ok: true, finalUrl: window.location.href, confirmationText: text.slice(0, 2000) };
             await new Promise((resolve) => setTimeout(resolve, 500));
           }
           return { ok: false, error: 'The company never confirmed it. Open the tab and check whether it went through.' };
@@ -1254,6 +1313,7 @@ export default defineContentScript({
       noBtn: HTMLButtonElement | null,
       submitBtn: HTMLElement,
       fillResult: AutofillResult,
+      applicationId: string,
       reportEvent: (autoSubmitted: boolean) => void,
       actionLabel: string,
     ) {
@@ -1456,7 +1516,7 @@ export default defineContentScript({
           // immediately before the click so revoking permission in Settings stops an open tab too.
           if (statusEl) statusEl.textContent = 'Checking your settings. You can still cancel.';
           let permissionSettled = false;
-          const finishPermissionCheck = (settings: { automatic_submission_enabled?: boolean } | undefined) => {
+          const finishPermissionCheck = async (settings: { automatic_submission_enabled?: boolean } | undefined) => {
             if (permissionSettled || cancelled) return;
             permissionSettled = true;
             window.clearTimeout(permissionTimer);
@@ -1464,9 +1524,29 @@ export default defineContentScript({
             cleanupChrome();
             restoreSubmitButton();
             if (settings?.automatic_submission_enabled === true && stillSafe) {
-              if (statusEl) statusEl.textContent = `${actionLabel}...`;
-              target.click();
-              reportEvent(true);
+              if (statusEl) statusEl.textContent = 'Reserving this application safely...';
+              const started = await new Promise<{ ok?: boolean; error?: string }>((resolve) => {
+                chrome.runtime.sendMessage({
+                  type: 'EXTENSION_SUBMISSION_START',
+                  payload: { applicationId, authorization: 'standing_consent' },
+                }, (response) => resolve(response ?? { ok: false, error: 'Litos did not respond.' }));
+              });
+              const safeAfterReservation = target.isConnected && isElementVisible(target) && !document.hidden && document.hasFocus() && !hasEmptyRequiredFields();
+              if (started.ok && safeAfterReservation) {
+                if (statusEl) statusEl.textContent = `${actionLabel}...`;
+                monitorExtensionSubmission(applicationId);
+                target.click();
+                reportEvent(true);
+              } else {
+                if (statusEl) statusEl.textContent = started.error ?? 'The page changed before Litos could submit. Check it yourself.';
+                if (started.ok) {
+                  chrome.runtime.sendMessage({
+                    type: 'EXTENSION_SUBMISSION_OUTCOME',
+                    payload: { applicationId, outcome: 'unknown', finalUrl: window.location.href },
+                  }).catch(() => {});
+                }
+                reportEvent(false);
+              }
             } else {
               if (statusEl) statusEl.textContent = settings?.automatic_submission_enabled === true
                 ? 'The page changed at the last moment. Check it over, then send it yourself.'
@@ -1476,7 +1556,7 @@ export default defineContentScript({
             setTimeout(() => card.remove(), 2000);
           };
           const permissionTimer = window.setTimeout(() => finishPermissionCheck(undefined), 10_000);
-          chrome.runtime.sendMessage({ type: 'GET_AUTOMATION_SETTINGS' }, finishPermissionCheck);
+          chrome.runtime.sendMessage({ type: 'GET_AUTOMATION_SETTINGS' }, (settings) => { void finishPermissionCheck(settings); });
           return;
         }
         if (num) num.textContent = String(remaining);
