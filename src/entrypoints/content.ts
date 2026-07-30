@@ -53,6 +53,11 @@ import {
 import { mountThinkingOrb } from '../lib/thinking-orb';
 import { derivePortalPassword, portalKeyForHost, currentSaltFingerprint } from '../lib/portal-password';
 import { automaticSubmissionEnabled } from '../lib/auto-submit-consent';
+import {
+  WORKDAY_ACCOUNT_PROMPT_BODY,
+  WORKDAY_ACCOUNT_PROMPT_TITLE,
+  workdayAccountCompletion,
+} from '../lib/workday-account-copy';
 
 export default defineContentScript({
   matches: [
@@ -1631,11 +1636,9 @@ export default defineContentScript({
     }
 
     // ─── Workday account-creation speed-up (2026-07-03) ────────────────────────
-    // Litos doesn't create the account itself, and only ever fills the email field - password,
-    // clicking Create Account, and completing email verification are entirely the student's own
-    // steps by explicit product decision. Not a fill-and-stop-with-countdown card like the
-    // others: there's no button to auto-submit toward, since the form is never actually
-    // complete without the password the student is meant to type themselves.
+    // Litos can fill the email and derive a per-employer password. It never clicks Create Account
+    // or completes email verification. This is not a fill-and-stop-with-countdown card because
+    // account creation always stays with the student.
 
     function accountCreationCardShell(): string {
       return `
@@ -1650,8 +1653,8 @@ export default defineContentScript({
           <div style="display:flex;align-items:flex-start;gap:9px;margin-bottom:12px;line-height:1.4;">
             ${markSvg()}
             <div>
-              <div style="font-weight:500;font-size:13px;color:${COLOR.ink};line-height:1.4;">Fill in your email here?</div>
-              <div style="font-size:12px;color:${COLOR.muted};margin-top:2px;line-height:1.4;">You still choose your own password and click Create Account.</div>
+              <div style="font-weight:500;font-size:13px;color:${COLOR.ink};line-height:1.4;">${WORKDAY_ACCOUNT_PROMPT_TITLE}</div>
+              <div style="font-size:12px;color:${COLOR.muted};margin-top:2px;line-height:1.4;">${WORKDAY_ACCOUNT_PROMPT_BODY}</div>
             </div>
           </div>
           <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;min-width:0;">
@@ -1755,9 +1758,10 @@ export default defineContentScript({
 
             stopOrbAnd(() => {
               if (statusEl) {
-                statusEl.textContent = fillResult.fields_filled > 0
-                  ? 'Email filled in. Choose your own password, then create the account.'
-                  : 'No email on file yet - fill it in yourself, then set your password and click Create Account.';
+                statusEl.textContent = workdayAccountCompletion(
+                  Boolean(result.email),
+                  Boolean(password),
+                );
               }
             });
             setTimeout(dismiss, 6000);

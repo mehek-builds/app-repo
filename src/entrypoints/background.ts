@@ -1,14 +1,14 @@
 // Token access goes through lib/storage, so the background reads the exact key the popup
 // writes, including the backward-compatible fallback to the legacy Volley-era key name.
 import { getToken as getStoredToken, migrateLegacyStorage, setToken, setAutoSubmitEnabled } from '../lib/storage';
-import { API_BASE } from '../lib/config';
 import { overloadWaitMs, overloadBudgetRemains, RESUME_OVERLOAD_BUDGET_MS } from '../lib/overload';
 // Pure salary/posting helpers (R-031). adapters/salary is a LEAF module (types only), so this
 // import does not pull the DOM-adjacent adapter graph into the service worker bundle.
 import { parseAshbyPostingRef, selectPostingCompensation, type PostingCompensation } from '../lib/adapters/salary';
-import { litosClientHeaders, PRODUCT_NAME, type ProductMeta } from '../lib/product';
-import type { GeneratedResume } from '../lib/types';
+import { PRODUCT_NAME, type ProductMeta } from '../lib/product';
+import type { ApplicationProfile, GeneratedResume } from '../lib/types';
 import { automaticSubmissionEnabled, groundedDraftAnswer } from '../lib/auto-submit-consent';
+import { backendFetch } from '../lib/backend-fetch';
 
 // Latched off once the backend reports onboarding complete. Service-worker memory is fine for
 // this: the worst case on a restart is one wasted 403, which re-latches it immediately.
@@ -43,16 +43,16 @@ async function setPendingSubmission(tabId: number, pending: PendingExtensionSubm
 async function postExtensionOutcome(pending: PendingExtensionSubmission, outcome: 'confirmed' | 'failed' | 'unknown', finalUrl: string, confirmationText?: string) {
   const token = await getStoredToken();
   if (!token) throw new Error('Sign in to Litos again before updating this application.');
-  const response = await timeoutFetch(`${API_BASE}/applications/${pending.applicationId}/submission/extension-outcome`, {
+  const response = await timeoutBackendFetch(`/applications/${pending.applicationId}/submission/extension-outcome`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       claim_id: pending.claimId,
       outcome,
       final_url: finalUrl,
       ...(confirmationText ? { confirmation_text: confirmationText.slice(0, 2000) } : {}),
     }),
-  });
+  }, token);
   if (!response.ok) {
     const body = await response.json().catch(() => null) as { error?: string } | null;
     throw new Error(body?.error ?? `Could not update application (${response.status})`);
@@ -84,11 +84,11 @@ async function harvestFields(fields: unknown): Promise<{ ok: boolean; stop?: boo
   const token = await getStoredToken();
   if (!token) return { ok: false };
   try {
-    const res = await timeoutFetch(`${API_BASE}/profile/harvest`, {
+    const res = await timeoutBackendFetch('/profile/harvest', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ fields }),
-    });
+    }, token);
     if (res.status === 403) {
       harvestStopped = true;
       return { ok: false, stop: true };
@@ -114,11 +114,16 @@ async function harvestFields(fields: unknown): Promise<{ ok: boolean; stop?: boo
 const FETCH_TIMEOUT_MS = 20000;
 const RESUME_FETCH_TIMEOUT_MS = 60000;
 function timeoutFetch(input: string, init: RequestInit = {}, ms = FETCH_TIMEOUT_MS): Promise<Response> {
-  const headers = new Headers(init.headers);
-  if (input.startsWith(API_BASE)) {
-    for (const [name, value] of Object.entries(litosClientHeaders())) headers.set(name, value);
-  }
-  return fetch(input, { ...init, headers, signal: AbortSignal.timeout(ms) });
+  return fetch(input, { ...init, signal: AbortSignal.timeout(ms) });
+}
+
+function timeoutBackendFetch(
+  path: string,
+  init: RequestInit = {},
+  token?: string,
+  ms = FETCH_TIMEOUT_MS,
+): Promise<Response> {
+  return backendFetch(path, init, { token, timeoutMs: ms });
 }
 
 // ─── Transient model-capacity retry (live QA 2026-07-16, R-003) ──────────────
@@ -189,22 +194,20 @@ async function resolveAndDraft(title: string, company: string, url: string, toke
   // Fetch the user's profile first so we can (a) feed their school into contact
   // resolution for alumni matches and (b) ground the drafts. The backend returns the
   // parsed JSON unwrapped, and 404s when no resume has been uploaded yet.
-  const profileRes = await timeoutFetch(`${API_BASE}/profile`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const profileRes = await timeoutBackendFetch('/profile', {}, token);
   const userProfile: UserProfile = profileRes.ok ? await profileRes.json() : EMPTY_PROFILE;
 
   // Resolve contacts
-  const resolveRes = await timeoutFetch(`${API_BASE}/resolve`, {
+  const resolveRes = await timeoutBackendFetch('/resolve', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       company,
       role: title,
       domain: company.toLowerCase().replace(/\s+/g, '') + '.com',
       ...(userProfile.school ? { user_school: userProfile.school } : {}),
     }),
-  });
+  }, token);
   if (!resolveRes.ok) throw new Error('resolve failed');
   const { contacts }: { contacts: ResolvedContact[] } = await resolveRes.json();
 
@@ -230,9 +233,9 @@ async function resolveAndDraft(title: string, company: string, url: string, toke
   if (second) top.push(second);
 
   const drafts = await Promise.all(top.map(async ({ contact, email_resolution }) => {
-    const draftRes = await timeoutFetch(`${API_BASE}/draft`, {
+    const draftRes = await timeoutBackendFetch('/draft', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         contact: {
           full_name: contact.full_name,
@@ -246,7 +249,7 @@ async function resolveAndDraft(title: string, company: string, url: string, toke
         company,
         user_profile: userProfile,
       }),
-    });
+    }, token);
     if (!draftRes.ok) return null;
     const draft = await draftRes.json();
     return {
@@ -257,30 +260,6 @@ async function resolveAndDraft(title: string, company: string, url: string, toke
   }));
 
   return drafts.filter(Boolean);
-}
-
-interface ApplicationProfileResponse {
-  phone?: string;
-  address_city?: string;
-  address_state?: string;
-  address_zip?: string;
-  linkedin_url?: string;
-  github_url?: string;
-  portfolio_url?: string;
-  citizenship?: string;
-  work_authorized?: boolean;
-  needs_sponsorship?: boolean;
-  availability_date?: string;
-  desired_salary?: string;
-  desired_salary_currency?: string;
-  eeo_prefs?: Record<string, string> | null;
-  referral_source_default?: string;
-  // Academic record (R-005). The backend serves these from GET /profile/application under exactly
-  // these names, and this object is handed to the adapters as-is, so listing them here is what
-  // keeps this passthrough honest rather than fields that only exist at runtime.
-  gpa?: string;
-  gpa_scale?: string;
-  major?: string;
 }
 
 // This posting's structured salary range (R-031), when the tab is an Ashby posting whose board
@@ -323,11 +302,11 @@ async function generateResumeAndProfile(
   // The two profile fetches are independent, so run them together instead of one-after-another -
   // this is on the pre-warm critical path, so a saved round trip is a saved round trip.
   const [profileRes, appProfileRes] = await Promise.all([
-    timeoutFetch(`${API_BASE}/profile`, { headers: { Authorization: `Bearer ${token}` } }),
-    timeoutFetch(`${API_BASE}/profile/application`, { headers: { Authorization: `Bearer ${token}` } }),
+    timeoutBackendFetch('/profile', {}, token),
+    timeoutBackendFetch('/profile/application', {}, token),
   ]);
   const profile: UserProfile & { full_name?: string; email?: string } = profileRes.ok ? await profileRes.json() : EMPTY_PROFILE;
-  const applicationProfile: ApplicationProfileResponse = appProfileRes.ok ? await appProfileRes.json() : {};
+  const applicationProfile: ApplicationProfile = appProfileRes.ok ? await appProfileRes.json() : {};
 
   // Only the resume POST retries. The profile reads above are cheap, already done, and unaffected
   // by a model overload; re-running them per attempt would add round trips to a backend that is
@@ -335,9 +314,9 @@ async function generateResumeAndProfile(
   const overloadDeadline = Date.now() + RESUME_OVERLOAD_BUDGET_MS;
   let resume: GeneratedResume | undefined;
   for (let attempt = 1; ; attempt++) {
-    const resumeRes = await timeoutFetch(`${API_BASE}/resume/generate`, {
+    const resumeRes = await timeoutBackendFetch('/resume/generate', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         company,
         role,
@@ -351,7 +330,7 @@ async function generateResumeAndProfile(
           phone: applicationProfile.phone,
         },
       }),
-    }, RESUME_FETCH_TIMEOUT_MS);
+    }, token, RESUME_FETCH_TIMEOUT_MS);
 
     if (resumeRes.ok) {
       resume = await resumeRes.json();
@@ -396,7 +375,7 @@ export default defineBackground(() => {
   // Cache the backend-owned public contract for this service-worker session.
   // Static fallbacks keep the extension usable offline; the live contract lets
   // future releases add compatibility gates without another naming migration.
-  void timeoutFetch(`${API_BASE}/v1/meta`)
+  void timeoutBackendFetch('/v1/meta')
     .then(async (res) => {
       if (!res.ok) return;
       const meta = (await res.json()) as ProductMeta;
@@ -464,9 +443,7 @@ export default defineBackground(() => {
             return;
           }
           try {
-            const res = await timeoutFetch(`${API_BASE}/onboarding/state`, {
-              headers: { Authorization: `Bearer ${token}` },
-            });
+            const res = await timeoutBackendFetch('/onboarding/state', {}, token);
             if (!res.ok) throw new Error(`settings failed (${res.status})`);
             const data: { automatic_submission_enabled?: boolean; automatic_verification_enabled?: boolean } = await res.json();
             const automaticSubmission = automaticSubmissionEnabled(data);
@@ -491,11 +468,11 @@ export default defineBackground(() => {
             const authorization = message.payload?.authorization === 'user_initiated'
               ? 'user_initiated'
               : 'standing_consent';
-            const response = await timeoutFetch(`${API_BASE}/applications/${applicationId}/submission/extension-start`, {
+            const response = await timeoutBackendFetch(`/applications/${applicationId}/submission/extension-start`, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+              headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ authorization }),
-            });
+            }, token);
             const body = await response.json().catch(() => null) as { claim_id?: string; error?: string; already_submitted?: boolean } | null;
             if (!response.ok || !body?.claim_id) throw new Error(body?.error ?? 'Litos could not reserve this application.');
             const pending = { applicationId, claimId: body.claim_id, startedAt: Date.now(), frameId: sender.frameId ?? 0 };
@@ -637,11 +614,11 @@ export default defineBackground(() => {
             return;
           }
           try {
-            const res = await timeoutFetch(`${API_BASE}/application/answer`, {
+            const res = await timeoutBackendFetch('/application/answer', {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+              headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ company, role, jd_text, question }),
-            }, RESUME_FETCH_TIMEOUT_MS);
+            }, token, RESUME_FETCH_TIMEOUT_MS);
             if (!res.ok) {
               sendResponse({ error: `draft failed (${res.status})` });
               return;
@@ -667,7 +644,7 @@ export default defineBackground(() => {
             return;
           }
           try {
-            const profileRes = await timeoutFetch(`${API_BASE}/profile`, { headers: { Authorization: `Bearer ${token}` } });
+            const profileRes = await timeoutBackendFetch('/profile', {}, token);
             const profile: { email?: string } = profileRes.ok ? await profileRes.json() : {};
             sendResponse({ email: profile.email });
           } catch (err) {
@@ -680,11 +657,11 @@ export default defineBackground(() => {
       case 'AUTOFILL_EVENT': {
         getStoredToken().then((token) => {
           if (!token) return;
-          timeoutFetch(`${API_BASE}/autofill/event`, {
+          timeoutBackendFetch('/autofill/event', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(message.payload),
-          }).catch(() => {});
+          }, token).catch(() => {});
         });
         return false;
       }
@@ -704,16 +681,16 @@ export default defineBackground(() => {
             skippedReasons: string[];
           };
           try {
-            const res = await timeoutFetch(`${API_BASE}/applications/${payload.applicationId}/review`, {
+            const res = await timeoutBackendFetch(`/applications/${payload.applicationId}/review`, {
               method: 'PUT',
-              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+              headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 ats_name: payload.atsName,
                 portal_url: payload.portalUrl,
                 questions: payload.questions,
                 skipped_reasons: payload.skippedReasons,
               }),
-            });
+            }, token);
             if (!res.ok) throw new Error(`review handoff failed (${res.status})`);
             const stored = await chrome.storage.session.get('litos_application_tabs');
             const tabs = (stored.litos_application_tabs ?? {}) as Record<string, number | { tabId: number; frameId: number }>;
@@ -779,11 +756,11 @@ export default defineBackground(() => {
         const tabId = typeof storedTarget === 'number' ? storedTarget : storedTarget?.tabId;
         const frameId = typeof storedTarget === 'number' ? 0 : storedTarget?.frameId ?? 0;
         if (!token || tabId === undefined) throw new Error('That tab is no longer open. Go back to the job and start it again.');
-        const startResponse = await timeoutFetch(`${API_BASE}/applications/${applicationId}/submission/extension-start`, {
+        const startResponse = await timeoutBackendFetch(`/applications/${applicationId}/submission/extension-start`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ authorization: 'user_initiated' }),
-        });
+        }, token);
         const started = await startResponse.json().catch(() => null) as { claim_id?: string; error?: string } | null;
         if (!startResponse.ok || !started?.claim_id) throw new Error(started?.error ?? 'Could not reserve this application.');
         const pending = { applicationId, claimId: started.claim_id, startedAt: Date.now(), frameId };
