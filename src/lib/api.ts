@@ -10,8 +10,8 @@ import type {
   ResumeContact,
   GeneratedResume,
 } from './types';
-import { litosClientHeaders, type ProductMeta } from './product';
-import { API_BASE } from './config';
+import { type ProductMeta } from './product';
+import { backendFetch } from './backend-fetch';
 
 
 // Throw the backend's human-readable message (quota, rate limit, bad code, etc.)
@@ -34,17 +34,10 @@ async function request<T>(
 ): Promise<T> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    ...litosClientHeaders(),
     ...(options.headers as Record<string, string>),
   };
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`;
-  }
 
-  const res = await fetch(`${API_BASE}${path}`, {
-    ...options,
-    headers,
-  });
+  const res = await backendFetch(path, { ...options, headers }, { token });
 
   if (!res.ok) {
     await throwApiError(res);
@@ -85,11 +78,10 @@ export async function uploadProfile(
   form.append('resume', file);
   if (voice_pref) form.append('voice_pref', voice_pref);
 
-  const res = await fetch(`${API_BASE}/profile`, {
+  const res = await backendFetch('/profile', {
     method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, ...litosClientHeaders() },
     body: form,
-  });
+  }, { token });
 
   if (!res.ok) {
     await throwApiError(res);

@@ -2,6 +2,18 @@
 
 All notable changes to the Litos extension are documented here.
 
+## [0.5.7] - 2026-07-30
+
+### Changed
+- Backend calls from the popup and background worker now share one transport helper for the API
+  base, product headers, session token, and request timeout.
+- The Workday account prompt now says before the click that Litos can make and fill a password.
+  The completion message reports whether the password was filled or left for the user.
+
+### Fixed
+- Removed a partial duplicate of the application profile type from the background worker. The
+  worker now uses the same profile contract as the rest of the extension.
+
 ## [0.5.6] - 2026-07-30
 
 ### Added
