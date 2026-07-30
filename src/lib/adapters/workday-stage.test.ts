@@ -176,6 +176,16 @@ describe('fillWorkdayAccountCreation safety', () => {
     expect(byId('createAccountCheckbox').checked).toBe(false);
     // Password + confirm count as one field, alongside email.
     expect(result.fields_filled).toBe(2);
+    expect(result.email_filled).toBe(true);
+    expect(result.password_filled).toBe(true);
+  });
+
+  it('reports no successful writes when matching fields are absent', async () => {
+    document.body.innerHTML = '<input data-automation-id="beecatcher" type="text" />';
+    const result = await fillWorkdayAccountCreation({ email: 'a@b.com', password: 'Derived1!Aa' });
+    expect(result.fields_filled).toBe(0);
+    expect(result.email_filled).toBe(false);
+    expect(result.password_filled).toBe(false);
   });
 
   it('explains a withheld password instead of leaving the box silently blank', async () => {
@@ -189,5 +199,7 @@ describe('fillWorkdayAccountCreation safety', () => {
     expect(document.querySelector<HTMLInputElement>('input[type="password"]')!.value).toBe('');
     expect(result.fields_skipped).toBe(1);
     expect(result.skipped_reasons.join(' ')).toMatch(/left for you to enter/);
+    expect(result.email_filled).toBe(true);
+    expect(result.password_filled).toBe(false);
   });
 });

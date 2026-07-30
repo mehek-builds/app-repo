@@ -2,6 +2,16 @@
 
 All notable changes to the Litos extension are documented here.
 
+## [0.5.8] - 2026-07-30
+
+### Fixed
+- Workday completion messages now report only fields the extension actually changed, including
+  clear handoff copy when a password is deliberately withheld.
+- A Workday account is recorded as Litos-managed only after a password was successfully filled,
+  preventing a partial or changed page from poisoning later sign-in attempts.
+- The manifest and API client version now come from package metadata, eliminating the duplicate
+  version pin that produced a stale release artifact after a package bump.
+
 ## [0.5.7] - 2026-07-30
 
 ### Changed

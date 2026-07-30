@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import packageMetadata from '../../package.json';
 import { API_BASE } from './config';
 import { backendFetch } from './backend-fetch';
 
@@ -24,7 +25,7 @@ describe('backendFetch', () => {
     expect(headers.get('Authorization')).toBe('Bearer session-token');
     expect(headers.get('Content-Type')).toBe('application/json');
     expect(headers.get('X-Litos-Client')).toBe('extension');
-    expect(headers.get('X-Litos-Version')).toBe('0.5.7');
+    expect(headers.get('X-Litos-Version')).toBe(packageMetadata.version);
     expect(headers.get('X-Request-Id')).toBe('request-1');
   });
 
