@@ -51,4 +51,16 @@ describe('extension auth storage', () => {
     values.volley_token = 'legacy-token';
     await expect(storage.getToken()).resolves.toBe('legacy-token');
   });
+
+  it('rotates the anonymous analytics identity on logout', async () => {
+    values.litos_token = 'token-123';
+    values.litos_profile = { school: 'USC' };
+    values.litos_posthog_distinct_id = 'anonymous-id';
+
+    await storage.clearAll();
+
+    expect(values).not.toHaveProperty('litos_token');
+    expect(values).not.toHaveProperty('litos_profile');
+    expect(values).not.toHaveProperty('litos_posthog_distinct_id');
+  });
 });
