@@ -48,6 +48,11 @@ export default function App() {
         } else {
           setScreen('onboarding');
         }
+        void chrome.runtime.sendMessage({
+          type: 'ANALYTICS_EVENT',
+          event: 'extension_opened',
+          properties: { authenticated: Boolean(storedToken && storedProfile) },
+        }).catch(() => {});
       } catch {
         setScreen('onboarding');
       } finally {
@@ -102,6 +107,11 @@ export default function App() {
   const handleOnboardingComplete = (newProfile: Profile, newToken: string, returning = false) => {
     setToken(newToken);
     setProfile(newProfile);
+    void chrome.runtime.sendMessage({
+      type: 'ANALYTICS_EVENT',
+      event: 'authentication_completed',
+      properties: { returning },
+    }).catch(() => {});
     // Someone signing back in already did setup. Sending them through it again was the whole
     // reason the extension had no sign-in path to begin with.
     if (returning) {

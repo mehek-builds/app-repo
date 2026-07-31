@@ -2,6 +2,21 @@
 
 All notable changes to the Litos extension are documented here.
 
+## [0.5.9] - 2026-07-31
+
+### Added
+- Privacy-limited PostHog product analytics for extension opens, authentication, job detection,
+  application generation and fill, submission outcomes, and outreach drafts.
+- A fixed event and property allowlist prevents job URLs, company names, role names, resume data,
+  answers, and account details from entering analytics.
+- A capped local outbox retries safe events after offline or interrupted worker wakes without
+  duplicating accepted events.
+
+### Changed
+- Logout now rotates the anonymous analytics identifier so separate accounts using one Chrome
+  profile are not linked.
+- Analytics uses the background worker and existing CORS behavior, with no new Chrome permission.
+
 ## [0.5.8] - 2026-07-30
 
 ### Fixed

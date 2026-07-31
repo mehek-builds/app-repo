@@ -125,6 +125,21 @@ The background worker is the only component that holds the auth token, so it own
 
 The division of labor is strict: **the extension does detection, orchestration, DOM filling, and the safety UI; the backend does every piece of language generation and contact resolution.** No LLM call is made from the extension itself.
 
+### Product analytics (`src/lib/analytics.ts`)
+
+The background worker sends a small, fixed vocabulary of product events to the same PostHog
+project as the Litos website. Set `VITE_POSTHOG_PROJECT_TOKEN` for release builds;
+`VITE_POSTHOG_HOST` defaults to the US ingestion host. The public project token is bundled in the
+extension, as browser ingestion keys are designed to be.
+
+Analytics has a runtime event and property allowlist. It does not send job URLs, company or role
+names, resume contents, application answers, profile data, or account identifiers. PostHog person
+profiles are disabled, logout rotates the random local identifier, and analytics failures never
+interrupt an application. A capped local outbox retries events after offline or interrupted worker
+wakes and uses stable event UUIDs so retries are idempotent. These client events are product signals,
+not authoritative billing, fraud, or submission records. The direct background fetch uses existing
+CORS behavior, so this adds no Chrome permission.
+
 ---
 
 ## Installing and running it
@@ -137,6 +152,7 @@ npm install                 # runs `wxt prepare` on postinstall
 # Point development or QA builds at a different backend when needed.
 # Copy .env.example to .env and set:
 #   VITE_API_BASE=https://your-backend.example.com
+#   VITE_POSTHOG_PROJECT_TOKEN=your-public-project-token
 
 npm run dev                 # WXT dev server + hot-reloaded extension (Chrome)
 npm run build               # production build into .output/chrome-mv3

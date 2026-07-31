@@ -9,6 +9,7 @@ import { PRODUCT_NAME, type ProductMeta } from '../lib/product';
 import type { ApplicationProfile, GeneratedResume } from '../lib/types';
 import { automaticSubmissionEnabled, groundedDraftAnswer } from '../lib/auto-submit-consent';
 import { backendFetch } from '../lib/backend-fetch';
+import { flushAnalyticsQueue, trackExtensionEvent } from '../lib/analytics';
 
 // Latched off once the backend reports onboarding complete. Service-worker memory is fine for
 // this: the worst case on a restart is one wasted 403, which re-latches it immediately.
@@ -57,6 +58,8 @@ async function postExtensionOutcome(pending: PendingExtensionSubmission, outcome
     const body = await response.json().catch(() => null) as { error?: string } | null;
     throw new Error(body?.error ?? `Could not update application (${response.status})`);
   }
+  void trackExtensionEvent('application_submission_outcome_recorded', { outcome });
+  if (outcome === 'confirmed') void trackExtensionEvent('application_submission_completed');
 }
 
 async function closePendingSubmission(tabId: number, finalUrl = 'https://trylitos.com') {
@@ -365,6 +368,8 @@ async function generateResumeAndProfile(
 }
 
 export default defineBackground(() => {
+  // Retry privacy-sanitized events that were queued through a prior offline or interrupted wake.
+  void flushAnalyticsQueue();
   chrome.tabs.onRemoved.addListener((tabId) => {
     closePendingSubmission(tabId).catch(() => {});
   });
@@ -428,6 +433,12 @@ export default defineBackground(() => {
         chrome.action.setBadgeText({ text: '!' });
         chrome.action.setBadgeBackgroundColor({ color: '#6b84e8' });
         chrome.runtime.sendMessage(message).catch(() => {});
+        void trackExtensionEvent('job_detected');
+        return false;
+      }
+
+      case 'ANALYTICS_EVENT': {
+        void trackExtensionEvent(message.event, message.properties);
         return false;
       }
 
@@ -477,6 +488,7 @@ export default defineBackground(() => {
             if (!response.ok || !body?.claim_id) throw new Error(body?.error ?? 'Litos could not reserve this application.');
             const pending = { applicationId, claimId: body.claim_id, startedAt: Date.now(), frameId: sender.frameId ?? 0 };
             await setPendingSubmission(tabId, pending);
+            void trackExtensionEvent('application_submission_requested', { authorization });
             sendResponse({ ok: true, claimId: body.claim_id });
           })
           .catch((error) => sendResponse({ ok: false, error: error instanceof Error ? error.message : 'Submission could not start.' }));
@@ -561,6 +573,7 @@ export default defineBackground(() => {
               chrome.action.setBadgeBackgroundColor({ color: '#6b84e8' });
               // Notify popup if open
               chrome.runtime.sendMessage({ type: 'DRAFTS_READY', payload: { count: drafts.length } }).catch(() => {});
+              void trackExtensionEvent('outreach_draft_created', { draft_count: drafts.length });
             }
           } catch {
             // silently fail - user can still use the popup manually
@@ -595,6 +608,7 @@ export default defineBackground(() => {
             // internally caught, so a compensation miss can never sink the fill data.
             const compensationPromise = fetchAshbyPostingCompensation(url);
             const result = await generateResumeAndProfile(company, role, jd_text, token, notifyRetry);
+            void trackExtensionEvent('application_generation_completed');
             sendResponse({ ...result, posting_compensation: await compensationPromise });
           } catch (err) {
             sendResponse({ error: err instanceof Error ? err.message : 'resume generation failed' });
@@ -655,6 +669,7 @@ export default defineBackground(() => {
       }
 
       case 'AUTOFILL_EVENT': {
+        void trackExtensionEvent('application_fill_completed', message.payload);
         getStoredToken().then((token) => {
           if (!token) return;
           timeoutBackendFetch('/autofill/event', {

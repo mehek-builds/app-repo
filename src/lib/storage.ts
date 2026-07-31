@@ -1,4 +1,5 @@
 import type { Profile } from './types';
+import { ANALYTICS_ID_KEY } from './storage-keys';
 
 // Litos is the current product name. RoleQuick and Volley keys remain read-only migration
 // aliases so an extension update never signs out an existing user or loses their settings.
@@ -109,8 +110,9 @@ export async function setProfile(profile: Profile): Promise<void> {
 
 export async function clearAll(): Promise<void> {
   // Logout clears the token and profile (both new and legacy names). The auto-submit
-  // preference is intentionally left in place, matching the original logout behavior.
-  await chromeStorageRemove([TOKEN_KEY, ...TOKEN_ALIASES, PROFILE_KEY, ...PROFILE_ALIASES]);
+  // preference is intentionally left in place, matching the original logout behavior. Rotate
+  // the anonymous analytics id as well so two accounts on one Chrome profile are never linked.
+  await chromeStorageRemove([TOKEN_KEY, ...TOKEN_ALIASES, PROFILE_KEY, ...PROFILE_ALIASES, ANALYTICS_ID_KEY]);
 }
 
 // Off by default: fill-and-stop (highlight Submit, student clicks) unless the student has
