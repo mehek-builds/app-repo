@@ -25,9 +25,12 @@ describe('badgeState', () => {
     expect(badgeState({ stalls: 0, drafts: 0, jobDetected: true }).text).toBe('!');
   });
 
-  it('caps a runaway count rather than rendering a number nobody can read', () => {
-    expect(badgeState({ stalls: 250, drafts: 0, jobDetected: false }).text).toBe('99+');
-    expect(badgeState({ stalls: 99, drafts: 0, jobDetected: false }).text).toBe('99');
+  /* Reachable through DRAFTS, not stalls: mergeStall caps the stall list at 50, so a three-digit
+   * stall count cannot occur. Written against drafts so the test exercises an input the system can
+   * actually produce. */
+  it('caps a runaway draft count rather than rendering a number nobody can read', () => {
+    expect(badgeState({ stalls: 0, drafts: 250, jobDetected: false }).text).toBe('99+');
+    expect(badgeState({ stalls: 0, drafts: 99, jobDetected: false }).text).toBe('99');
   });
 
   it('omits the colour when there is nothing to show, so callers can skip the call', () => {

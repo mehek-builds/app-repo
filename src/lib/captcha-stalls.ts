@@ -19,6 +19,15 @@ export type CaptchaProviderName =
   | 'unknown';
 
 export type CaptchaStall = {
+  /**
+   * The tab the application is open in, when it is known.
+   *
+   * The DURABLE identity, and the url is only a fallback. A submission redirects to a confirmation
+   * page on a different path (Greenhouse `/confirmation`, Lever `/thanks`), and the resolution is
+   * reported from that page - so matching on url alone never clears the entry and the count grows
+   * forever, which is precisely how a badge becomes a number people learn to ignore.
+   */
+  tabId?: number;
   url: string;
   company: string;
   role: string;
@@ -67,9 +76,31 @@ export function mergeStall(existing: CaptchaStall[], incoming: CaptchaStall): Ca
     .slice(0, MAX_STALLS);
 }
 
-export function removeStall(existing: CaptchaStall[], url: string): CaptchaStall[] {
-  const key = dedupeKey({ url });
-  return existing.filter((stall) => dedupeKey(stall) !== key);
+export function removeStall(existing: CaptchaStall[], target: { tabId?: number; url?: string }): CaptchaStall[] {
+  const key = target.url ? dedupeKey({ url: target.url }) : null;
+  return existing.filter((stall) => {
+    if (target.tabId !== undefined && stall.tabId === target.tabId) return false;
+    return key === null || dedupeKey(stall) !== key;
+  });
+}
+
+/**
+ * Applications nobody ever came back to.
+ *
+ * Without this the list only grows: the clear path fires on a confirmed submission, and the common
+ * endings are not that - the applicant solves the check and submits without Litos seeing the click,
+ * the outcome reads as unknown, or they simply close the tab. A stall a week old is not information,
+ * it is a number that never goes down.
+ */
+export const STALL_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+export function dropExpired(existing: CaptchaStall[], now: number): CaptchaStall[] {
+  return existing.filter((stall) => {
+    const started = Date.parse(stall.stalledAt);
+    // An unparseable timestamp is kept rather than silently discarded: dropping an entry because a
+    // date failed to parse would hide the application instead of surfacing it.
+    return Number.isNaN(started) || now - started < STALL_TTL_MS;
+  });
 }
 
 // The pure functions above are the interesting half and are unit-tested. These three are the thin
@@ -78,7 +109,9 @@ export async function readStalls(): Promise<CaptchaStall[]> {
   return new Promise((resolve) => {
     chrome.storage.local.get([KEY], (result) => {
       const stored = result?.[KEY];
-      resolve(Array.isArray(stored) ? stored as CaptchaStall[] : []);
+      // Expiry is applied at READ time rather than on a background alarm: it needs no scheduling,
+      // no new permission, and cannot drift out of sync with what the badge shows.
+      resolve(dropExpired(Array.isArray(stored) ? stored as CaptchaStall[] : [], Date.now()));
     });
   });
 }
@@ -93,6 +126,6 @@ export async function recordStall(stall: CaptchaStall): Promise<CaptchaStall[]> 
   return writeStalls(mergeStall(await readStalls(), stall));
 }
 
-export async function clearStall(url: string): Promise<CaptchaStall[]> {
-  return writeStalls(removeStall(await readStalls(), url));
+export async function clearStall(target: { tabId?: number; url?: string }): Promise<CaptchaStall[]> {
+  return writeStalls(removeStall(await readStalls(), target));
 }

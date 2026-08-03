@@ -414,13 +414,14 @@ export default defineBackground(() => {
   // Seeding on onInstalled (not on every service-worker wake) means sign-out tests and the
   // auto-submit toggle hold their state for the rest of the QA run. Keeping it out of store
   // builds is enforced by scripts/ensure-no-qa-token.mjs, which the zip scripts run first.
-  if (import.meta.env.VITE_QA_TOKEN) {
-    // A stall outlives the service worker, so the badge has to be restored when it wakes. Without
-    // this the count silently disappears the first time Chrome tears the worker down, which is
-    // exactly the long-waiting application the list exists to keep visible.
-    void renderBadge();
-    chrome.runtime.onStartup?.addListener(() => { void renderBadge(); });
+  // OUTSIDE the QA gate below, deliberately. A stall outlives the service worker, so the badge has
+  // to be restored when it wakes, and that matters most in exactly the builds real users run. An
+  // earlier version of this sat inside the VITE_QA_TOKEN block, which ensure-no-qa-token.mjs
+  // guarantees is false in every shippable build - so the fix was live only where it was not needed.
+  void renderBadge();
+  chrome.runtime.onStartup?.addListener(() => { void renderBadge(); });
 
+  if (import.meta.env.VITE_QA_TOKEN) {
     chrome.runtime.onInstalled.addListener(() => {
       setToken(import.meta.env.VITE_QA_TOKEN)
         .then(() => setAutoSubmitEnabled(import.meta.env.VITE_QA_AUTOSUBMIT === '1'))
@@ -453,8 +454,7 @@ export default defineBackground(() => {
           lastDetectedJob.url === p.url;
         if (unchanged) return false;
         lastDetectedJob = p;
-        chrome.storage.session.set({ lastDetectedJob }).catch(() => {});
-        void renderBadge();
+        chrome.storage.session.set({ lastDetectedJob }).then(() => renderBadge()).catch(() => {});
         chrome.runtime.sendMessage(message).catch(() => {});
         void trackExtensionEvent('job_detected');
         return false;
@@ -695,6 +695,10 @@ export default defineBackground(() => {
         // in THIS session is human, so it can only be answered here, by them - there is nothing to
         // forward and nobody to forward it to.
         void recordStall({
+          // The tab is the durable identity. A submission redirects to a confirmation page on a
+          // different path, and the stall is cleared from THAT document, so a URL-keyed clear never
+          // matches and the count only ever grows.
+          tabId: sender.tab?.id,
           url: message.payload?.url ?? '',
           company: message.payload?.job_context?.company ?? '',
           role: message.payload?.job_context?.role ?? '',
@@ -708,7 +712,9 @@ export default defineBackground(() => {
       case 'CAPTCHA_STALL_RESOLVED': {
         // The application went through, so it is no longer waiting on anyone. Without this the
         // count only ever grows and the badge becomes a number people learn to ignore.
-        clearStall(message.payload?.url ?? '').then(() => renderBadge()).catch(() => {});
+        clearStall({ tabId: sender.tab?.id, url: message.payload?.url ?? '' })
+          .then(() => renderBadge())
+          .catch(() => {});
         return false;
       }
 
