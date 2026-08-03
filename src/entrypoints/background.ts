@@ -473,22 +473,30 @@ export default defineBackground(() => {
       case 'GET_AUTOMATION_SETTINGS': {
         getStoredToken().then(async (token) => {
           if (!token) {
-            sendResponse({ automatic_submission_enabled: false, automatic_verification_enabled: false });
+            sendResponse({ automatic_submission_enabled: false, automatic_verification_enabled: false, automatic_captcha_enabled: false });
             return;
           }
           try {
             const res = await timeoutBackendFetch('/onboarding/state', {}, token);
             if (!res.ok) throw new Error(`settings failed (${res.status})`);
-            const data: { automatic_submission_enabled?: boolean; automatic_verification_enabled?: boolean } = await res.json();
+            const data: {
+              automatic_submission_enabled?: boolean;
+              automatic_verification_enabled?: boolean;
+              automatic_captcha_enabled?: boolean;
+            } = await res.json();
             const automaticSubmission = automaticSubmissionEnabled(data);
             await setAutoSubmitEnabled(automaticSubmission);
             sendResponse({
               automatic_submission_enabled: automaticSubmission,
               automatic_verification_enabled: data.automatic_verification_enabled === true,
+              // Already version-checked by the backend. The extension deliberately does not
+              // re-derive that rule; a second implementation of a consent check is a second thing
+              // that can be wrong about consent.
+              automatic_captcha_enabled: data.automatic_captcha_enabled === true,
             });
           } catch {
             // A failed revocation check is a hold, never permission to submit from stale storage.
-            sendResponse({ automatic_submission_enabled: false, automatic_verification_enabled: false });
+            sendResponse({ automatic_submission_enabled: false, automatic_verification_enabled: false, automatic_captcha_enabled: false });
           }
         });
         return true;

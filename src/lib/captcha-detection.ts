@@ -185,3 +185,62 @@ export function watchForChallenge(
   const timer = options.timeoutMs === undefined ? undefined : setTimeout(stop, options.timeoutMs);
   return stop;
 }
+
+/**
+ * Wait for the applicant to clear the challenge, in their own browser, in their own session.
+ *
+ * This is the only place "resume after solve" can live, and it is worth being precise about why.
+ * Litos does not solve anything and never sees the token: it polls its own detection, which reads
+ * whether a response field is still empty. What it is really waiting for is a person to finish
+ * something only a person can do.
+ *
+ * Bounded, and the bound is generous rather than tight - a challenge that asks someone to pick out
+ * traffic lights can genuinely take a minute or two, and giving up early would leave a form filled,
+ * a check passed, and nothing to show for it. It resolves false rather than throwing, so a caller
+ * that times out simply leaves the application where the applicant can finish it by hand.
+ */
+export function waitForChallengeCleared(
+  options: { root?: ParentNode; timeoutMs?: number; pollMs?: number } = {},
+): { promise: Promise<boolean>; cancel: () => void } {
+  const root = options.root ?? document;
+  const timeoutMs = options.timeoutMs ?? 5 * 60_000;
+  const pollMs = options.pollMs ?? 1_000;
+  let timer: ReturnType<typeof setInterval> | undefined;
+  let settle: ((cleared: boolean) => void) | undefined;
+
+  /* "Cleared" requires a TOKEN, not merely the absence of a widget.
+   *
+   * Detection legitimately flaps: this module documents a window where reCAPTCHA has rendered its
+   * container but not yet its iframe, and providers tear widgets down and remount them. Treating
+   * any not-waiting reading as success would tell the applicant "that check cleared" when nobody
+   * cleared anything - the one claim this feature is not allowed to make - and would permanently
+   * drop the stall flag with the observer already disconnected, so it could never re-arm.
+   *
+   * A challenge the page simply removes therefore times out rather than reporting success. That is
+   * the right direction to fail: the application waits for a human instead of lying to one. */
+  const cleared = (): boolean => {
+    if (detectChallenge(root).waiting) return false;
+    return [...root.querySelectorAll(RESPONSE_SELECTOR)]
+      .some((field) => ((field as HTMLInputElement | HTMLTextAreaElement).value ?? '').trim().length > 0);
+  };
+
+  const promise = new Promise<boolean>((resolve) => {
+    const onLeave = () => settle?.(false);
+    settle = (result: boolean) => {
+      if (timer !== undefined) clearInterval(timer);
+      timer = undefined;
+      window.removeEventListener('pagehide', onLeave);
+      resolve(result);
+    };
+    // A single-page job board never fires an unload, so without this the poll outlives the form it
+    // belonged to and can fire against a page the applicant has already navigated away from.
+    window.addEventListener('pagehide', onLeave);
+    const deadline = Date.now() + timeoutMs;
+    timer = setInterval(() => {
+      if (cleared()) settle?.(true);
+      else if (Date.now() >= deadline) settle?.(false);
+    }, pollMs);
+  });
+
+  return { promise, cancel: () => settle?.(false) };
+}
