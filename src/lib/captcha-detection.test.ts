@@ -4,6 +4,7 @@ import {
   detectChallenge,
   identifyProvider,
   snapshotRequiresAttention,
+  waitForChallengeCleared,
   watchForChallenge,
 } from './captcha-detection';
 
@@ -315,5 +316,56 @@ describe('the container-before-iframe window', () => {
       <textarea name="g-recaptcha-response"></textarea>
     `);
     expect(identifyProvider()).toBe('recaptcha_v3');
+  });
+});
+
+describe('waitForChallengeCleared', () => {
+  /* The resume gate. Litos never solves the challenge and never reads the token: it watches its own
+   * detection until a human has cleared it. */
+  it('resolves immediately when nothing is waiting', async () => {
+    mount('<form><input name="email"></form>');
+    await expect(waitForChallengeCleared({ pollMs: 1 }).promise).resolves.toBe(true);
+  });
+
+  it('resolves once the applicant clears the challenge', async () => {
+    mount(`
+      <form>
+        <div class="g-recaptcha" data-sitekey="abc"></div>
+        <textarea name="g-recaptcha-response"></textarea>
+      </form>
+    `);
+    withBox('.g-recaptcha', { width: 304, height: 78 });
+    const waiter = waitForChallengeCleared({ pollMs: 1, timeoutMs: 5_000 });
+    // What solving actually looks like in the DOM: the provider writes a token into the field.
+    setTimeout(() => {
+      document.querySelector<HTMLTextAreaElement>('textarea[name="g-recaptcha-response"]')!.value = '03AGdBq26...';
+    }, 5);
+    await expect(waiter.promise).resolves.toBe(true);
+  });
+
+  /* Gives up with a plain false rather than throwing, so a caller that times out simply leaves the
+   * application where the applicant can finish it by hand. */
+  it('gives up after its deadline instead of waiting forever', async () => {
+    mount(`
+      <form>
+        <div class="g-recaptcha" data-sitekey="abc"></div>
+        <textarea name="g-recaptcha-response"></textarea>
+      </form>
+    `);
+    withBox('.g-recaptcha', { width: 304, height: 78 });
+    await expect(waitForChallengeCleared({ pollMs: 1, timeoutMs: 10 }).promise).resolves.toBe(false);
+  });
+
+  it('can be cancelled, and reports that it did not clear', async () => {
+    mount(`
+      <form>
+        <div class="g-recaptcha" data-sitekey="abc"></div>
+        <textarea name="g-recaptcha-response"></textarea>
+      </form>
+    `);
+    withBox('.g-recaptcha', { width: 304, height: 78 });
+    const waiter = waitForChallengeCleared({ pollMs: 1, timeoutMs: 60_000 });
+    waiter.cancel();
+    await expect(waiter.promise).resolves.toBe(false);
   });
 });

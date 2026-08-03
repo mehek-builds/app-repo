@@ -38,7 +38,7 @@ import { fetchResumeBlob, resumeFetchSkipReason } from '../lib/resume-fetch';
 import { startHarvest } from '../lib/harvest';
 import { withInactivityTimeout } from '../lib/inactivity-timeout';
 import type { Profile, ApplicationProfile, AutofillResult, GeneratedResume } from '../lib/types';
-import { detectChallenge, watchForChallenge } from '../lib/captcha-detection';
+import { detectChallenge, waitForChallengeCleared, watchForChallenge } from '../lib/captcha-detection';
 import type { PostingCompensation } from '../lib/adapters/salary';
 import { buildResumeReviewSummary } from '../lib/resume-review';
 import {
@@ -101,6 +101,26 @@ export default defineContentScript({
   allFrames: true,
   runAt: 'document_idle',
   main() {
+    async function serverCaptchaResumeEnabled(): Promise<boolean> {
+      return new Promise((resolve) => {
+        let settled = false;
+        const finish = (enabled: boolean) => {
+          if (settled) return;
+          settled = true;
+          window.clearTimeout(timer);
+          resolve(enabled);
+        };
+        // A failed read is a NO. Resuming on stale or missing permission would be Litos deciding it
+        // had consent because it could not check.
+        const timer = window.setTimeout(() => finish(false), 10_000);
+        chrome.runtime.sendMessage(
+          { type: 'GET_AUTOMATION_SETTINGS' },
+          (settings: { automatic_captcha_enabled?: boolean } | undefined) =>
+            finish(!chrome.runtime.lastError && settings?.automatic_captcha_enabled === true),
+        );
+      });
+    }
+
     async function serverAutoSubmitEnabled(): Promise<boolean> {
       return new Promise((resolve) => {
         let settled = false;
@@ -546,6 +566,7 @@ export default defineContentScript({
      * records the applicant as bot traffic and can discard the application with no error shown to
      * anyone. Same failure the honeypot guard exists to prevent. */
     let captchaWaiting = false;
+    let captchaResumeCancel: (() => void) | null = null;
 
     function armCaptchaStall(
       card: HTMLElement,
@@ -554,6 +575,8 @@ export default defineContentScript({
       onChallenge?: () => void,
     ): void {
       captchaStallStop?.();
+      captchaResumeCancel?.();
+      captchaResumeCancel = null;
       captchaWaiting = false;
       captchaStallStop = watchForChallenge(
         // The WHOLE document, and the same node the detection reads. Scoping this to the first
@@ -575,6 +598,28 @@ export default defineContentScript({
           line.textContent = 'This company asks you to prove you are human. Everything else is filled in, so all that is left is that check and the send button.';
           (statusEl?.parentElement ?? card).insertBefore(line, statusEl?.nextSibling ?? null);
           onChallenge?.();
+          /* Resume after solve, gated on its own permission.
+           *
+           * Litos does not solve the challenge and does not read the token: it watches its own
+           * detection until a human has cleared it. Even then it does not send anything - it
+           * re-checks the form and says what is left, because a challenge re-render routinely
+           * resets fields, and telling someone their application is ready when the form quietly
+           * emptied is the failure this whole feature exists to avoid. */
+          void serverCaptchaResumeEnabled().then((permitted) => {
+            if (!permitted || !statusEl) return;
+            const waiter = waitForChallengeCleared();
+            captchaResumeCancel = waiter.cancel;
+            return waiter.promise.then((cleared) => {
+              if (!cleared) return;
+              captchaWaiting = false;
+              card.querySelector('#litos-captcha-stall')?.remove();
+              const stillEmpty = hasEmptyRequiredFields();
+              line.textContent = stillEmpty
+                ? 'Thanks. That check cleared, but the page reset some required boxes when it did, so fill those in before you send.'
+                : 'Thanks. That check cleared and everything is still filled in. Send it whenever you are ready.';
+              (statusEl.parentElement ?? card).insertBefore(line, statusEl.nextSibling);
+            });
+          });
           // Fire-and-forget. The badge and the queue read this; a delivery failure must never take
           // down a fill that already succeeded, and there is nothing to retry for.
           try {

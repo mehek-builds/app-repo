@@ -185,3 +185,45 @@ export function watchForChallenge(
   const timer = options.timeoutMs === undefined ? undefined : setTimeout(stop, options.timeoutMs);
   return stop;
 }
+
+/**
+ * Wait for the applicant to clear the challenge, in their own browser, in their own session.
+ *
+ * This is the only place "resume after solve" can live, and it is worth being precise about why.
+ * Litos does not solve anything and never sees the token: it polls its own detection, which reads
+ * whether a response field is still empty. What it is really waiting for is a person to finish
+ * something only a person can do.
+ *
+ * Bounded, and the bound is generous rather than tight - a challenge that asks someone to pick out
+ * traffic lights can genuinely take a minute or two, and giving up early would leave a form filled,
+ * a check passed, and nothing to show for it. It resolves false rather than throwing, so a caller
+ * that times out simply leaves the application where the applicant can finish it by hand.
+ */
+export function waitForChallengeCleared(
+  options: { root?: ParentNode; timeoutMs?: number; pollMs?: number } = {},
+): { promise: Promise<boolean>; cancel: () => void } {
+  const root = options.root ?? document;
+  const timeoutMs = options.timeoutMs ?? 5 * 60_000;
+  const pollMs = options.pollMs ?? 1_000;
+  let timer: ReturnType<typeof setInterval> | undefined;
+  let settle: ((cleared: boolean) => void) | undefined;
+
+  const promise = new Promise<boolean>((resolve) => {
+    settle = (cleared: boolean) => {
+      if (timer !== undefined) clearInterval(timer);
+      timer = undefined;
+      resolve(cleared);
+    };
+    if (!detectChallenge(root).waiting) {
+      settle(true);
+      return;
+    }
+    const deadline = Date.now() + timeoutMs;
+    timer = setInterval(() => {
+      if (!detectChallenge(root).waiting) settle?.(true);
+      else if (Date.now() >= deadline) settle?.(false);
+    }, pollMs);
+  });
+
+  return { promise, cancel: () => settle?.(false) };
+}
