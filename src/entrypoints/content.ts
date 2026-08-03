@@ -139,6 +139,16 @@ export default defineContentScript({
       let observer: MutationObserver | null = null;
       let interval: ReturnType<typeof setInterval>;
       const report = (outcome: 'confirmed' | 'failed' | 'unknown', confirmationText?: string, attempt = 0) => {
+        // A confirmed submission means this application is no longer waiting on anyone, so it
+        // leaves the stall list. Without this the count only ever grows and the badge becomes a
+        // number people learn to ignore, which is worse than no badge at all.
+        if (outcome === 'confirmed') {
+          try {
+            chrome.runtime.sendMessage({ type: 'CAPTCHA_STALL_RESOLVED', payload: { url: window.location.href } });
+          } catch {
+            // Nothing here is worth failing an outcome report over.
+          }
+        }
         chrome.runtime.sendMessage({
           type: 'EXTENSION_SUBMISSION_OUTCOME',
           payload: { applicationId, outcome, finalUrl: window.location.href, confirmationText },
