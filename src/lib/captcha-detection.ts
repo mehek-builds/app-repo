@@ -1,0 +1,176 @@
+/**
+ * Human-verification (CAPTCHA) detection for the in-browser fill.
+ *
+ * Litos NEVER solves a challenge, never sends one anywhere to be solved, and never moves a response
+ * token off the page. This module only answers "is a human being asked to do something here", so the
+ * fill can stop cleanly, keep what it filled, and hand the page back to the person whose application
+ * it is. They are already sitting in front of it; that is the entire advantage this surface has over
+ * the server run, and until now the extension threw it away by stopping silently.
+ *
+ * Deliberately mirrors the backend's portalSubmission.ts semantics so the two surfaces cannot
+ * disagree about whether a page is blocked. The hard-won parts, both of which cost real debugging on
+ * the server side, are reproduced here rather than rediscovered:
+ *
+ *   1. Token state, not markup presence. reCAPTCHA v2 ALWAYS ships a `g-recaptcha-response`
+ *      textarea, solved or not, so "the element exists" marks every reCAPTCHA page blocked forever
+ *      and never clears once the applicant solves it.
+ *   2. The v3 badge is a CONTAINER, excluded with closest(). `div.grecaptcha-badge` wraps an anchor
+ *      iframe that matches `iframe[src*="captcha"]` on its own, carries no badge class, and contains
+ *      no badge - so a self-or-descendant check still counts it and a v3 page still reports blocked.
+ *      v3 asks the human for nothing, so stopping there would strand applications for no reason.
+ */
+
+export type CaptchaProvider =
+  | 'recaptcha_v2'
+  | 'recaptcha_v3'
+  | 'hcaptcha'
+  | 'turnstile'
+  | 'arkose'
+  | 'unknown';
+
+export type ChallengeState = {
+  /** True only when a human still has to act. A solved widget is not present. */
+  waiting: boolean;
+  provider: CaptchaProvider;
+};
+
+const RESPONSE_SELECTOR = [
+  'textarea[name*="captcha-response" i]',
+  'input[name*="captcha-response" i]',
+  'textarea[id*="captcha-response" i]',
+  'input[id*="captcha-response" i]',
+  'textarea[name="cf-turnstile-response"]',
+  'input[name="cf-turnstile-response"]',
+].join(', ');
+
+const CHALLENGE_SELECTOR = [
+  'iframe[src*="captcha" i]',
+  'iframe[src*="challenges.cloudflare.com" i]',
+  '[class*="captcha" i]',
+  '[id*="captcha" i]',
+  '[data-sitekey]',
+].join(', ');
+
+const BADGE_CLASS = 'grecaptcha-badge';
+
+const PROVIDER_MARKERS: ReadonlyArray<{ provider: CaptchaProvider; selector: string }> = [
+  { provider: 'turnstile', selector: '[name="cf-turnstile-response"], iframe[src*="challenges.cloudflare.com" i]' },
+  { provider: 'hcaptcha', selector: '[name="h-captcha-response"], iframe[src*="hcaptcha.com" i]' },
+  { provider: 'arkose', selector: 'iframe[src*="arkoselabs" i], iframe[src*="funcaptcha" i]' },
+  { provider: 'recaptcha_v2', selector: '[name="g-recaptcha-response"], iframe[src*="recaptcha" i]' },
+];
+
+/**
+ * What counts as an INTERACTIVE reCAPTCHA, i.e. one a human has to clear.
+ *
+ * The iframe alone is not enough. reCAPTCHA renders its container first and mounts the anchor
+ * iframe a moment later, so between those two points a genuinely blocking v2 widget has a container
+ * and no iframe. Matching only the iframe labelled that window 'recaptcha_v3', which specifically
+ * means "nothing is being asked of a human" - the opposite of the truth, and exactly the window a
+ * fill is most likely to observe, since it runs the instant the form is ready.
+ *
+ * Safe against false v2 on a real v3 page: v3 takes its site key as a script parameter and renders
+ * no keyed container. An invisible-v2 container does carry data-sitekey, but it is invisible, so
+ * `waiting` is already false and this function never runs.
+ */
+const INTERACTIVE_RECAPTCHA_SELECTOR = [
+  `iframe[src*="recaptcha" i]:not(.${BADGE_CLASS} *)`,
+  `.g-recaptcha:not(.${BADGE_CLASS}):not(.${BADGE_CLASS} *)`,
+  `[data-sitekey]:not(.${BADGE_CLASS}):not(.${BADGE_CLASS} *)`,
+].join(', ');
+
+/**
+ * A 0x0 box is not the only way a page hides something, which the honeypot guard learned the hard
+ * way: Workday's bot-trap is 1x1 and clipped, and Breezy/BambooHR/Oracle hide a fully-visible 250x40
+ * field inside an ancestor with `height: 0; overflow: hidden`. A challenge concealed the same way is
+ * not something a human can act on, so it must not stall the fill.
+ */
+function isReallyVisible(element: Element): boolean {
+  if (!(element instanceof HTMLElement) && !(element instanceof SVGElement)) return false;
+  const style = window.getComputedStyle(element);
+  if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+  const rect = element.getBoundingClientRect();
+  // Guard the ancestor-collapse shape too: a box with real width but no height is not on screen.
+  if (rect.width < 2 || rect.height < 2) return false;
+  return true;
+}
+
+function tokens(root: ParentNode): string[] {
+  return [...root.querySelectorAll(RESPONSE_SELECTOR)]
+    .map((field) => (field as HTMLInputElement | HTMLTextAreaElement).value ?? '');
+}
+
+function visibleChallengeCount(root: ParentNode): number {
+  return [...root.querySelectorAll(CHALLENGE_SELECTOR)].filter((node) => (
+    node.closest(`.${BADGE_CLASS}`) === null && isReallyVisible(node)
+  )).length;
+}
+
+/**
+ * Widget count is deliberately NOT compared to token count: providers render a variable number of
+ * visible nodes per widget, so "3 nodes, 1 token" is one solved widget rather than two missing ones.
+ * The honest signal is: something interactive is rendered, and at least one response field is empty.
+ */
+export function snapshotRequiresAttention(responseTokens: string[], challengeCount: number): boolean {
+  if (challengeCount === 0) return false;
+  if (responseTokens.length === 0) return true;
+  return responseTokens.some((token) => token.trim().length === 0);
+}
+
+export function identifyProvider(root: ParentNode = document): CaptchaProvider {
+  for (const marker of PROVIDER_MARKERS) {
+    if (root.querySelector(marker.selector) === null) continue;
+    if (marker.provider !== 'recaptcha_v2') return marker.provider;
+    // Same split the badge exclusion uses: an interactive widget lives outside the badge, so a page
+    // whose only reCAPTCHA markup is the badge is v3 and is asking nothing of anyone.
+    return root.querySelector(INTERACTIVE_RECAPTCHA_SELECTOR) === null ? 'recaptcha_v3' : 'recaptcha_v2';
+  }
+  return 'unknown';
+}
+
+export function detectChallenge(root: ParentNode = document): ChallengeState {
+  const waiting = snapshotRequiresAttention(tokens(root), visibleChallengeCount(root));
+  return { waiting, provider: waiting ? identifyProvider(root) : 'unknown' };
+}
+
+/**
+ * Watch for a challenge that mounts AFTER the fill, which is the shape that made this silent.
+ *
+ * The failure users actually hit is not "the page loaded with a CAPTCHA". It is: Litos fills the
+ * form, the applicant presses Submit, nothing appears to happen, and a challenge iframe quietly
+ * mounts. Polling on a MutationObserver scoped to the form catches that, and the observer is
+ * disconnected the moment it fires so a challenge cannot re-trigger the card on every DOM change a
+ * provider makes while rendering.
+ */
+export function watchForChallenge(
+  target: Node,
+  onChallenge: (state: ChallengeState) => void,
+  options: { root?: ParentNode; timeoutMs?: number } = {},
+): () => void {
+  const root = options.root ?? document;
+  const immediate = detectChallenge(root);
+  if (immediate.waiting) {
+    onChallenge(immediate);
+    return () => undefined;
+  }
+
+  let done = false;
+  const stop = () => {
+    if (done) return;
+    done = true;
+    observer.disconnect();
+    if (timer !== undefined) clearTimeout(timer);
+  };
+  const observer = new MutationObserver(() => {
+    const state = detectChallenge(root);
+    if (!state.waiting) return;
+    stop();
+    onChallenge(state);
+  });
+  observer.observe(target, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'class', 'style'] });
+
+  // Bounded. An observer left attached to a job board's form outlives the fill it belonged to and
+  // keeps running on every DOM change the page makes for as long as the tab is open.
+  const timer = options.timeoutMs === undefined ? undefined : setTimeout(stop, options.timeoutMs);
+  return stop;
+}

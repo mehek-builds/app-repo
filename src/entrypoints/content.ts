@@ -38,6 +38,7 @@ import { fetchResumeBlob, resumeFetchSkipReason } from '../lib/resume-fetch';
 import { startHarvest } from '../lib/harvest';
 import { withInactivityTimeout } from '../lib/inactivity-timeout';
 import type { Profile, ApplicationProfile, AutofillResult, GeneratedResume } from '../lib/types';
+import { watchForChallenge } from '../lib/captcha-detection';
 import type { PostingCompensation } from '../lib/adapters/salary';
 import { buildResumeReviewSummary } from '../lib/resume-review';
 import {
@@ -513,6 +514,63 @@ export default defineContentScript({
             needsYou.map((r) => `<div style="line-height:1.4;">• ${escapeHtml(r)}</div>`).join('')
           : '') +
         `<div style="margin-top:4px;line-height:1.4;">Check it over, then send it yourself.</div>`;
+    }
+
+    /* The stall.
+     *
+     * Until now a challenge on an ATS form ended the in-browser fill SILENTLY: Litos filled the
+     * form, the applicant pressed Submit, nothing appeared to happen, and the application quietly
+     * never went anywhere. The fill itself was already correct - it stops at the submit button by
+     * design - but nobody was told why it stopped, and "why" is the whole difference between a
+     * ten-second interruption and an application that dies unnoticed.
+     *
+     * Litos does not solve the challenge. It cannot and must not: the applicant is sitting right
+     * there, it is their application, and passing that check is exactly the thing the check exists
+     * to establish. All this does is say so, in the place they are already looking.
+     *
+     * Armed AFTER the fill and watched for a while afterwards, because the common shape is a
+     * challenge that mounts on the first submit attempt rather than one present at page load. */
+    let captchaStallStop: (() => void) | null = null;
+
+    function armCaptchaStall(statusEl: HTMLElement | null, context: { company: string; role: string; atsName?: string }): void {
+      captchaStallStop?.();
+      const form = document.querySelector('form') ?? document.body;
+      captchaStallStop = watchForChallenge(
+        form,
+        (state) => {
+          if (statusEl) {
+            const line = document.createElement('div');
+            line.id = 'litos-captcha-stall';
+            line.style.cssText = 'margin-top:6px;line-height:1.4;font-weight:500;';
+            // Deliberately plain, and deliberately does not promise to come back and finish. The
+            // applicant solves the check and sends the form; anything else would be a promise this
+            // build cannot keep.
+            line.textContent = 'This company asks you to prove you are human. Everything else is filled in, so all that is left is that check and the send button.';
+            statusEl.style.display = 'block';
+            statusEl.querySelector('#litos-captcha-stall')?.remove();
+            statusEl.prepend(line);
+          }
+          // Fire-and-forget. The badge and the dashboard queue read this; a delivery failure must
+          // never take down a fill that already succeeded, and there is nothing to retry for.
+          try {
+            chrome.runtime.sendMessage({
+              type: 'CAPTCHA_STALL',
+              payload: {
+                provider: state.provider,
+                url: location.href,
+                job_context: { company: context.company, role: context.role },
+                ats_name: context.atsName,
+                stalled_at: new Date().toISOString(),
+              },
+            });
+          } catch {
+            // Service worker asleep or torn down. Nothing here is worth failing the fill over.
+          }
+        },
+        // Bounded: past a couple of minutes the applicant has moved on, and an observer left
+        // attached runs on every DOM change the board makes for as long as the tab is open.
+        { timeoutMs: 120_000 },
+      );
     }
 
     // E-015 watcher. A MutationObserver, deliberately NOT an event listener: a capture-phase
@@ -1259,6 +1317,11 @@ export default defineContentScript({
         // location-commitment veto suppressed a fill, "r039-third-party:..." where a bare
         // name/email/city matcher fired on a third-party label) - same field, same contract.
         const r030Labels = drainR030CandidateLabels();
+
+        // Armed here, right after the fill and BEFORE any auto-submit countdown, so a challenge is
+        // named the moment it appears rather than after the applicant has watched a countdown run
+        // out on a form that was never going to send.
+        armCaptchaStall(statusEl, { company, role: title, atsName: fillResult.ats_name });
 
         const reportEvent = (autoSubmitted: boolean) => {
           chrome.runtime.sendMessage({
