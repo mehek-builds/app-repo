@@ -20,7 +20,7 @@
  *      v3 asks the human for nothing, so stopping there would strand applications for no reason.
  */
 
-import { isConcealedByCollapsedAncestor } from './adapters/shared/dom';
+import { isInsideCollapsedRegion } from './adapters/shared/dom';
 
 export type CaptchaProvider =
   | 'recaptcha_v2'
@@ -91,6 +91,11 @@ const INTERACTIVE_RECAPTCHA_SELECTOR = [
  * An earlier version of this function claimed to handle it with a size check, which cannot work:
  * getBoundingClientRect on a child of a zero-height overflow:hidden ancestor still returns the
  * child's own full box, so the check passed and the comment was simply wrong.
+ *
+ * Imports the tabIndex-FREE variant. isConcealedByCollapsedAncestor early-returns for anything with
+ * tabIndex >= 0, and an <iframe> is focusable by default and reports 0 with no attribute set - so
+ * calling that one here would be a silent no-op for every interactive challenge, all of which are
+ * iframes.
  */
 function isReallyVisible(element: Element): boolean {
   if (!(element instanceof HTMLElement)) return false;
@@ -98,7 +103,7 @@ function isReallyVisible(element: Element): boolean {
   if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
   const rect = element.getBoundingClientRect();
   if (rect.width < 2 || rect.height < 2) return false;
-  return !isConcealedByCollapsedAncestor(element);
+  return !isInsideCollapsedRegion(element);
 }
 
 function tokens(root: ParentNode): string[] {

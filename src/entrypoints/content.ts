@@ -1417,6 +1417,13 @@ export default defineContentScript({
             target.dispatchEvent(new Event('change', { bubbles: true }));
           }
           if (hasEmptyRequiredFields()) return { ok: false, error: 'Some required boxes are still empty. Fill them in, then send it.' };
+          // The dashboard path clicks Submit directly and never enters runAutoSubmitCountdown, so
+          // none of that function's guards apply here. Adding captchaWaiting to the auto-submit hold
+          // made this URGENT rather than theoretical: a challenge now deterministically routes the
+          // application AWAY from the guarded countdown and into this click.
+          if (captchaWaiting || detectChallenge().waiting) {
+            return { ok: false, error: 'This company asks you to prove you are human. Solve that check on the page, then send it yourself.' };
+          }
           finalSubmitBtn.click();
           const started = Date.now();
           while (Date.now() - started < 45_000) {

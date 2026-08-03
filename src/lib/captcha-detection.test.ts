@@ -164,6 +164,23 @@ describe('detectChallenge', () => {
     expect(detectChallenge().waiting).toBe(false);
   });
 
+  /* The dominant real shape, and the one the first attempt at this silently missed: every
+   * interactive challenge is an <iframe>, an iframe is focusable by default and reports tabIndex 0
+   * with no attribute set, and the honeypot helper early-returns for anything with tabIndex >= 0. */
+  it('ignores a challenge IFRAME hidden by a collapsed ancestor, with no tabindex attribute', () => {
+    mount(`
+      <form>
+        <div id="wrap" style="height:0;overflow:hidden;">
+          <iframe src="https://www.google.com/recaptcha/api2/anchor"></iframe>
+        </div>
+        <textarea name="g-recaptcha-response"></textarea>
+      </form>
+    `);
+    withBox('iframe', { width: 304, height: 78 });
+    withBox('#wrap', { width: 304, height: 0 });
+    expect(detectChallenge().waiting).toBe(false);
+  });
+
   it('reports nothing on an ordinary application form', () => {
     mount('<form><input name="first_name"><input name="email"><button>Submit</button></form>');
     expect(detectChallenge()).toEqual({ waiting: false, provider: 'unknown' });
