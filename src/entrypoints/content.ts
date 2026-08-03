@@ -112,7 +112,9 @@ export default defineContentScript({
         };
         // A failed read is a NO. Resuming on stale or missing permission would be Litos deciding it
         // had consent because it could not check.
-        const timer = window.setTimeout(() => finish(false), 10_000);
+        // 25s, not 10s: the background's own fetch budget is 20s, so a shorter wait here denied a
+        // permission the applicant had actually granted, silently, whenever the backend was slow.
+        const timer = window.setTimeout(() => finish(false), 25_000);
         chrome.runtime.sendMessage(
           { type: 'GET_AUTOMATION_SETTINGS' },
           (settings: { automatic_captcha_enabled?: boolean } | undefined) =>
@@ -567,6 +569,12 @@ export default defineContentScript({
      * anyone. Same failure the honeypot guard exists to prevent. */
     let captchaWaiting = false;
     let captchaResumeCancel: (() => void) | null = null;
+    /* Every arm gets a number, and everything async closes over the one it started with.
+     * The permission read is a round trip, so a re-arm (a refill, a second "Yes", an SPA route
+     * change) can land while it is in flight - and a superseded arm that still runs would clobber
+     * the live arm's cancel handle, clear the shared challenge flag, and write its message into the
+     * previous card. */
+    let captchaArmId = 0;
 
     function armCaptchaStall(
       card: HTMLElement,
@@ -578,6 +586,7 @@ export default defineContentScript({
       captchaResumeCancel?.();
       captchaResumeCancel = null;
       captchaWaiting = false;
+      const armId = (captchaArmId += 1);
       captchaStallStop = watchForChallenge(
         // The WHOLE document, and the same node the detection reads. Scoping this to the first
         // <form> was wrong twice over: providers append challenge overlays to document.body, so the
@@ -606,18 +615,37 @@ export default defineContentScript({
            * resets fields, and telling someone their application is ready when the form quietly
            * emptied is the failure this whole feature exists to avoid. */
           void serverCaptchaResumeEnabled().then((permitted) => {
-            if (!permitted || !statusEl) return;
+            if (!permitted || armId !== captchaArmId) return;
             const waiter = waitForChallengeCleared();
             captchaResumeCancel = waiter.cancel;
-            return waiter.promise.then((cleared) => {
-              if (!cleared) return;
+            return waiter.promise.then((solved) => {
+              if (!solved || armId !== captchaArmId) return;
               captchaWaiting = false;
-              card.querySelector('#litos-captcha-stall')?.remove();
               const stillEmpty = hasEmptyRequiredFields();
-              line.textContent = stillEmpty
+              const message = stillEmpty
                 ? 'Thanks. That check cleared, but the page reset some required boxes when it did, so fill those in before you send.'
                 : 'Thanks. That check cleared and everything is still filled in. Send it whenever you are ready.';
-              (statusEl.parentElement ?? card).insertBefore(line, statusEl.nextSibling);
+              /* The card may be GONE by now, and in the case this feature is most for. A challenge
+               * that mounts during the countdown cancels it, and that cancel path removes the card
+               * four seconds later - while a human clearing a CAPTCHA takes ten seconds to two
+               * minutes. Writing into the old card would mutate a detached tree nobody can see, so
+               * a fresh host is injected instead. */
+              if (card.isConnected) {
+                card.querySelector('#litos-captcha-stall')?.remove();
+                line.textContent = message;
+                (statusEl?.parentElement ?? card).insertBefore(line, statusEl?.nextSibling ?? null);
+                return;
+              }
+              document.getElementById('litos-captcha-resumed')?.remove();
+              const revived = document.createElement('div');
+              revived.id = 'litos-captcha-resumed';
+              revived.style.cssText = 'position:fixed;bottom:20px;right:76px;z-index:2147483645;max-width:320px;'
+                + 'background:#fff;border:1px solid #e8e6e1;border-radius:10px;padding:12px 14px;'
+                + 'box-shadow:0 3px 14px rgba(21,20,18,0.16);font-family:"Hanken Grotesk Variable","Hanken Grotesk",sans-serif;'
+                + 'font-size:13px;line-height:1.4;color:#12120f;';
+              revived.textContent = message;
+              document.body.appendChild(revived);
+              setTimeout(() => revived.remove(), 15_000);
             });
           });
           // Fire-and-forget. The badge and the queue read this; a delivery failure must never take

@@ -208,19 +208,36 @@ export function waitForChallengeCleared(
   let timer: ReturnType<typeof setInterval> | undefined;
   let settle: ((cleared: boolean) => void) | undefined;
 
+  /* "Cleared" requires a TOKEN, not merely the absence of a widget.
+   *
+   * Detection legitimately flaps: this module documents a window where reCAPTCHA has rendered its
+   * container but not yet its iframe, and providers tear widgets down and remount them. Treating
+   * any not-waiting reading as success would tell the applicant "that check cleared" when nobody
+   * cleared anything - the one claim this feature is not allowed to make - and would permanently
+   * drop the stall flag with the observer already disconnected, so it could never re-arm.
+   *
+   * A challenge the page simply removes therefore times out rather than reporting success. That is
+   * the right direction to fail: the application waits for a human instead of lying to one. */
+  const cleared = (): boolean => {
+    if (detectChallenge(root).waiting) return false;
+    return [...root.querySelectorAll(RESPONSE_SELECTOR)]
+      .some((field) => ((field as HTMLInputElement | HTMLTextAreaElement).value ?? '').trim().length > 0);
+  };
+
   const promise = new Promise<boolean>((resolve) => {
-    settle = (cleared: boolean) => {
+    const onLeave = () => settle?.(false);
+    settle = (result: boolean) => {
       if (timer !== undefined) clearInterval(timer);
       timer = undefined;
-      resolve(cleared);
+      window.removeEventListener('pagehide', onLeave);
+      resolve(result);
     };
-    if (!detectChallenge(root).waiting) {
-      settle(true);
-      return;
-    }
+    // A single-page job board never fires an unload, so without this the poll outlives the form it
+    // belonged to and can fire against a page the applicant has already navigated away from.
+    window.addEventListener('pagehide', onLeave);
     const deadline = Date.now() + timeoutMs;
     timer = setInterval(() => {
-      if (!detectChallenge(root).waiting) settle?.(true);
+      if (cleared()) settle?.(true);
       else if (Date.now() >= deadline) settle?.(false);
     }, pollMs);
   });

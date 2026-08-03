@@ -322,9 +322,25 @@ describe('the container-before-iframe window', () => {
 describe('waitForChallengeCleared', () => {
   /* The resume gate. Litos never solves the challenge and never reads the token: it watches its own
    * detection until a human has cleared it. */
-  it('resolves immediately when nothing is waiting', async () => {
+  /* "Cleared" requires a token, not merely the absence of a widget. Detection flaps - the
+   * container-before-iframe window above, providers remounting - and treating any not-waiting
+   * reading as success would tell the applicant a check cleared when nobody cleared anything. */
+  it('does not call a page with no challenge and no token "cleared"', async () => {
     mount('<form><input name="email"></form>');
-    await expect(waitForChallengeCleared({ pollMs: 1 }).promise).resolves.toBe(true);
+    await expect(waitForChallengeCleared({ pollMs: 1, timeoutMs: 15 }).promise).resolves.toBe(false);
+  });
+
+  it('does not report success when the widget merely disappears', async () => {
+    mount(`
+      <form>
+        <div class="g-recaptcha" data-sitekey="abc"></div>
+        <textarea name="g-recaptcha-response"></textarea>
+      </form>
+    `);
+    withBox('.g-recaptcha', { width: 304, height: 78 });
+    const waiter = waitForChallengeCleared({ pollMs: 1, timeoutMs: 40 });
+    setTimeout(() => document.querySelector('.g-recaptcha')!.remove(), 5);
+    await expect(waiter.promise).resolves.toBe(false);
   });
 
   it('resolves once the applicant clears the challenge', async () => {
