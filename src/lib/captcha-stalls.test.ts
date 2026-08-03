@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { dedupeKey, mergeStall, removeStall, type CaptchaStall } from './captcha-stalls';
+import { dedupeKey, dropExpired, mergeStall, removeStall, STALL_TTL_MS, type CaptchaStall } from './captcha-stalls';
 
 function stall(patch: Partial<CaptchaStall> = {}): CaptchaStall {
   return {
@@ -94,11 +94,42 @@ describe('mergeStall', () => {
 describe('removeStall', () => {
   it('removes the finished application regardless of its tracking parameters', () => {
     const list = [stall(), stall({ url: 'https://other.com/jobs/9' })];
-    const next = removeStall(list, 'https://boards.greenhouse.io/acme/jobs/1?gh_src=zzz');
+    const next = removeStall(list, { url: 'https://boards.greenhouse.io/acme/jobs/1?gh_src=zzz' });
     expect(next.map((entry) => entry.url)).toEqual(['https://other.com/jobs/9']);
   });
 
+  /* The case a url-only match cannot handle, and the reason the count would otherwise only ever
+   * grow: submitting redirects to a confirmation page on a DIFFERENT path, and the resolution is
+   * reported from that page. Greenhouse goes to /confirmation, Lever to /thanks. */
+  it('clears by tab, so a confirmation redirect still resolves the stall', () => {
+    const list = [stall({ tabId: 7 }), stall({ tabId: 9, url: 'https://other.com/jobs/9' })];
+    const next = removeStall(list, { tabId: 7, url: 'https://boards.greenhouse.io/acme/jobs/1/confirmation' });
+    expect(next.map((entry) => entry.tabId)).toEqual([9]);
+  });
+
   it('is a no-op for an application that was never in the list', () => {
-    expect(removeStall([stall()], 'https://nowhere.com/jobs/1')).toHaveLength(1);
+    expect(removeStall([stall()], { url: 'https://nowhere.com/jobs/1' })).toHaveLength(1);
+  });
+});
+
+describe('dropExpired', () => {
+  const now = Date.parse('2026-08-20T00:00:00.000Z');
+
+  /* The clear path fires on a confirmed submission, and most real endings are not that: the
+   * applicant solves the check and submits without Litos seeing the click, the outcome reads as
+   * unknown, or they close the tab. Without expiry the badge becomes a number that never goes down. */
+  it('drops an application nobody came back to', () => {
+    const old = new Date(now - STALL_TTL_MS - 1000).toISOString();
+    expect(dropExpired([stall({ stalledAt: old })], now)).toHaveLength(0);
+  });
+
+  it('keeps one that is still within the window', () => {
+    const recent = new Date(now - STALL_TTL_MS + 60_000).toISOString();
+    expect(dropExpired([stall({ stalledAt: recent })], now)).toHaveLength(1);
+  });
+
+  // Hiding an application because a date failed to parse is worse than showing it.
+  it('keeps an entry whose timestamp cannot be parsed', () => {
+    expect(dropExpired([stall({ stalledAt: 'not a date' })], now)).toHaveLength(1);
   });
 });

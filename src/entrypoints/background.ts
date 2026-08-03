@@ -10,7 +10,8 @@ import type { ApplicationProfile, GeneratedResume } from '../lib/types';
 import { automaticSubmissionEnabled, groundedDraftAnswer } from '../lib/auto-submit-consent';
 import { backendFetch } from '../lib/backend-fetch';
 import { flushAnalyticsQueue, trackExtensionEvent } from '../lib/analytics';
-import { recordStall } from '../lib/captcha-stalls';
+import { clearStall, readStalls, recordStall } from '../lib/captcha-stalls';
+import { badgeState } from '../lib/badge';
 
 // Latched off once the backend reports onboarding complete. Service-worker memory is fine for
 // this: the worst case on a restart is one wasted 403, which re-latches it immediately.
@@ -368,6 +369,22 @@ async function generateResumeAndProfile(
   return { profile, applicationProfile, resume };
 }
 
+
+/**
+ * The single badge writer. Every source of badge state is read here and the priority decision lives
+ * in the pure badgeState(); nothing else in this file may call chrome.action.setBadgeText.
+ */
+async function renderBadge(): Promise<void> {
+  const [stalls, session] = await Promise.all([
+    readStalls().catch(() => []),
+    chrome.storage.session.get(['pendingDrafts', 'lastDetectedJob']).catch(() => ({} as Record<string, unknown>)),
+  ]);
+  const drafts = Array.isArray(session?.pendingDrafts) ? session.pendingDrafts.length : 0;
+  const state = badgeState({ stalls: stalls.length, drafts, jobDetected: Boolean(session?.lastDetectedJob) });
+  chrome.action.setBadgeText({ text: state.text });
+  if (state.color) chrome.action.setBadgeBackgroundColor({ color: state.color });
+}
+
 export default defineBackground(() => {
   // Retry privacy-sanitized events that were queued through a prior offline or interrupted wake.
   void flushAnalyticsQueue();
@@ -397,6 +414,13 @@ export default defineBackground(() => {
   // Seeding on onInstalled (not on every service-worker wake) means sign-out tests and the
   // auto-submit toggle hold their state for the rest of the QA run. Keeping it out of store
   // builds is enforced by scripts/ensure-no-qa-token.mjs, which the zip scripts run first.
+  // OUTSIDE the QA gate below, deliberately. A stall outlives the service worker, so the badge has
+  // to be restored when it wakes, and that matters most in exactly the builds real users run. An
+  // earlier version of this sat inside the VITE_QA_TOKEN block, which ensure-no-qa-token.mjs
+  // guarantees is false in every shippable build - so the fix was live only where it was not needed.
+  void renderBadge();
+  chrome.runtime.onStartup?.addListener(() => { void renderBadge(); });
+
   if (import.meta.env.VITE_QA_TOKEN) {
     chrome.runtime.onInstalled.addListener(() => {
       setToken(import.meta.env.VITE_QA_TOKEN)
@@ -430,9 +454,7 @@ export default defineBackground(() => {
           lastDetectedJob.url === p.url;
         if (unchanged) return false;
         lastDetectedJob = p;
-        chrome.storage.session.set({ lastDetectedJob }).catch(() => {});
-        chrome.action.setBadgeText({ text: '!' });
-        chrome.action.setBadgeBackgroundColor({ color: '#6b84e8' });
+        chrome.storage.session.set({ lastDetectedJob }).then(() => renderBadge()).catch(() => {});
         chrome.runtime.sendMessage(message).catch(() => {});
         void trackExtensionEvent('job_detected');
         return false;
@@ -543,9 +565,10 @@ export default defineBackground(() => {
       }
 
       case 'CLEAR_JOB_BADGE': {
-        chrome.action.setBadgeText({ text: '' });
         lastDetectedJob = null;
-        chrome.storage.session.remove('lastDetectedJob').catch(() => {});
+        // Clears the JOB signal only. Clearing the badge outright here is what let an unrelated
+        // dismissal erase a stall count that nothing would have restored.
+        chrome.storage.session.remove('lastDetectedJob').then(() => renderBadge()).catch(() => {});
         return false;
       }
 
@@ -557,8 +580,7 @@ export default defineBackground(() => {
       }
 
       case 'CLEAR_PENDING_DRAFTS': {
-        chrome.storage.session.remove('pendingDrafts').catch(() => {});
-        chrome.action.setBadgeText({ text: '' });
+        chrome.storage.session.remove('pendingDrafts').then(() => renderBadge()).catch(() => {});
         return false;
       }
 
@@ -570,8 +592,7 @@ export default defineBackground(() => {
             const drafts = await resolveAndDraft(title, company, url, token);
             if (drafts.length > 0) {
               await chrome.storage.session.set({ pendingDrafts: drafts });
-              chrome.action.setBadgeText({ text: `${drafts.length}` });
-              chrome.action.setBadgeBackgroundColor({ color: '#6b84e8' });
+              await renderBadge();
               // Notify popup if open
               chrome.runtime.sendMessage({ type: 'DRAFTS_READY', payload: { count: drafts.length } }).catch(() => {});
               void trackExtensionEvent('outreach_draft_created', { draft_count: drafts.length });
@@ -674,13 +695,26 @@ export default defineBackground(() => {
         // in THIS session is human, so it can only be answered here, by them - there is nothing to
         // forward and nobody to forward it to.
         void recordStall({
+          // The tab is the durable identity. A submission redirects to a confirmation page on a
+          // different path, and the stall is cleared from THAT document, so a URL-keyed clear never
+          // matches and the count only ever grows.
+          tabId: sender.tab?.id,
           url: message.payload?.url ?? '',
           company: message.payload?.job_context?.company ?? '',
           role: message.payload?.job_context?.role ?? '',
           provider: message.payload?.provider ?? 'unknown',
           atsName: message.payload?.ats_name,
           stalledAt: message.payload?.stalled_at ?? new Date().toISOString(),
-        }).catch(() => {});
+        }).then(() => renderBadge()).catch(() => {});
+        return false;
+      }
+
+      case 'CAPTCHA_STALL_RESOLVED': {
+        // The application went through, so it is no longer waiting on anyone. Without this the
+        // count only ever grows and the badge becomes a number people learn to ignore.
+        clearStall({ tabId: sender.tab?.id, url: message.payload?.url ?? '' })
+          .then(() => renderBadge())
+          .catch(() => {});
         return false;
       }
 
