@@ -147,6 +147,23 @@ describe('detectChallenge', () => {
     expect(detectChallenge().waiting).toBe(false);
   });
 
+  /* The shape the honeypot guard was built for: a full-size node concealed only by an ancestor with
+   * height:0; overflow:hidden. getBoundingClientRect on the child still returns its own full box, so
+   * a size check alone reports it visible and the fill stalls on something nobody can act on. */
+  it('ignores a full-size challenge hidden by a collapsed ancestor', () => {
+    mount(`
+      <form>
+        <div id="wrap" style="height:0;overflow:hidden;">
+          <div class="g-recaptcha" tabindex="-1" data-sitekey="abc"></div>
+        </div>
+        <textarea name="g-recaptcha-response"></textarea>
+      </form>
+    `);
+    withBox('.g-recaptcha', { width: 304, height: 78 });
+    withBox('#wrap', { width: 304, height: 0 });
+    expect(detectChallenge().waiting).toBe(false);
+  });
+
   it('reports nothing on an ordinary application form', () => {
     mount('<form><input name="first_name"><input name="email"><button>Submit</button></form>');
     expect(detectChallenge()).toEqual({ waiting: false, provider: 'unknown' });
@@ -179,6 +196,26 @@ describe('watchForChallenge', () => {
     withBox('.g-recaptcha', { width: 304, height: 78 });
     const onChallenge = vi.fn();
     watchForChallenge(document.body, onChallenge);
+    expect(onChallenge).toHaveBeenCalledTimes(1);
+  });
+
+  /* Providers append challenge overlays to document.body, not into the form. Observing only the
+   * form meant the post-fill case - the one this whole feature exists for - never fired. */
+  it('fires for a challenge mounted outside the form, on document.body', async () => {
+    mount('<form><input name="email"></form>');
+    const onChallenge = vi.fn();
+    watchForChallenge(document.documentElement, onChallenge);
+
+    const overlay = document.createElement('div');
+    overlay.className = 'g-recaptcha';
+    overlay.setAttribute('data-sitekey', 'abc');
+    document.body.appendChild(overlay);
+    const token = document.createElement('textarea');
+    token.setAttribute('name', 'g-recaptcha-response');
+    document.body.appendChild(token);
+    withBox('.g-recaptcha', { width: 304, height: 78 });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(onChallenge).toHaveBeenCalledTimes(1);
   });
 

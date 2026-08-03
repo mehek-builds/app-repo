@@ -38,7 +38,7 @@ import { fetchResumeBlob, resumeFetchSkipReason } from '../lib/resume-fetch';
 import { startHarvest } from '../lib/harvest';
 import { withInactivityTimeout } from '../lib/inactivity-timeout';
 import type { Profile, ApplicationProfile, AutofillResult, GeneratedResume } from '../lib/types';
-import { watchForChallenge } from '../lib/captcha-detection';
+import { detectChallenge, watchForChallenge } from '../lib/captcha-detection';
 import type { PostingCompensation } from '../lib/adapters/salary';
 import { buildResumeReviewSummary } from '../lib/resume-review';
 import {
@@ -531,27 +531,42 @@ export default defineContentScript({
      * Armed AFTER the fill and watched for a while afterwards, because the common shape is a
      * challenge that mounts on the first submit attempt rather than one present at page load. */
     let captchaStallStop: (() => void) | null = null;
+    /* Read by the auto-submit gate and re-read immediately before the click. A challenge is the one
+     * blocker where submitting anyway is actively harmful rather than merely useless: the employer
+     * records the applicant as bot traffic and can discard the application with no error shown to
+     * anyone. Same failure the honeypot guard exists to prevent. */
+    let captchaWaiting = false;
 
-    function armCaptchaStall(statusEl: HTMLElement | null, context: { company: string; role: string; atsName?: string }): void {
+    function armCaptchaStall(
+      card: HTMLElement,
+      statusEl: HTMLElement | null,
+      context: { company: string; role: string; atsName?: string },
+      onChallenge?: () => void,
+    ): void {
       captchaStallStop?.();
-      const form = document.querySelector('form') ?? document.body;
+      captchaWaiting = false;
       captchaStallStop = watchForChallenge(
-        form,
+        // The WHOLE document, and the same node the detection reads. Scoping this to the first
+        // <form> was wrong twice over: providers append challenge overlays to document.body, so the
+        // observer never saw them, and on a board page document.querySelector('form') is usually a
+        // search or newsletter box rather than the application.
+        document.documentElement,
         (state) => {
-          if (statusEl) {
-            const line = document.createElement('div');
-            line.id = 'litos-captcha-stall';
-            line.style.cssText = 'margin-top:6px;line-height:1.4;font-weight:500;';
-            // Deliberately plain, and deliberately does not promise to come back and finish. The
-            // applicant solves the check and sends the form; anything else would be a promise this
-            // build cannot keep.
-            line.textContent = 'This company asks you to prove you are human. Everything else is filled in, so all that is left is that check and the send button.';
-            statusEl.style.display = 'block';
-            statusEl.querySelector('#litos-captcha-stall')?.remove();
-            statusEl.prepend(line);
-          }
-          // Fire-and-forget. The badge and the dashboard queue read this; a delivery failure must
-          // never take down a fill that already succeeded, and there is nothing to retry for.
+          captchaWaiting = true;
+          /* Rendered as its own node NEXT TO statusEl, never inside it. statusEl is repeatedly
+           * reassigned with textContent by the countdown ("... in 4 seconds") and by the review
+           * callback, and every one of those assignments wipes its children - so a line prepended
+           * into it disappears a tick later, exactly in the case where the challenge was already on
+           * the page when the fill finished. */
+          card.querySelector('#litos-captcha-stall')?.remove();
+          const line = document.createElement('div');
+          line.id = 'litos-captcha-stall';
+          line.style.cssText = 'margin-top:6px;line-height:1.4;font-weight:500;';
+          line.textContent = 'This company asks you to prove you are human. Everything else is filled in, so all that is left is that check and the send button.';
+          (statusEl?.parentElement ?? card).insertBefore(line, statusEl?.nextSibling ?? null);
+          onChallenge?.();
+          // Fire-and-forget. The badge and the queue read this; a delivery failure must never take
+          // down a fill that already succeeded, and there is nothing to retry for.
           try {
             chrome.runtime.sendMessage({
               type: 'CAPTCHA_STALL',
@@ -1321,7 +1336,11 @@ export default defineContentScript({
         // Armed here, right after the fill and BEFORE any auto-submit countdown, so a challenge is
         // named the moment it appears rather than after the applicant has watched a countdown run
         // out on a form that was never going to send.
-        armCaptchaStall(statusEl, { company, role: title, atsName: fillResult.ats_name });
+        armCaptchaStall(card, statusEl, { company, role: title, atsName: fillResult.ats_name }, () => {
+          // A challenge that mounts DURING the countdown cancels it. Without this the countdown
+          // keeps running and clicks Submit under an unsolved check.
+          activeAutoSubmitCancel?.('This company asks you to prove you are human, so Litos held off. Solve the check, then send it yourself.');
+        });
 
         const reportEvent = (autoSubmitted: boolean) => {
           chrome.runtime.sendMessage({
@@ -1357,9 +1376,11 @@ export default defineContentScript({
         // generated and can still cancel - never something Litos decides on its own.
         // document.hidden: never START a countdown while the student isn't looking at the tab (they
         // can't see the window to back out); going hidden mid-countdown is handled separately.
+        // captchaWaiting is set synchronously by armCaptchaStall above when the challenge is
+        // already on the page, so it is accurate by the time this reads it.
         const autoSubmitHeld =
           autoSubmitOn &&
-          (!finalSubmitBtn || resumeMissing || needsReview || hasEmptyRequiredFields() || document.hidden);
+          (!finalSubmitBtn || resumeMissing || needsReview || hasEmptyRequiredFields() || document.hidden || captchaWaiting);
         reportEvent(false);
 
         if (autoSubmitOn && !autoSubmitHeld && finalSubmitBtn) {
@@ -1430,7 +1451,9 @@ export default defineContentScript({
 
     // Cancel hook for an in-flight auto-submit countdown, exposed so SPA navigation (or any other
     // context change) can tear the countdown down. null whenever no countdown is running.
-    let activeAutoSubmitCancel: (() => void) | null = null;
+    // Takes the message to show, so a caller that knows WHY it is cancelling can say so. A CAPTCHA
+    // stall is the case that needs it: 'Stopped' alone leaves the applicant guessing.
+    let activeAutoSubmitCancel: ((msg?: string) => void) | null = null;
 
     // Opt-in only (AutofillSetupScreen toggle). Instead of clicking Submit the instant the fill
     // finishes, this anchors a live countdown timer directly onto the page's own Submit button:
@@ -1626,19 +1649,25 @@ export default defineContentScript({
           // AND focused (never submit into a background or blurred tab), and no required field is now
           // empty. Anything else hands back to the student instead of clicking.
           const tabActive = !document.hidden && document.hasFocus();
+          // Re-detected live rather than trusting the flag: a challenge can mount at any point in
+          // the countdown window, and this is the last moment before the click.
+          const challengeNow = captchaWaiting || detectChallenge().waiting;
           const portalStillSafe =
             target instanceof HTMLElement &&
             target.isConnected &&
             isElementVisible(target) &&
             tabActive &&
+            !challengeNow &&
             !hasEmptyRequiredFields();
           if (!portalStillSafe) {
             cleanupChrome();
             restoreSubmitButton();
             if (statusEl) {
-              statusEl.textContent = tabActive
-                ? 'The page changed at the last moment. Check it over, then send it yourself.'
-                : 'You were on another tab, so Litos held off. Open this one and send it yourself.';
+              statusEl.textContent = challengeNow
+                ? 'This company asks you to prove you are human, so Litos held off. Solve the check, then send it yourself.'
+                : tabActive
+                  ? 'The page changed at the last moment. Check it over, then send it yourself.'
+                  : 'You were on another tab, so Litos held off. Open this one and send it yourself.';
             }
             reportEvent(false);
             setTimeout(() => card.remove(), 2000);
@@ -1652,7 +1681,8 @@ export default defineContentScript({
             if (permissionSettled || cancelled) return;
             permissionSettled = true;
             window.clearTimeout(permissionTimer);
-            const stillSafe = target.isConnected && isElementVisible(target) && !document.hidden && document.hasFocus() && !hasEmptyRequiredFields();
+            const stillSafe = target.isConnected && isElementVisible(target) && !document.hidden && document.hasFocus()
+              && !captchaWaiting && !detectChallenge().waiting && !hasEmptyRequiredFields();
             cleanupChrome();
             restoreSubmitButton();
             if (settings?.automatic_submission_enabled === true && stillSafe) {

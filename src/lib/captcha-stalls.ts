@@ -29,7 +29,13 @@ export type CaptchaStall = {
 
 const KEY = 'captcha_stalls';
 
-/** Bounded so a pathological loop cannot grow storage without limit. Oldest are dropped. */
+/**
+ * Bounded so a pathological loop cannot grow storage without limit.
+ *
+ * The NEWEST are dropped, not the oldest. The list is sorted oldest-first and mergeStall goes out of
+ * its way to protect a long-waiting entry's place in it; evicting from that end would discard
+ * exactly the applications the queue exists to surface, which is the opposite of the point.
+ */
 const MAX_STALLS = 50;
 
 export function dedupeKey(stall: Pick<CaptchaStall, 'url'>): string {
@@ -58,7 +64,7 @@ export function mergeStall(existing: CaptchaStall[], incoming: CaptchaStall): Ca
   const others = existing.filter((stall) => dedupeKey(stall) !== key);
   return [...others, merged]
     .sort((left, right) => (left.stalledAt < right.stalledAt ? -1 : left.stalledAt > right.stalledAt ? 1 : 0))
-    .slice(-MAX_STALLS);
+    .slice(0, MAX_STALLS);
 }
 
 export function removeStall(existing: CaptchaStall[], url: string): CaptchaStall[] {

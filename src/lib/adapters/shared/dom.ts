@@ -80,7 +80,7 @@ const HONEYPOT_COPY = /for robots only|do not enter if you'?re human|leave this 
 // A honeypot is deliberately pulled out of the tab order so a human never lands on it. Both traps
 // captured carry tabindex="-1"; Workday's beecatcher does not, but it is already caught by identity
 // and by the clip geometry, so nothing regresses.
-function isConcealedByCollapsedAncestor(el: HTMLElement): boolean {
+export function isConcealedByCollapsedAncestor(el: HTMLElement): boolean {
   if (el.tabIndex >= 0) return false;
   let node = el.parentElement;
   // Bounded: a trap's collapsing wrapper is its immediate container in every case seen, and walking

@@ -20,6 +20,8 @@
  *      v3 asks the human for nothing, so stopping there would strand applications for no reason.
  */
 
+import { isConcealedByCollapsedAncestor } from './adapters/shared/dom';
+
 export type CaptchaProvider =
   | 'recaptcha_v2'
   | 'recaptcha_v3'
@@ -84,15 +86,19 @@ const INTERACTIVE_RECAPTCHA_SELECTOR = [
  * way: Workday's bot-trap is 1x1 and clipped, and Breezy/BambooHR/Oracle hide a fully-visible 250x40
  * field inside an ancestor with `height: 0; overflow: hidden`. A challenge concealed the same way is
  * not something a human can act on, so it must not stall the fill.
+ *
+ * The collapsed-ancestor case is IMPORTED from the honeypot guard rather than reimplemented here.
+ * An earlier version of this function claimed to handle it with a size check, which cannot work:
+ * getBoundingClientRect on a child of a zero-height overflow:hidden ancestor still returns the
+ * child's own full box, so the check passed and the comment was simply wrong.
  */
 function isReallyVisible(element: Element): boolean {
-  if (!(element instanceof HTMLElement) && !(element instanceof SVGElement)) return false;
+  if (!(element instanceof HTMLElement)) return false;
   const style = window.getComputedStyle(element);
   if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
   const rect = element.getBoundingClientRect();
-  // Guard the ancestor-collapse shape too: a box with real width but no height is not on screen.
   if (rect.width < 2 || rect.height < 2) return false;
-  return true;
+  return !isConcealedByCollapsedAncestor(element);
 }
 
 function tokens(root: ParentNode): string[] {

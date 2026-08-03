@@ -67,15 +67,21 @@ describe('mergeStall', () => {
     ]);
   });
 
-  it('bounds the list so a loop cannot grow storage without limit', () => {
+  /* Eviction drops the NEWEST. The queue exists to surface the application nobody has dealt with,
+   * and mergeStall goes out of its way to protect a long-waiting entry's place, so evicting from
+   * that end would discard exactly the entries the feature is for. */
+  it('bounds the list by dropping the newest, never the longest-waiting', () => {
     let list: CaptchaStall[] = [];
     for (let index = 0; index < 60; index += 1) {
       list = mergeStall(list, stall({
         url: `https://boards.greenhouse.io/acme/jobs/${index}`,
-        stalledAt: `2026-08-04T${String(index % 24).padStart(2, '0')}:00:00.000Z`,
+        // Ascending, so index 0 is the longest wait and index 59 the newest.
+        stalledAt: `2026-08-${String((index % 28) + 1).padStart(2, '0')}T${String(index % 24).padStart(2, '0')}:00:00.000Z`,
       }));
     }
     expect(list.length).toBeLessThanOrEqual(50);
+    const oldest = [...list].sort((a, b) => (a.stalledAt < b.stalledAt ? -1 : 1))[0]!;
+    expect(list[0]!.stalledAt).toBe(oldest.stalledAt);
   });
 
   it('does not mutate the list it was given', () => {
