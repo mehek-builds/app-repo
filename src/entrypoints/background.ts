@@ -10,6 +10,7 @@ import type { ApplicationProfile, GeneratedResume } from '../lib/types';
 import { automaticSubmissionEnabled, groundedDraftAnswer } from '../lib/auto-submit-consent';
 import { backendFetch } from '../lib/backend-fetch';
 import { flushAnalyticsQueue, trackExtensionEvent } from '../lib/analytics';
+import { recordStall } from '../lib/captcha-stalls';
 
 // Latched off once the backend reports onboarding complete. Service-worker memory is fine for
 // this: the worst case on a restart is one wasted 403, which re-latches it immediately.
@@ -666,6 +667,21 @@ export default defineBackground(() => {
           }
         });
         return true;
+      }
+
+      case 'CAPTCHA_STALL': {
+        // Recorded locally, for the applicant. A human-verification check asks whether the person
+        // in THIS session is human, so it can only be answered here, by them - there is nothing to
+        // forward and nobody to forward it to.
+        void recordStall({
+          url: message.payload?.url ?? '',
+          company: message.payload?.job_context?.company ?? '',
+          role: message.payload?.job_context?.role ?? '',
+          provider: message.payload?.provider ?? 'unknown',
+          atsName: message.payload?.ats_name,
+          stalledAt: message.payload?.stalled_at ?? new Date().toISOString(),
+        }).catch(() => {});
+        return false;
       }
 
       case 'AUTOFILL_EVENT': {

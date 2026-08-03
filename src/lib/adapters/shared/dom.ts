@@ -80,8 +80,15 @@ const HONEYPOT_COPY = /for robots only|do not enter if you'?re human|leave this 
 // A honeypot is deliberately pulled out of the tab order so a human never lands on it. Both traps
 // captured carry tabindex="-1"; Workday's beecatcher does not, but it is already caught by identity
 // and by the clip geometry, so nothing regresses.
-function isConcealedByCollapsedAncestor(el: HTMLElement): boolean {
-  if (el.tabIndex >= 0) return false;
+/**
+ * The ancestor walk on its own, WITHOUT the honeypot-specific tab-order test.
+ *
+ * Split out because CAPTCHA detection needs exactly this and must not inherit the tabIndex guard:
+ * an <iframe> is focusable by default and reports tabIndex 0 with no attribute set, and every
+ * interactive challenge (reCAPTCHA, hCaptcha, Turnstile) renders as an iframe. Calling the honeypot
+ * version there is a silent no-op for the only shape that matters.
+ */
+export function isInsideCollapsedRegion(el: HTMLElement): boolean {
   let node = el.parentElement;
   // Bounded: a trap's collapsing wrapper is its immediate container in every case seen, and walking
   // to <body> would eventually hit any element inside a zero-height region during a transition.
@@ -92,6 +99,11 @@ function isConcealedByCollapsedAncestor(el: HTMLElement): boolean {
     if (rect.height <= 1 || style.height === '0px') return true;
   }
   return false;
+}
+
+export function isConcealedByCollapsedAncestor(el: HTMLElement): boolean {
+  if (el.tabIndex >= 0) return false;
+  return isInsideCollapsedRegion(el);
 }
 
 export function isHoneypotField(el: HTMLElement): boolean {
