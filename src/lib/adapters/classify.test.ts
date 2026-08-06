@@ -25,6 +25,11 @@ const FULL: ApplicationProfile = {
   availability_date: 'June 2027',
   desired_salary: '80000',
   referral_source_default: 'Company website',
+  school: 'University of Southern California',
+  degree: 'Bachelor of Science in Computer Science',
+  grad_date: 'May 2028',
+  grad_year: 2028,
+  major: 'Computer Science',
 } as ApplicationProfile;
 
 const EMPTY = {} as ApplicationProfile;
@@ -71,6 +76,20 @@ describe('desiredAnswer value branches (characterization - behaviour predates cl
     const d = desiredAnswer('how did you hear about this role?', FULL, NO_EEO);
     expect(d?.mode).toBe('oneof');
     expect((d as { values: string[] }).values[0]).toBe('Company website');
+  });
+
+  it('academic profile fields answer school, degree, graduation date, and discipline', () => {
+    expect(desiredAnswer('Which university are you currently attending?', FULL, NO_EEO)).toEqual({
+      mode: 'value',
+      value: 'University of Southern California',
+    });
+    expect(desiredAnswer('What degree are you currently pursuing?', FULL, NO_EEO)).toEqual({
+      mode: 'value',
+      value: 'Bachelor of Science in Computer Science',
+    });
+    expect(desiredAnswer('Expected graduation date', FULL, NO_EEO)).toEqual({ mode: 'value', value: 'May 2028' });
+    expect(desiredAnswer('Discipline', FULL, NO_EEO)).toEqual({ mode: 'value', value: 'Computer Science' });
+    expect(desiredAnswer('When did you graduate from High School?', FULL, NO_EEO)).toBeNull();
   });
 
   it('DOB and availability fill from the profile; salary no longer does bare (R-031)', () => {
@@ -241,9 +260,9 @@ describe('R-039 location-commitment veto', () => {
     expect(classifyField(FAIRE)).toBeNull();
   });
 
-  it('desiredAnswer no longer answers a commitment question with her city', () => {
+  it('desiredAnswer answers a routine commitment question as a logistics acknowledgement', () => {
     const ap = { address_city: 'Dubai', address_country: 'United Arab Emirates' } as ApplicationProfile;
-    expect(desiredAnswer(GEMINI, ap, {})).toBeNull();
+    expect(desiredAnswer(GEMINI, ap, {})).toEqual({ mode: 'yes' });
   });
 
   it('a commitment question that lands on country vocabulary is vetoed too', () => {

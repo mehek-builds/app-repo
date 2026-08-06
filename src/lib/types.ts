@@ -134,6 +134,11 @@ export interface ApplicationProfile {
   gpa?: string; // as earned, e.g. "3.89"
   gpa_scale?: string; // e.g. "4.0"
   major?: string; // e.g. "Computer Science"
+  school?: string;
+  degree?: string;
+  grad_date?: string;
+  grad_year?: number;
+  currently_enrolled?: boolean;
   // Languages the student DECLARED fluent, as plain language names (e.g. ["English", "Hindi",
   // "Arabic", "French"]). Served by the backend's applicationProfile. This list is the ONLY
   // authority for language-proficiency questions: never infer a language from the resume, the JD,

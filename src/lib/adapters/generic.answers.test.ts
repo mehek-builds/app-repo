@@ -14,26 +14,36 @@ const ap = (o: Partial<ApplicationProfile> = {}): ApplicationProfile => o as App
 const opts = (...texts: string[]) => texts.map((text) => ({ text }));
 
 describe('desiredAnswer', () => {
-  it('never answers work authorization from the profile (location-scoped question, global flag)', () => {
-    // Live QA 2026-07-16: deriving this from work_authorized shipped a false "authorized without
-    // sponsorship" declaration on a real Lever form. Always-ask, regardless of the stored value.
+  it('answers work authorization from explicit stored profile values', () => {
     expect(desiredAnswer('are you legally authorized to work in the united states?', ap({ work_authorized: true }), {}))
-      .toBeNull();
+      .toEqual({ mode: 'yes' });
     expect(desiredAnswer('legally authorized to work', ap({ work_authorized: false }), {}))
-      .toBeNull();
+      .toEqual({ mode: 'no' });
     expect(desiredAnswer('do you have the right to work in the uk?', ap({ work_authorized: true }), {}))
-      .toBeNull();
+      .toEqual({ mode: 'yes' });
   });
 
-  it('never answers sponsorship from the profile (always-ask since 2026-07-16)', () => {
+  it('answers sponsorship from explicit stored profile values', () => {
     expect(desiredAnswer('will you now or in the future require sponsorship?', ap({ needs_sponsorship: true }), {}))
-      .toBeNull();
+      .toEqual({ mode: 'yes' });
     expect(desiredAnswer('do you require visa sponsorship?', ap({ needs_sponsorship: false }), {}))
-      .toBeNull();
+      .toEqual({ mode: 'no' });
   });
 
   it('answers an age-of-majority question yes', () => {
     expect(desiredAnswer('are you at least 18 years of age?', ap(), {})).toEqual({ mode: 'yes' });
+  });
+
+  it('answers routine applicant consent and logistics acknowledgements yes', () => {
+    expect(
+      desiredAnswer('Do you consent to Brex processing your personal information for the purpose of assessing your candidacy?', ap(), {}),
+    ).toEqual({ mode: 'yes' });
+    expect(
+      desiredAnswer("Please review and acknowledge Cloudflare's Candidate Privacy Policy.", ap(), {}),
+    ).toEqual({ mode: 'yes' });
+    expect(
+      desiredAnswer('this role will be in-office on a hybrid schedule, can you commit to being in-office three days per week?', ap(), {}),
+    ).toEqual({ mode: 'yes' });
   });
 
   it('declines EEO demographics when no preference is stored', () => {
@@ -239,11 +249,11 @@ describe('desiredAnswer: unset eligibility is left blank, never answered "No" (f
   it('leaves sponsorship blank when the field is null', () => {
     expect(desiredAnswer('do you require visa sponsorship?', ap({ needs_sponsorship: null as unknown as boolean }), {})).toBeNull();
   });
-  it('answers neither eligibility boolean, no matter what is stored', () => {
-    // Work authorization became always-ask after live QA 2026-07-16 shipped a false declaration;
-    // sponsorship followed the same day on Mehek's decision (same location-scoped mismatch).
-    expect(desiredAnswer('legally authorized to work', ap({ work_authorized: true }), {})).toBeNull();
-    expect(desiredAnswer('do you require visa sponsorship?', ap({ needs_sponsorship: false }), {})).toBeNull();
+  it('answers eligibility from explicit stored profile booleans', () => {
+    expect(desiredAnswer('legally authorized to work', ap({ work_authorized: true }), {})).toEqual({ mode: 'yes' });
+    expect(desiredAnswer('legally authorized to work', ap({ work_authorized: false }), {})).toEqual({ mode: 'no' });
+    expect(desiredAnswer('do you require visa sponsorship?', ap({ needs_sponsorship: false }), {})).toEqual({ mode: 'no' });
+    expect(desiredAnswer('do you require visa sponsorship?', ap({ needs_sponsorship: true }), {})).toEqual({ mode: 'yes' });
   });
 });
 
@@ -380,7 +390,7 @@ describe('WORK_ELIGIBILITY_QUESTION does not swallow a merely "sponsored" label'
       'is sponsorship required for you to work here?',
     ]) {
       expect(WORK_ELIGIBILITY_QUESTION.test(l), l).toBe(true);
-      expect(desiredAnswer(l, ap({ needs_sponsorship: false, work_authorized: true }), {}), l).toBeNull();
+      expect(desiredAnswer(l, ap({ needs_sponsorship: false, work_authorized: true }), {}), l).toEqual({ mode: 'no' });
     }
   });
 });
