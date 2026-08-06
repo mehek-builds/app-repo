@@ -1318,18 +1318,26 @@ export default defineContentScript({
         const draftedQuestions: Array<{ id: string; question: string; answer: string; kind: 'essay'; required: boolean }> = [];
         let fillResult: AutofillResult;
         try {
+          const fillApplicationProfile: ApplicationProfile = {
+            ...applicationProfile,
+            school: applicationProfile.school ?? profile.school,
+            degree: applicationProfile.degree ?? profile.degree,
+            grad_date: applicationProfile.grad_date ?? profile.grad_date,
+            grad_year: applicationProfile.grad_year ?? profile.grad_year,
+            currently_enrolled: applicationProfile.currently_enrolled ?? profile.currently_enrolled,
+          };
           fillResult = await withInactivityTimeout(
             (reportProgress, signal) => fill({
               fullName: profile.full_name ?? '',
               email: profile.email,
               profile,
-              applicationProfile,
+              applicationProfile: fillApplicationProfile,
               resumeBlob,
               resumeFileName: resume.file_name,
               // Generic-adapter extras (ATS adapters ignore them): EEO prefs for demographic
               // questions, and an AI-draft hook for open-ended textareas routed through the
               // background to the backend. jdText/company/title are already in scope here.
-              eeo: (applicationProfile.eeo_prefs as Record<string, string> | undefined) ?? {},
+              eeo: (fillApplicationProfile.eeo_prefs as Record<string, string> | undefined) ?? {},
               // The posting's structured salary range (R-031), when the background resolved one.
               postingCompensation: result.posting_compensation ?? null,
               signal,

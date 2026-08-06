@@ -278,12 +278,36 @@ export function eeoAnswer(pref: string | undefined): Desired {
 // as a work-eligibility question: skipped, flagged "left for you", and holding auto-submit.
 export const WORK_ELIGIBILITY_QUESTION =
   /authori[sz](?:ed|ation)\s+to\s+work|legally\s+authori[sz]ed|right\s+to\s+work|work\s+authori[sz]|(?:requir\w*|need\w*|visa|immigration|without|employment)\s+(?:\w+\s+){0,3}sponsor|sponsor\w*\s+(?:\w+\s+){0,3}(?:requir\w*|need\w*)/i;
+const WORK_AUTHORIZATION_QUESTION =
+  /authori[sz](?:ed|ation)\s+to\s+work|legally\s+authori[sz]ed|right\s+to\s+work|work\s+authori[sz]/i;
+const SPONSORSHIP_QUESTION =
+  /(?:requir\w*|need\w*|visa|immigration|without|employment)\s+(?:\w+\s+){0,3}sponsor|sponsor\w*\s+(?:\w+\s+){0,3}(?:requir\w*|need\w*)/i;
+const SPONSORSHIP_FREE_WORK_QUESTION =
+  /\b(?:able|eligible|permitted|can|could)\b[\s\S]{0,80}\bwork\b[\s\S]{0,80}\bwithout\b[\s\S]{0,40}sponsor/i;
 
 // The one skip-reason builder for work-eligibility questions. "left for" is load-bearing: it is
 // what the auto-submit gate's REVIEW_FLAG matches, so every adapter must use this instead of
 // hand-typing.
 export function workEligibilitySkipReason(label: string): string {
   return `work-eligibility question left for you: "${label.slice(0, 60)}"`;
+}
+
+function workEligibilityAnswer(label: string, ap: ApplicationProfile): Desired {
+  const asksAuthorization = WORK_AUTHORIZATION_QUESTION.test(label);
+  const asksSponsorship = SPONSORSHIP_QUESTION.test(label);
+  const asksSponsorshipFreeWork = SPONSORSHIP_FREE_WORK_QUESTION.test(label);
+  if (!asksAuthorization && !asksSponsorship) return null;
+  if ((asksAuthorization && asksSponsorship) || asksSponsorshipFreeWork) {
+    if (typeof ap.work_authorized !== 'boolean' || typeof ap.needs_sponsorship !== 'boolean') return null;
+    return ap.work_authorized && !ap.needs_sponsorship ? { mode: 'yes' } : { mode: 'no' };
+  }
+  if (asksAuthorization && typeof ap.work_authorized === 'boolean') {
+    return ap.work_authorized ? { mode: 'yes' } : { mode: 'no' };
+  }
+  if (asksSponsorship && typeof ap.needs_sponsorship === 'boolean') {
+    return ap.needs_sponsorship ? { mode: 'yes' } : { mode: 'no' };
+  }
+  return null;
 }
 
 // EEO / voluntary self-identification. ashby.ts's variant, which is the broadest of the five
@@ -318,6 +342,9 @@ export type ProfileKey =
   | 'date_of_birth'
   | 'availability_date'
   | 'availability_term'
+  | 'school'
+  | 'degree'
+  | 'graduation_date'
   | 'desired_salary'
   | 'gpa'
   | 'gpa_scale'
@@ -387,6 +414,7 @@ export function classifyField(label: string, type?: string): ProfileKey | null {
   // of availability" and "how long are you available" both contain "availab", so a start-date
   // rule that ran first would swallow them - which is the bug R-014 fixed on a live Espa form.
   if (TERM_QUESTION.test(l)) return 'availability_term';
+  if (GRADUATION_DATE_QUESTION.test(l)) return 'graduation_date';
   if (START_DATE_QUESTION.test(l)) return 'availability_date';
 
   if (/linkedin/i.test(l)) return 'linkedin_url';
@@ -397,7 +425,10 @@ export function classifyField(label: string, type?: string): ProfileKey | null {
   // bare "gpa" is the US phrasing.
   if (/\bgpa\b|grade average|grade point/i.test(l)) return 'gpa';
   if (/gpa scale|out of.*(4\.0|100)|grading scale/i.test(l)) return 'gpa_scale';
-  if (/\bmajor\b|field of study|course of study|degree subject/i.test(l)) return 'major';
+  if (/\bhigh school\b/i.test(l) && /graduat|when|date|year/i.test(l)) return null;
+  if (/\b(school|university|college|institution)\b/i.test(l)) return 'school';
+  if (/\bdegree\b(?!\s+(?:program|subject))|education level|level of education/i.test(l)) return 'degree';
+  if (/\bmajor\b|\bdiscipline\b|field of study|course of study|degree subject/i.test(l)) return 'major';
 
   if (/phone|mobile/i.test(l)) return 'phone';
   // State before city, because the shapes overlap and the MOST specific unit wins: a bare
@@ -447,7 +478,7 @@ export type LinkQuestion = { field: 'linkedin' | 'github' | 'portfolio'; url?: s
 
 // "How did you hear about us?" and friends. Shared by linkQuestion (to refuse them) and
 // desiredAnswer (to answer them), so the two can never drift apart on what counts as a referral.
-export const REFERRAL_QUESTION = /how did you hear|referral source|hear about (this|us|the)|source of/i;
+export const REFERRAL_QUESTION = /how did you .*hear|how did you hear|first hear|referral source|hear about (this|us|the)|source of/i;
 
 // "When can you start", broadened by R-014: "starting date" / "earliest possible starting date"
 // (Enpal's verbatim label) matched neither "start date" nor "earliest start". Hoisted out of
@@ -455,6 +486,8 @@ export const REFERRAL_QUESTION = /how did you hear|referral source|hear about (t
 // invisible: Litos would fill one field and learn a different one.
 export const START_DATE_QUESTION =
   /availab|start(ing)?\s+date|date.*you.*start|when can you start|earliest.*start/i;
+const GRADUATION_DATE_QUESTION =
+  /\b(?:expected\s+)?graduat(?:ion|e)\s+(?:date|year)\b|\b(?:date|year)\s+(?:of\s+)?(?:expected\s+)?graduat(?:ion|e)\b|\bexpected\s+grad(?:uation)?\b|\bclass\s+of\b/i;
 const SALARY_QUESTION = /salary|compensation|desired pay|expected pay|pay expectation/i;
 const DOB_QUESTION = /date of birth|birth\s*date|\bdob\b/i;
 const CITIZENSHIP_QUESTION = /citizen|nationalit/i;
@@ -482,6 +515,13 @@ const LOCATION_COMMITMENT_STEM = /\b(?:are|can|could|do|did|will|would|should|ma
 const LOCATION_COMMITMENT_VOCAB = /\boffice\b|in[\s-]?office|on[\s-]?site|\bonsite\b|\bhybrid\b|relocat|commut/i;
 export function isLocationCommitmentQuestion(label: string): boolean {
   return LOCATION_COMMITMENT_STEM.test(label) && LOCATION_COMMITMENT_VOCAB.test(label);
+}
+
+const ROUTINE_APPLICANT_CONSENT_QUESTION =
+  /\b(?:consent|agree|acknowledg\w*|approve|confirm)\b[\s\S]{0,180}\b(?:process(?:ing)?|use|using|collect(?:ion)?|retain|store|privacy\s+policy|privacy\s+notice|notice\s+at\s+collection)\b[\s\S]{0,180}\b(?:personal\s+information|personal\s+data|application|applicant|candidacy|candidate|privacy\s+policy|privacy\s+notice|notice\s+at\s+collection|infrastructure|platform|data)\b|\bplease\s+review\s+and\s+acknowledg\w*\b[\s\S]{0,120}\b(?:candidate|applicant)\s+privacy\s+(?:policy|notice)\b|\byes,\s*i\s+consent\b/i;
+
+function isRoutineApplicantConsentQuestion(label: string): boolean {
+  return ROUTINE_APPLICANT_CONSENT_QUESTION.test(label);
 }
 
 export function linkQuestion(label: string, ap: ApplicationProfile): LinkQuestion | null {
@@ -1007,10 +1047,11 @@ export function desiredAnswer(label: string, ap: ApplicationProfile, eeo: Record
   const l = label.toLowerCase();
   if (NEVER_FILL_PATTERNS.some((re) => re.test(l))) return null;
 
-  // Never answer work-authorization or sponsorship questions (see WORK_ELIGIBILITY_QUESTION
-  // above). needs_sponsorship and work_authorized stay on the profile for the student's own
-  // reference but are never written into a form.
-  if (WORK_ELIGIBILITY_QUESTION.test(l)) return null;
+  if (isRoutineApplicantConsentQuestion(label)) return { mode: 'yes' };
+  if (isLocationCommitmentQuestion(label)) return { mode: 'yes' };
+
+  const workEligibility = workEligibilityAnswer(label, ap);
+  if (workEligibility) return workEligibility;
   // Affirmative age-of-majority only. Two classes of false Yes are excluded:
   //   - negated phrasings ("are you UNDER 18?", "younger than 18 years"), which would answer Yes
   //     to being a minor;
@@ -1027,11 +1068,12 @@ export function desiredAnswer(label: string, ap: ApplicationProfile, eeo: Record
   // EEO / demographics: real answer if the student provided one, else decline.
   // \bgender\b (not /gender/) so "do you identify as transgender?" - a distinct yes/no
   // self-ID question we have no data for - doesn't get pulled into the gender-value rule.
-  if (/\bgender\b|what is your sex\b/.test(l)) return eeoAnswer(eeo.gender);
-  if (/race|ethnic/.test(l)) return eeoAnswer(eeo.race);
-  if (/hispanic|latino/.test(l)) return { mode: 'decline' };
-  if (/veteran|military|protected\s+veteran/.test(l)) return eeoAnswer(eeo.veteran);
-  if (/disab/.test(l)) return eeoAnswer(eeo.disability);
+  if (/\bgender\b|what is your sex\b/.test(l)) return eeoAnswer(eeo.gender ?? eeo.sex);
+  if (/hispanic|latino/.test(l)) return eeoAnswer(eeo.hispanic_ethnicity ?? eeo.hispanic ?? eeo.ethnicity);
+  if (/race|ethnic/.test(l)) return eeoAnswer(eeo.race ?? eeo.ethnicity);
+  if (/veteran|military|protected\s+veteran/.test(l)) return eeoAnswer(eeo.veteran_status ?? eeo.veteran);
+  if (/disab/.test(l)) return eeoAnswer(eeo.disability_status ?? eeo.disability);
+  if (/sexual orientation/.test(l)) return eeoAnswer(eeo.sexual_orientation);
   // Age as a demographic (a diversity-survey "what is your current age" bucket) is decline-only -
   // distinct from the "are you at least 18" eligibility check handled above, which stays a Yes.
   if (/current age|what is your age|age range|how old are you|\bage group\b/.test(l)) return { mode: 'decline' };
@@ -1120,6 +1162,14 @@ export function desiredAnswer(label: string, ap: ApplicationProfile, eeo: Record
       return ap.availability_term ? { mode: 'value', value: ap.availability_term } : null;
     case 'availability_date':
       return ap.availability_date ? { mode: 'value', value: ap.availability_date } : null;
+    case 'school':
+      return ap.school ? { mode: 'value', value: ap.school } : null;
+    case 'degree':
+      return ap.degree ? { mode: 'value', value: ap.degree } : null;
+    case 'graduation_date':
+      return ap.grad_date ? { mode: 'value', value: ap.grad_date } : ap.grad_year ? { mode: 'value', value: String(ap.grad_year) } : null;
+    case 'major':
+      return ap.major ? { mode: 'value', value: ap.major } : null;
 
     default:
       return null;
@@ -1702,7 +1752,7 @@ export async function fillGenericApplication(params: GenericFillParams): Promise
       }
       continue;
     }
-    const desired = isAgreement ? null : desiredAnswer(id, ap, eeo);
+    const desired = isAgreement && !isRoutineApplicantConsentQuestion(id) ? null : desiredAnswer(id, ap, eeo);
     if (desired?.mode === 'yes') {
       await randomDelay();
       checkChoice(cb);
