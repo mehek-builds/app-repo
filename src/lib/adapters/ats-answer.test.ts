@@ -15,34 +15,43 @@ const ap = (o: Partial<ApplicationProfile> = {}): ApplicationProfile => o as App
 const opts = (...texts: string[]) => texts.map((text) => ({ text }));
 
 describe('desiredAnswer on ATS full-block label text', () => {
-  it('never answers work authorization, even when the label includes the option text', () => {
-    // Work-auth questions are location-scoped; work_authorized is one global flag. Deriving an
-    // answer shipped a false declaration on a real Lever form (live QA 2026-07-16), so the
-    // resolver must leave these blank no matter what the profile says.
+  it('answers work authorization from explicit stored data, even when the label includes option text', () => {
     expect(desiredAnswer('are you legally authorized to work in the us? yes no', ap({ work_authorized: true }), {}))
-      .toBeNull();
+      .toEqual({ mode: 'yes' });
   });
 
-  it('never answers a combined authorized-without-sponsorship question from needs_sponsorship', () => {
-    // The auth branch must win over the sponsorship branch for combined phrasings: this is the
-    // exact question Litos mis-filled on the Xsolla/Lever form.
+  it('answers combined authorized-without-sponsorship questions only when both stored facts agree', () => {
     expect(
       desiredAnswer(
         'are you legally authorized to work without sponsorship in the location where this role is based? yes no',
         ap({ work_authorized: true, needs_sponsorship: true }),
         {},
       ),
+    ).toEqual({ mode: 'no' });
+    expect(
+      desiredAnswer(
+        'are you legally authorized to work without sponsorship in the location where this role is based? yes no',
+        ap({ work_authorized: true, needs_sponsorship: false }),
+        {},
+      ),
+    ).toEqual({ mode: 'yes' });
+    expect(
+      desiredAnswer(
+        'are you legally authorized to work without sponsorship in the location where this role is based? yes no',
+        ap({ work_authorized: true }),
+        {},
+      ),
     ).toBeNull();
   });
 
-  it('never answers sponsorship either (always-ask since 2026-07-16, Mehek decision)', () => {
+  it('answers sponsorship from explicit stored data', () => {
     expect(
       desiredAnswer(
         'will you now or in the future require immigration sponsorship? yes no',
         ap({ needs_sponsorship: false }),
         {},
       ),
-    ).toBeNull();
+    ).toEqual({ mode: 'no' });
   });
 
   it('declines EEO wrapped in a survey block, values it when a preference exists', () => {

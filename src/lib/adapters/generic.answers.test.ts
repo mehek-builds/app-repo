@@ -385,12 +385,17 @@ describe('WORK_ELIGIBILITY_QUESTION does not swallow a merely "sponsored" label'
       'will you now or in the future require sponsorship?',
       'do you require visa sponsorship?',
       'do you need sponsor support to work in germany?',
-      'are you able to work without sponsorship?',
-      'are you authorized to work without requiring sponsorship?',
       'is sponsorship required for you to work here?',
     ]) {
       expect(WORK_ELIGIBILITY_QUESTION.test(l), l).toBe(true);
       expect(desiredAnswer(l, ap({ needs_sponsorship: false, work_authorized: true }), {}), l).toEqual({ mode: 'no' });
+    }
+    for (const l of [
+      'are you able to work without sponsorship?',
+      'are you authorized to work without requiring sponsorship?',
+    ]) {
+      expect(WORK_ELIGIBILITY_QUESTION.test(l), l).toBe(true);
+      expect(desiredAnswer(l, ap({ needs_sponsorship: false, work_authorized: true }), {}), l).toEqual({ mode: 'yes' });
     }
   });
 });

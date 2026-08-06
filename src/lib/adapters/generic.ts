@@ -282,6 +282,8 @@ const WORK_AUTHORIZATION_QUESTION =
   /authori[sz](?:ed|ation)\s+to\s+work|legally\s+authori[sz]ed|right\s+to\s+work|work\s+authori[sz]/i;
 const SPONSORSHIP_QUESTION =
   /(?:requir\w*|need\w*|visa|immigration|without|employment)\s+(?:\w+\s+){0,3}sponsor|sponsor\w*\s+(?:\w+\s+){0,3}(?:requir\w*|need\w*)/i;
+const SPONSORSHIP_FREE_WORK_QUESTION =
+  /\b(?:able|eligible|permitted|can|could)\b[\s\S]{0,80}\bwork\b[\s\S]{0,80}\bwithout\b[\s\S]{0,40}sponsor/i;
 
 // The one skip-reason builder for work-eligibility questions. "left for" is load-bearing: it is
 // what the auto-submit gate's REVIEW_FLAG matches, so every adapter must use this instead of
@@ -293,9 +295,11 @@ export function workEligibilitySkipReason(label: string): string {
 function workEligibilityAnswer(label: string, ap: ApplicationProfile): Desired {
   const asksAuthorization = WORK_AUTHORIZATION_QUESTION.test(label);
   const asksSponsorship = SPONSORSHIP_QUESTION.test(label);
+  const asksSponsorshipFreeWork = SPONSORSHIP_FREE_WORK_QUESTION.test(label);
   if (!asksAuthorization && !asksSponsorship) return null;
-  if (asksAuthorization && asksSponsorship && typeof ap.needs_sponsorship === 'boolean') {
-    return ap.needs_sponsorship ? { mode: 'yes' } : { mode: 'no' };
+  if ((asksAuthorization && asksSponsorship) || asksSponsorshipFreeWork) {
+    if (typeof ap.work_authorized !== 'boolean' || typeof ap.needs_sponsorship !== 'boolean') return null;
+    return ap.work_authorized && !ap.needs_sponsorship ? { mode: 'yes' } : { mode: 'no' };
   }
   if (asksAuthorization && typeof ap.work_authorized === 'boolean') {
     return ap.work_authorized ? { mode: 'yes' } : { mode: 'no' };
