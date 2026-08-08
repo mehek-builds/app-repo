@@ -163,6 +163,10 @@ export interface GeneratedResume {
   resume_url: string;
   file_name: string;
   spec: unknown;
+  application?: {
+    id: string;
+    spec: unknown;
+  };
   quality: ResumeQuality;
 }
 

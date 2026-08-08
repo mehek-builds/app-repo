@@ -12,6 +12,12 @@ import { backendFetch } from '../lib/backend-fetch';
 import { flushAnalyticsQueue, trackExtensionEvent } from '../lib/analytics';
 import { clearStall, readStalls, recordStall } from '../lib/captcha-stalls';
 import { badgeState } from '../lib/badge';
+import { applicantEmailForGeneratedPacket, atsNameForPortalUrl } from '../lib/applicant-email';
+import {
+  clearPacketApplicantIdentity,
+  readPacketApplicantIdentity,
+  storePacketApplicantIdentity,
+} from '../lib/packet-applicant-identity';
 
 // Latched off once the backend reports onboarding complete. Service-worker memory is fine for
 // this: the worst case on a restart is one wasted 403, which re-latches it immediately.
@@ -298,6 +304,7 @@ async function generateResumeAndProfile(
   role: string,
   jdText: string,
   token: string,
+  portalUrl?: string,
   // Called before each capacity backoff so the caller can tell the student what is happening.
   // "Tailoring your resume..." sitting frozen for two minutes is indistinguishable from a hang, and
   // a student who thinks it hung fills the form by hand or re-clicks (which is what the live
@@ -334,6 +341,12 @@ async function generateResumeAndProfile(
           portfolio_url: applicationProfile.portfolio_url,
           phone: applicationProfile.phone,
         },
+        ...(portalUrl ? {
+          application: {
+            portal_url: portalUrl,
+            ats_name: atsNameForPortalUrl(portalUrl),
+          },
+        } : {}),
       }),
     }, token, RESUME_FETCH_TIMEOUT_MS);
 
@@ -634,10 +647,25 @@ export default defineBackground(() => {
             return;
           }
           try {
+            if (tabId !== undefined) await clearPacketApplicantIdentity(tabId);
             // Started alongside the (much slower) resume generation, awaited only at the end;
             // internally caught, so a compensation miss can never sink the fill data.
             const compensationPromise = fetchAshbyPostingCompensation(url);
-            const result = await generateResumeAndProfile(company, role, jd_text, token, notifyRetry);
+            const result = await generateResumeAndProfile(company, role, jd_text, token, url, notifyRetry);
+            if (!result.resume || !result.profile) {
+              throw new Error('Litos did not return a complete application packet. Nothing was filled. Try again.');
+            }
+            const packetEmail = applicantEmailForGeneratedPacket(result.resume, result.profile.email);
+            const applicationId = result.resume.application?.id;
+            if (!packetEmail || !applicationId || tabId === undefined || typeof url !== 'string') {
+              throw new Error('Litos could not preserve one email across this application, so nothing was filled. Try again.');
+            }
+            await storePacketApplicantIdentity({
+              tabId,
+              applicationId,
+              email: packetEmail,
+              portalUrl: url,
+            });
             void trackExtensionEvent('application_generation_completed');
             sendResponse({ ...result, posting_compensation: await compensationPromise });
           } catch (err) {
@@ -688,9 +716,16 @@ export default defineBackground(() => {
             return;
           }
           try {
-            const profileRes = await timeoutBackendFetch('/profile', {}, token);
-            const profile: { email?: string } = profileRes.ok ? await profileRes.json() : {};
-            sendResponse({ email: profile.email });
+            const tabId = sender.tab?.id;
+            const portalUrl = sender.tab?.url;
+            const identity = tabId === undefined || !portalUrl
+              ? null
+              : await readPacketApplicantIdentity({ tabId, portalUrl });
+            if (!identity) {
+              sendResponse({ error: 'Litos has not prepared this application email yet. Return to the job page and prepare the application first.' });
+              return;
+            }
+            sendResponse({ email: identity.email, applicationId: identity.applicationId });
           } catch (err) {
             sendResponse({ error: err instanceof Error ? err.message : 'could not load account data' });
           }
