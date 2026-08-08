@@ -1,12 +1,27 @@
 // Token access goes through lib/storage, so the background reads the exact key the popup
 // writes, including the backward-compatible fallback to the legacy Volley-era key name.
-import { getToken as getStoredToken, migrateLegacyStorage, setToken, setAutoSubmitEnabled } from '../lib/storage';
+import {
+  clearAll as clearStoredSession,
+  getToken as getStoredToken,
+  migrateLegacyStorage,
+  setProfile,
+  setToken,
+  setAutoSubmitEnabled,
+} from '../lib/storage';
 import { overloadWaitMs, overloadBudgetRemains, RESUME_OVERLOAD_BUDGET_MS } from '../lib/overload';
 // Pure salary/posting helpers (R-031). adapters/salary is a LEAF module (types only), so this
 // import does not pull the DOM-adjacent adapter graph into the service worker bundle.
 import { parseAshbyPostingRef, selectPostingCompensation, type PostingCompensation } from '../lib/adapters/salary';
 import { PRODUCT_NAME, type ProductMeta } from '../lib/product';
-import type { ApplicationProfile, GeneratedResume } from '../lib/types';
+import type { ApplicationProfile, GeneratedResume, Profile } from '../lib/types';
+import {
+  ARMED_HANDOFF_KEY,
+  armHandoffs,
+  claimArmed,
+  decideAdoption,
+  type AdoptionOutcome,
+  type ArmedHandoff,
+} from '../lib/web-handoff';
 import { automaticSubmissionEnabled, groundedDraftAnswer } from '../lib/auto-submit-consent';
 import { backendFetch } from '../lib/backend-fetch';
 import { flushAnalyticsQueue, trackExtensionEvent } from '../lib/analytics';
@@ -135,6 +150,81 @@ function timeoutBackendFetch(
   ms = FETCH_TIMEOUT_MS,
 ): Promise<Response> {
   return backendFetch(path, init, { token, timeoutMs: ms });
+}
+
+// ─── Website → extension session handover ────────────────────────────────────
+// See lib/web-handoff.ts for why this exists at all. Short version: being signed in on
+// trylitos.com used to tell the extension nothing, so the one path the product puts a button in
+// front of ("Finish this one" on the Home screen) ended at an extension that answered
+// "not signed in" while the dashboard sat authenticated in the next tab.
+
+/**
+ * The one sentence every "we have no session" branch answers with.
+ *
+ * It used to be the fragment `not signed in`, which the fill card pasted straight in front of its
+ * own sentence and rendered as "not signed in Nothing was attached or submitted." A whole sentence
+ * here fixes that at the source for every caller, and says what to do rather than what is missing.
+ */
+const NOT_SIGNED_IN_MESSAGE = 'You are not signed in to the Litos extension. Open Litos from your browser toolbar and sign in.';
+
+/** What the backend says a token is. null means the backend would not honour it. */
+async function accountForToken(token: string): Promise<Profile | null> {
+  try {
+    const res = await timeoutBackendFetch('/profile', {}, token);
+    if (!res.ok) return null;
+    return (await res.json()) as Profile;
+  } catch {
+    return null;
+  }
+}
+
+async function adoptWebSession(incomingToken: string): Promise<{ ok: boolean; outcome: AdoptionOutcome; error?: string }> {
+  const incoming = incomingToken.trim();
+  const storedToken = await getStoredToken();
+  if (storedToken && storedToken === incoming) return { ok: true, outcome: 'already_signed_in' };
+
+  // The website's token is verified against the backend before it is stored. The origin check
+  // upstream says the message came from our own page; only the backend can say the token is real,
+  // and storing an unverified one would replace a working session with a broken one.
+  const incomingProfile = await accountForToken(incoming);
+  const storedProfile = storedToken ? await accountForToken(storedToken) : null;
+  const outcome = decideAdoption({
+    incomingToken: incoming,
+    incomingEmail: incomingProfile?.email ?? null,
+    storedToken,
+    storedEmail: storedProfile?.email ?? null,
+  });
+
+  if (outcome !== 'adopted') {
+    return {
+      ok: outcome === 'already_signed_in',
+      outcome,
+      error:
+        outcome === 'different_account'
+          ? 'The Litos extension is signed in to a different account. Sign out of the extension to switch.'
+          : outcome === 'rejected'
+            ? 'Litos did not accept that sign-in.'
+            : undefined,
+    };
+  }
+
+  try {
+    await setToken(incoming);
+    if (incomingProfile) await setProfile(incomingProfile);
+    return { ok: true, outcome };
+  } catch (error) {
+    return { ok: false, outcome: 'rejected', error: error instanceof Error ? error.message : 'Could not save the sign-in.' };
+  }
+}
+
+async function readArmedHandoffs(): Promise<ArmedHandoff[]> {
+  const stored = await chrome.storage.session.get(ARMED_HANDOFF_KEY).catch(() => ({}) as Record<string, unknown>);
+  const value = stored?.[ARMED_HANDOFF_KEY];
+  return Array.isArray(value) ? (value as ArmedHandoff[]) : [];
+}
+
+async function writeArmedHandoffs(entries: ArmedHandoff[]): Promise<void> {
+  await chrome.storage.session.set({ [ARMED_HANDOFF_KEY]: entries }).catch(() => {});
 }
 
 // ─── Transient model-capacity retry (live QA 2026-07-16, R-003) ──────────────
@@ -643,7 +733,7 @@ export default defineBackground(() => {
         };
         getStoredToken().then(async (token) => {
           if (!token) {
-            sendResponse({ error: 'not signed in' });
+            sendResponse({ error: NOT_SIGNED_IN_MESSAGE });
             return;
           }
           try {
@@ -682,7 +772,7 @@ export default defineBackground(() => {
         const { company, role, jd_text, question } = message.payload;
         getStoredToken().then(async (token) => {
           if (!token) {
-            sendResponse({ error: 'not signed in' });
+            sendResponse({ error: NOT_SIGNED_IN_MESSAGE });
             return;
           }
           try {
@@ -712,7 +802,7 @@ export default defineBackground(() => {
         // own (2026-07-03 product decision), Litos never touches that field.
         getStoredToken().then(async (token) => {
           if (!token) {
-            sendResponse({ error: 'not signed in' });
+            sendResponse({ error: NOT_SIGNED_IN_MESSAGE });
             return;
           }
           try {
@@ -828,6 +918,38 @@ export default defineBackground(() => {
         return true; // async: see the convention note above - only async branches return true.
       }
 
+      // "Did the applicant arrive here by clicking Finish this one?" Answered once and then
+      // forgotten (claimArmed removes the entry), so a later visit to the same posting is an
+      // ordinary visit and the card asks before touching anything.
+      case 'CLAIM_HANDOFF': {
+        // Two candidates, because the content script runs in all frames and the frame that finds
+        // the form is often not the page the applicant navigated to (Greenhouse and Workday both
+        // embed the application in a cross-origin iframe, where location.href is the ATS's url and
+        // the employer's is unreachable from script). The sender's TAB url is the one the dashboard
+        // armed, and only the background can see it.
+        const candidates = [
+          typeof message.url === 'string' ? message.url : '',
+          sender.tab?.url ?? '',
+        ].filter(Boolean);
+        readArmedHandoffs()
+          .then(async (entries) => {
+            let pool = entries;
+            let hit: ReturnType<typeof claimArmed>['claimed'] = null;
+            for (const candidate of candidates) {
+              const { claimed, remaining } = claimArmed(pool, candidate, Date.now());
+              pool = remaining;
+              if (claimed) {
+                hit = claimed;
+                break;
+              }
+            }
+            if (pool.length !== entries.length) await writeArmedHandoffs(pool);
+            sendResponse({ armed: Boolean(hit), applicationId: hit?.applicationId });
+          })
+          .catch(() => sendResponse({ armed: false }));
+        return true;
+      }
+
       default:
         return false;
     }
@@ -851,9 +973,56 @@ export default defineBackground(() => {
       return false;
     }
     if (message?.type === 'LITOS_PING') {
-      sendResponse({ ok: true });
-      return false;
+      // `signedIn` is the whole point of the ping now: the website cannot see chrome.storage, so
+      // without an answer here it has no way to know the extension is sitting there logged out.
+      getStoredToken()
+        .then((token) => sendResponse({ ok: true, signedIn: Boolean(token) }))
+        .catch(() => sendResponse({ ok: true, signedIn: false }));
+      return true;
     }
+
+    if (message?.type === 'LITOS_ADOPT_SESSION') {
+      const token = typeof message.token === 'string' ? message.token : '';
+      if (!token.trim()) {
+        sendResponse({ ok: false, outcome: 'rejected', error: 'No sign-in was sent.' });
+        return false;
+      }
+      adoptWebSession(token)
+        .then(sendResponse)
+        .catch((error) =>
+          sendResponse({ ok: false, outcome: 'rejected', error: error instanceof Error ? error.message : 'Could not sign in.' }),
+        );
+      return true;
+    }
+
+    if (message?.type === 'LITOS_CLEAR_SESSION') {
+      // Signing out on the website signs out the extension. One product, one account: the
+      // alternative is an extension quietly applying as whoever was signed in last week.
+      clearStoredSession()
+        .then(() => sendResponse({ ok: true }))
+        .catch(() => sendResponse({ ok: false }));
+      return true;
+    }
+
+    if (message?.type === 'LITOS_ARM_HANDOFF') {
+      const items: unknown[] = Array.isArray(message.applications) ? message.applications : [];
+      const incoming = items
+        .map((item) => item as { url?: unknown; applicationId?: unknown })
+        .filter((item) => typeof item?.url === 'string')
+        .map((item) => ({
+          url: item.url as string,
+          applicationId: typeof item.applicationId === 'string' ? item.applicationId : undefined,
+        }));
+      readArmedHandoffs()
+        .then(async (existing) => {
+          const next = armHandoffs(existing, incoming, Date.now());
+          await writeArmedHandoffs(next);
+          sendResponse({ ok: true, armed: next.length });
+        })
+        .catch(() => sendResponse({ ok: false }));
+      return true;
+    }
+
     if (message?.type !== 'LITOS_SUBMIT_APPLICATION') return false;
 
     const applicationId = String(message.applicationId ?? '');
