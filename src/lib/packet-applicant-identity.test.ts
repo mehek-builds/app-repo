@@ -26,8 +26,9 @@ describe('packet applicant identity across Workday navigation', () => {
     await identity.storePacketApplicantIdentity({
       tabId: 42,
       applicationId: '22222222-2222-4222-8222-222222222222',
-      email: 'App-123@Apply.TryLitos.com',
+      email: 'App-2222222222-abcdef012345@Apply.TryLitos.com',
       portalUrl: 'https://acme.wd5.myworkdayjobs.com/en-US/jobs/job/engineer',
+      routeFingerprint: '11111111111111111111',
       now: 1_000,
     });
     await expect(identity.readPacketApplicantIdentity({
@@ -36,7 +37,7 @@ describe('packet applicant identity across Workday navigation', () => {
       now: 2_000,
     })).resolves.toMatchObject({
       applicationId: '22222222-2222-4222-8222-222222222222',
-      email: 'app-123@apply.trylitos.com',
+      email: 'app-2222222222-abcdef012345@apply.trylitos.com',
     });
   });
 
@@ -51,8 +52,9 @@ describe('packet applicant identity across Workday navigation', () => {
     await identity.storePacketApplicantIdentity({
       tabId: 42,
       applicationId: '22222222-2222-4222-8222-222222222222',
-      email: 'app-123@apply.trylitos.com',
+      email: 'app-2222222222-abcdef012345@apply.trylitos.com',
       portalUrl: 'https://acme.wd5.myworkdayjobs.com/job/engineer',
+      routeFingerprint: '11111111111111111111',
       now: 1_000,
     });
     await expect(identity.readPacketApplicantIdentity({
@@ -65,5 +67,61 @@ describe('packet applicant identity across Workday navigation', () => {
       portalUrl: 'https://globex.myworkdayjobs.com/createAccount',
       now: 2_000,
     })).resolves.toBeNull();
+  });
+
+  it('fails closed when the receiving route switches before Workday account creation', () => {
+    const prepared = {
+      applicationId: '22222222-2222-4222-8222-222222222222',
+      email: 'applications+app-2222222222-abcdef012345@trylitos.com',
+      portalKey: 'acme.wd5.myworkdayjobs.com',
+      storedAt: 1_000,
+      routeFingerprint: '11111111111111111111',
+    };
+    expect(identity.packetIdentityMatchesCurrentRoute(prepared, {
+      tracking_active: true,
+      domain: 'applications.trylitos.com',
+      route_generation_fingerprint: '11111111111111111111',
+    })).toBe(false);
+  });
+
+  it('accepts only the current healthy dedicated or mailbox route for this application', () => {
+    const prepared = {
+      applicationId: '22222222-2222-4222-8222-222222222222',
+      email: 'app-2222222222-abcdef012345@applications.trylitos.com',
+      portalKey: 'acme.wd5.myworkdayjobs.com',
+      storedAt: 1_000,
+      routeFingerprint: '11111111111111111111',
+    };
+    expect(identity.packetIdentityMatchesCurrentRoute(prepared, {
+      tracking_active: true,
+      domain: 'applications.trylitos.com',
+      route_generation_fingerprint: '11111111111111111111',
+    })).toBe(true);
+    expect(identity.packetIdentityMatchesCurrentRoute({
+      ...prepared,
+      email: 'applications+app-2222222222-abcdef012345@trylitos.com',
+    }, {
+      tracking_active: true,
+      domain: 'applications@trylitos.com',
+      route_generation_fingerprint: '11111111111111111111',
+    })).toBe(true);
+    expect(identity.packetIdentityMatchesCurrentRoute(prepared, {
+      tracking_active: false,
+      domain: 'applications.trylitos.com',
+      route_generation_fingerprint: '11111111111111111111',
+    })).toBe(false);
+  });
+
+  it('fails closed when the alias secret rotates without changing the domain', () => {
+    const prepared = {
+      applicationId: '22222222-2222-4222-8222-222222222222',
+      email: 'app-2222222222-abcdef012345@applications.trylitos.com',
+      routeFingerprint: '11111111111111111111',
+    };
+    expect(identity.packetIdentityMatchesCurrentRoute(prepared, {
+      tracking_active: true,
+      domain: 'applications.trylitos.com',
+      route_generation_fingerprint: '22222222222222222222',
+    })).toBe(false);
   });
 });
