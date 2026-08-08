@@ -8,8 +8,9 @@ import {
 } from '../lib/adapters/workday';
 import { isLinkedInApplicationPage, extractLinkedInJdText, fillLinkedInApplication } from '../lib/adapters/linkedin';
 import { isLikelyApplicationForm, extractGenericJdText, getGenericJobDetails, fillGenericApplication, drainR030CandidateLabels } from '../lib/adapters/generic';
-import { isAtsApplicationPage, extractAtsJdText, fillAtsApplication, gatedPortalNotice, specForCurrentPage } from '../lib/adapters/ats-2026-07';
+import { atsCanAutoSubmit, clickAtsSubmitIfAllowed, clickDashboardSubmitIfAllowed, isAtsApplicationPage, extractAtsJdText, fillAtsApplication, gatedPortalNotice, specForCurrentPage } from '../lib/adapters/ats-2026-07';
 import { getPortalAccounts, recordPortalAccount } from '../lib/storage';
+import { PendingSubmissionRecoveryGate } from '../lib/submission-recovery';
 import { COLOR, DISMISS_MS, FONT, OVERLAY, RADIUS, SHADOW, markSvg } from '../styles/tokens';
 
 /* Status icons drawn as SVG.
@@ -85,6 +86,9 @@ export default defineContentScript({
     // posting route and /careers/ is BambooHR's; both also cover the JD page, so nothing is lost.
     'https://*.breezy.hr/p/*',
     'https://*.bamboohr.com/careers/*',
+    // Public application routes captured on two unrelated tenants per family on 2026-08-09.
+    'https://*.recruitee.com/o/*',
+    'https://*.teamtailor.com/jobs/*',
     // The four below have no adapter and never will until their gates change. They are matched so
     // Litos can RECOGNISE the page and say plainly why it cannot fill it, which is worth more to a
     // job seeker than a card that never appears. See gatedPortalNotice.
@@ -144,6 +148,7 @@ export default defineContentScript({
     }
 
     const monitoredSubmissionIds = new Set<string>();
+    const pendingRecoveryGate = new PendingSubmissionRecoveryGate();
 
     function visibleSubmissionOutcomeTexts(): string[] {
       const selectors = '[role="alert"], [role="status"], [aria-live], h1, h2, [class*="error" i], [class*="success" i], [class*="confirm" i], [class*="thank" i]';
@@ -200,6 +205,7 @@ export default defineContentScript({
         event.stopImmediatePropagation();
         if (reserving || hasEmptyRequiredFields()) return;
         reserving = true;
+        pendingRecoveryGate.beginLocal(applicationId);
         const baselineTexts = new Set(visibleSubmissionOutcomeTexts());
         chrome.runtime.sendMessage({
           type: 'EXTENSION_SUBMISSION_START',
@@ -207,12 +213,14 @@ export default defineContentScript({
         }, (response: { ok?: boolean; error?: string } | undefined) => {
           reserving = false;
           if (!response?.ok) {
+            pendingRecoveryGate.endLocal(applicationId);
             if (statusEl) statusEl.textContent = response?.error ?? 'Litos could not safely track this submission. Try again.';
             return;
           }
           submitButton.removeEventListener('click', onClick, true);
           submitButton.click();
           monitorExtensionSubmission(applicationId, baselineTexts);
+          pendingRecoveryGate.endLocal(applicationId);
         });
       };
       submitButton.addEventListener('click', onClick, true);
@@ -240,9 +248,10 @@ export default defineContentScript({
     const checkPendingSubmission = (attempt = 0) => {
       chrome.runtime.sendMessage(
         { type: 'GET_PENDING_EXTENSION_SUBMISSION' },
-        (response: { pending?: { applicationId?: string } | null } | undefined) => {
-          if (response?.pending?.applicationId) {
-            monitorExtensionSubmission(response.pending.applicationId);
+        (response: { pending?: { applicationId?: string; startedAt?: number } | null } | undefined) => {
+          const pending = response?.pending;
+          if (pending?.applicationId && pendingRecoveryGate.shouldRecover(pending)) {
+            monitorExtensionSubmission(pending.applicationId);
           } else if (attempt < 60) {
             window.setTimeout(() => checkPendingSubmission(attempt + 1), 500);
           }
@@ -261,7 +270,11 @@ export default defineContentScript({
         sendResponse({ ok: false, error: 'This page is not ready to send any more. Open it and check it.' });
         return false;
       }
-      submitFromDashboard(message.payload?.questions ?? []).then(sendResponse);
+      const applicationId = String(message.payload?.applicationId ?? '');
+      pendingRecoveryGate.beginLocal(applicationId);
+      submitFromDashboard(message.payload?.questions ?? [])
+        .then(sendResponse)
+        .finally(() => pendingRecoveryGate.endLocal(applicationId));
       return true;
     });
 
@@ -1483,7 +1496,7 @@ export default defineContentScript({
         // already on the page, so it is accurate by the time this reads it.
         const autoSubmitHeld =
           autoSubmitOn &&
-          (!finalSubmitBtn || resumeMissing || needsReview || hasEmptyRequiredFields() || document.hidden || captchaWaiting);
+          (!atsCanAutoSubmit(fillResult.ats_name) || !finalSubmitBtn || resumeMissing || needsReview || hasEmptyRequiredFields() || document.hidden || captchaWaiting);
         reportEvent(false);
 
         if (autoSubmitOn && !autoSubmitHeld && finalSubmitBtn) {
@@ -1505,6 +1518,9 @@ export default defineContentScript({
         ];
 
         submitFromDashboard = async (approvedQuestions) => {
+          if (!atsCanAutoSubmit(fillResult.ats_name)) {
+            return { ok: false, error: 'This application needs your direct confirmation on the company page. Nothing was sent.' };
+          }
           if (!finalSubmitBtn || !finalSubmitBtn.isConnected) {
             return { ok: false, error: 'This page no longer has a Submit button. Finish it yourself.' };
           }
@@ -1527,7 +1543,9 @@ export default defineContentScript({
           if (captchaWaiting || detectChallenge().waiting) {
             return { ok: false, error: 'This company asks you to prove you are human. Solve that check on the page, then send it yourself.' };
           }
-          finalSubmitBtn.click();
+          if (!clickDashboardSubmitIfAllowed(fillResult.ats_name, finalSubmitBtn)) {
+            return { ok: false, error: 'This application needs your direct confirmation on the company page. Nothing was sent.' };
+          }
           const started = Date.now();
           while (Date.now() - started < 45_000) {
             const text = document.body.innerText;
@@ -1823,28 +1841,40 @@ export default defineContentScript({
             restoreSubmitButton();
             if (settings?.automatic_submission_enabled === true && stillSafe) {
               if (statusEl) statusEl.textContent = 'Reserving this application safely...';
-              const started = await new Promise<{ ok?: boolean; error?: string }>((resolve) => {
-                chrome.runtime.sendMessage({
-                  type: 'EXTENSION_SUBMISSION_START',
-                  payload: { applicationId, authorization: 'standing_consent' },
-                }, (response) => resolve(response ?? { ok: false, error: 'Litos did not respond.' }));
-              });
-              const safeAfterReservation = target.isConnected && isElementVisible(target) && !document.hidden && document.hasFocus() && !hasEmptyRequiredFields();
-              if (started.ok && safeAfterReservation) {
-                if (statusEl) statusEl.textContent = `${actionLabel}...`;
-                const baselineTexts = new Set(visibleSubmissionOutcomeTexts());
-                target.click();
-                monitorExtensionSubmission(applicationId, baselineTexts);
-                reportEvent(true);
-              } else {
-                if (statusEl) statusEl.textContent = started.error ?? 'The page changed before Litos could submit. Check it yourself.';
-                if (started.ok) {
+              pendingRecoveryGate.beginLocal(applicationId);
+              try {
+                const started = await new Promise<{ ok?: boolean; error?: string }>((resolve) => {
                   chrome.runtime.sendMessage({
-                    type: 'EXTENSION_SUBMISSION_OUTCOME',
-                    payload: { applicationId, outcome: 'unknown', finalUrl: window.location.href },
-                  }).catch(() => {});
+                    type: 'EXTENSION_SUBMISSION_START',
+                    payload: { applicationId, authorization: 'standing_consent' },
+                  }, (response) => resolve(response ?? { ok: false, error: 'Litos did not respond.' }));
+                });
+                const safeAfterReservation = target.isConnected && isElementVisible(target) && !document.hidden && document.hasFocus() && !hasEmptyRequiredFields();
+                if (started.ok && safeAfterReservation) {
+                  if (statusEl) statusEl.textContent = `${actionLabel}...`;
+                  const baselineTexts = new Set(visibleSubmissionOutcomeTexts());
+                  if (!clickAtsSubmitIfAllowed(
+                    fillResult.ats_name,
+                    target,
+                    () => monitorExtensionSubmission(applicationId, baselineTexts),
+                  )) {
+                    if (statusEl) statusEl.textContent = 'This application needs your direct confirmation. Nothing was sent.';
+                    reportEvent(false);
+                    return;
+                  }
+                  reportEvent(true);
+                } else {
+                  if (statusEl) statusEl.textContent = started.error ?? 'The page changed before Litos could submit. Check it yourself.';
+                  if (started.ok) {
+                    chrome.runtime.sendMessage({
+                      type: 'EXTENSION_SUBMISSION_OUTCOME',
+                      payload: { applicationId, outcome: 'unknown', finalUrl: window.location.href },
+                    }).catch(() => {});
+                  }
+                  reportEvent(false);
                 }
-                reportEvent(false);
+              } finally {
+                pendingRecoveryGate.endLocal(applicationId);
               }
             } else {
               if (statusEl) statusEl.textContent = settings?.automatic_submission_enabled === true

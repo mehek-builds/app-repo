@@ -1376,9 +1376,47 @@ export interface GenericFillParams {
   // An exact resume-input selector captured off the real form, when the caller has one. Optional:
   // the generic adapter runs on company-hosted forms where nobody does, and falls back to scoring.
   resumeSelector?: string;
+  // ATS-scoped safety policy. Some providers render privacy or retention consent as an ordinary
+  // radio, select, or checkbox that the generic answer engine would otherwise treat as routine.
+  providerPolicy?: GenericProviderPolicy;
   draftAnswer?: (question: string) => Promise<string | null>;
   signal?: AbortSignal;
   onProgress?: (partial: { fields_filled: number; fields_skipped: number; ai_drafted: number; pendingEssays: number }) => void;
+}
+
+export interface GenericProviderPolicy {
+  provider: 'recruitee' | 'teamtailor';
+  forbidConsentWrites: true;
+}
+
+const PROVIDER_CONSENT_QUESTION =
+  /\b(?:agree|consent|acknowledg\w*|confirm|accept)\b[\s\S]{0,220}\b(?:privacy|personal\s+(?:details|data|information)|process(?:ing)?|store|retain|future\s+(?:jobs?|positions?|vacancies|opportunities))\b|\b(?:keep|store|retain|use|process)\b[\s\S]{0,160}\b(?:my|your)\s+(?:personal\s+)?(?:details|data|information)\b|\b(?:future|other)\s+(?:jobs?|positions?|vacancies|opportunities)\b[\s\S]{0,160}\b(?:contact|keep|store|retain|process|information|data)\b|\bcontact\b[\s\S]{0,160}\b(?:future|other)\s+(?:jobs?|positions?|vacancies|opportunities)\b/i;
+
+function policyForbidsConsentWrite(
+  policy: GenericProviderPolicy | undefined,
+  label: string,
+): boolean {
+  return policy?.forbidConsentWrites === true
+    && (isRoutineApplicantConsentQuestion(label) || PROVIDER_CONSENT_QUESTION.test(label));
+}
+
+export function providerPolicyForbidsControl(
+  policy: GenericProviderPolicy | undefined,
+  control: Element,
+): boolean {
+  if (!policy?.forbidConsentWrites) return false;
+  const name = control.getAttribute('name') ?? '';
+  const supportedShape = control instanceof HTMLSelectElement
+    || (control instanceof HTMLInputElement && /^(?:checkbox|radio)$/i.test(control.type));
+  if (supportedShape) {
+    if (policy.provider === 'recruitee' && /^candidate\.agreements\..+/i.test(name)) return true;
+    if (policy.provider === 'teamtailor' && /^candidate\[consent_given[^\]]*\]$/i.test(name)) return true;
+  }
+  return policyForbidsConsentWrite(policy, `${controlIdentity(control)} ${questionLabel(control)}`);
+}
+
+function providerConsentSkipReason(label: string): string {
+  return `agreement or retention consent left for you to confirm: "${label.slice(0, 50).trim()}"`;
 }
 
 // The identity-first chain's bare name/email/city matchers, hoisted so the R-039 third-party
@@ -1403,6 +1441,26 @@ export async function fillGenericApplication(params: GenericFillParams): Promise
   const skipped_reasons: string[] = [];
   const pendingDrafts: Array<{ el: HTMLTextAreaElement; question: string }> = [];
   const short = (s: string) => s.slice(0, 50).trim();
+  const blockedConsentControls = new Set<Element>();
+  const recordedConsentLabels = new Set<string>();
+  const recordConsentBlock = (label: string) => {
+    const normalized = label.replace(/\s+/g, ' ').trim();
+    if (recordedConsentLabels.has(normalized)) return;
+    recordedConsentLabels.add(normalized);
+    fields_skipped++;
+    skipped_reasons.push(providerConsentSkipReason(normalized));
+  };
+
+  // Preflight every control, including already-checked and visually hidden mirrors. Recruitee may
+  // auto-submit only when a consent gate is absent, so a provider default or a hidden duplicate
+  // must still hold the countdown even though the write loops would normally skip it.
+  if (params.providerPolicy?.forbidConsentWrites) {
+    for (const control of document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>('input, textarea, select')) {
+      if (!providerPolicyForbidsControl(params.providerPolicy, control)) continue;
+      blockedConsentControls.add(control);
+      recordConsentBlock(questionLabel(control) || controlIdentity(control));
+    }
+  }
 
   // Page text for the salary rule's JD sources (a stated range, or a currency, adjacent to
   // salary wording), read lazily once per fill: the generic adapter runs on a company's own
@@ -1422,6 +1480,11 @@ export async function fillGenericApplication(params: GenericFillParams): Promise
     const id = controlIdentity(el);
     const type = (el as HTMLInputElement).type;
     const isTextarea = el instanceof HTMLTextAreaElement;
+
+    if (blockedConsentControls.has(el) || policyForbidsConsentWrite(params.providerPolicy, `${id} ${questionLabel(el)}`)) {
+      recordConsentBlock(questionLabel(el) || id);
+      continue;
+    }
 
     if (NEVER_FILL_PATTERNS.some((re) => re.test(id))) {
       fields_skipped++;
@@ -1603,6 +1666,10 @@ export async function fillGenericApplication(params: GenericFillParams): Promise
     if (select.closest('[id*="litos"]') || select.disabled || !isVisible(select)) continue;
     if (select.selectedIndex > 0 && select.value && !/select|choose|^$/i.test(select.options[select.selectedIndex]?.text ?? '')) continue; // already answered
     const label = questionLabel(select);
+    if (blockedConsentControls.has(select) || policyForbidsConsentWrite(params.providerPolicy, `${controlIdentity(select)} ${label}`)) {
+      recordConsentBlock(label || controlIdentity(select));
+      continue;
+    }
     const options = [...select.options]
       .filter((o) => o.value && !/^(select|choose|please|--)/i.test(o.text.trim()))
       .map((o) => ({ text: o.text, value: o.value }));
@@ -1662,6 +1729,11 @@ export async function fillGenericApplication(params: GenericFillParams): Promise
     }));
     // Derive the question stem AFTER the options, so it can subtract them from the container.
     const label = groupQuestionText(group, options.map((o) => o.text));
+    const policyLabel = `${label} ${group.map((item) => controlIdentity(item)).join(' ')}`;
+    if (group.some((item) => blockedConsentControls.has(item)) || policyForbidsConsentWrite(params.providerPolicy, policyLabel)) {
+      recordConsentBlock(label || policyLabel);
+      continue;
+    }
     // Language questions first (declared-list authority): ZURU's "comfortable communicating in
     // Spanish?" is a radio Yes/No. Refusal guards are re-checked inside languageAnswerPlan, so
     // this ordering cannot answer a work-eligibility or EEO label. Always terminates the group.
@@ -1712,6 +1784,13 @@ export async function fillGenericApplication(params: GenericFillParams): Promise
     (checkboxGroups.get(key) ?? checkboxGroups.set(key, []).get(key)!).push(cb);
   }
   for (const group of checkboxGroups.values()) {
+    const policyLabel = group
+      .map((cb) => `${controlIdentity(cb)} ${questionLabel(cb)}`)
+      .join(' ');
+    if (group.some((item) => blockedConsentControls.has(item)) || policyForbidsConsentWrite(params.providerPolicy, policyLabel)) {
+      recordConsentBlock(policyLabel);
+      continue;
+    }
     if (group.length > 1) {
       const options = group.map((cb) => ({
         text: (document.querySelector(`label[for="${CSS.escape(cb.id)}"]`)?.textContent ??
