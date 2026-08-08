@@ -1,6 +1,6 @@
 import type { AutofillResult } from '../types';
 import { fillField, splitName } from './shared/dom';
-import { fillGenericApplication, type GenericFillParams } from './generic';
+import { fillGenericApplication, type GenericFillParams, type GenericProviderPolicy } from './generic';
 
 // Adapters for the ATS platforms captured on 2026-07-29 (vault:
 // litos-ats-dom-capture-2026-07-29.md). Every selector here came off a real rendered form; none was
@@ -22,7 +22,7 @@ import { fillGenericApplication, type GenericFillParams } from './generic';
 type FieldKey = 'fullName' | 'firstName' | 'lastName' | 'email' | 'phone' | 'city' | 'linkedin' | 'portfolio';
 
 interface AtsSpec {
-  readonly id: 'rippling' | 'breezy' | 'bamboohr';
+  readonly id: 'rippling' | 'breezy' | 'bamboohr' | 'recruitee' | 'teamtailor';
   readonly host: (hostname: string) => boolean;
   readonly isApplicationPath: (pathname: string) => boolean;
   /** Selectors for the fields the profile can answer factually. Absent keys are simply not filled. */
@@ -38,9 +38,46 @@ interface AtsSpec {
   readonly revealConfirms?: string;
   /** Present when the platform stops short of a submit even after a perfect fill. */
   readonly ceiling?: string;
+  /** Enforced by the content-script submit gate, separate from explanatory prose. */
+  readonly autoSubmit: 'conditional' | 'never';
+  readonly genericPolicy?: GenericProviderPolicy;
 }
 
 export const ATS_SPECS: readonly AtsSpec[] = [
+  {
+    id: 'recruitee',
+    host: (h) => /^(?!www\.)[^.]+\.recruitee\.com$/i.test(h),
+    isApplicationPath: (p) => /^\/o\/[^/]+\/c\/new\/?$/i.test(p),
+    fields: {
+      fullName: 'input[name="candidate.name"]',
+      email: 'input[name="candidate.email"]',
+      phone: 'input[name="candidate.phone"]',
+    },
+    resume: 'input[type="file"][name="candidate.cv"]',
+    jd: '[data-cy="offer-description"], main',
+    autoSubmit: 'conditional',
+    genericPolicy: { provider: 'recruitee', forbidConsentWrites: true },
+    // Tenant agreements and SMS consent are intentionally absent. The generic pass leaves
+    // unanswered consent controls for the applicant, and the auto-submit gate fails closed.
+  },
+  {
+    id: 'teamtailor',
+    host: (h) => /^(?!(?:www|app|api|partner|docs|support)\.)[^.]+\.teamtailor\.com$/i.test(h),
+    isApplicationPath: (p) => /^\/jobs\/[^/]+\/applications\/new\/?$/i.test(p),
+    fields: {
+      firstName: 'input[name="candidate[first_name]"]',
+      lastName: 'input[name="candidate[last_name]"]',
+      email: 'input[name="candidate[email]"]',
+      phone: 'input[name="candidate[phone]"]',
+    },
+    resume: '#upload_resume_field input[type="file"]',
+    jd: '[data-job-description], main',
+    autoSubmit: 'never',
+    genericPolicy: { provider: 'teamtailor', forbidConsentWrites: true },
+    ceiling:
+      'This company asks you to confirm its applicant privacy terms before sending. Litos filled the form but left that choice and the send button to you.',
+    // candidate[consent_given] and candidate[consent_given_future_jobs] are deliberately unmapped.
+  },
   {
     id: 'rippling',
     // ats.* only. app.rippling.com is Rippling's HR product, where the equivalent-looking form is an
@@ -57,6 +94,7 @@ export const ATS_SPECS: readonly AtsSpec[] = [
     },
     resume: 'input[type="file"][data-testid="input-resume"]',
     jd: '[data-testid="job-description"], main',
+    autoSubmit: 'conditional',
     // NOT mapped, deliberately: all three of Rippling's comboboxes share ONE data-testid
     // ("input-select-search-input") and are pronouns, phone country code, and "Please identify your
     // race". Two are the applicant's own to declare or decline and the third is part of the phone
@@ -77,6 +115,7 @@ export const ATS_SPECS: readonly AtsSpec[] = [
     },
     resume: 'input[type="file"][name="cResume"]',
     jd: '.description, [class*="job-description"], main',
+    autoSubmit: 'conditional',
     // NOT mapped: textarea[name="cSummary"] is candidate-authored positioning, the same judgement
     // made for Workable's headline. smsConsent and gdprAgreement are consent checkboxes. hp_<hex> is
     // the honeypot, and it is isHoneypotField's job rather than an omission here - see the
@@ -101,6 +140,7 @@ export const ATS_SPECS: readonly AtsSpec[] = [
     // No name and no stable id on the file input; aria-label is the only hook.
     resume: 'input[type="file"][aria-label="file-input"]',
     jd: '.jss-job-description, main',
+    autoSubmit: 'conditional',
     // The fields do not exist in the DOM until this is pressed, and /careers/{id}/apply is blank.
     revealButton: 'button',
     revealButtonText: /apply for this job/i,
@@ -121,6 +161,21 @@ export function specForCurrentPage(): AtsSpec | null {
 export function isAtsApplicationPage(): boolean {
   const spec = specForCurrentPage();
   return spec ? spec.isApplicationPath(window.location.pathname) : false;
+}
+
+export function atsCanAutoSubmit(atsName: string): boolean {
+  const spec = ATS_SPECS.find((item) => item.id === atsName);
+  return spec?.autoSubmit !== 'never';
+}
+
+export function clickAtsSubmitIfAllowed(atsName: string, submitButton: Pick<HTMLElement, 'click'>): boolean {
+  if (!atsCanAutoSubmit(atsName)) return false;
+  submitButton.click();
+  return true;
+}
+
+export function clickDashboardSubmitIfAllowed(atsName: string, submitButton: Pick<HTMLElement, 'click'>): boolean {
+  return clickAtsSubmitIfAllowed(atsName, submitButton);
 }
 
 export function extractAtsJdText(): string {
@@ -197,7 +252,11 @@ export async function fillAtsApplication(params: GenericFillParams): Promise<Aut
   // (neither has a name, id, aria-label or placeholder, and both sit by the same "Drop or select"
   // text) and so picks whichever is first in the DOM. Right today, wrong the day Rippling reorders,
   // and the failure mode is a resume filed as a cover letter.
-  const rest = await fillGenericApplication({ ...params, resumeSelector: spec.resume });
+  const rest = await fillGenericApplication({
+    ...params,
+    resumeSelector: spec.resume,
+    providerPolicy: spec.genericPolicy,
+  });
   return {
     ...rest,
     // Names the real platform rather than inheriting generic's label, so the run's own record says

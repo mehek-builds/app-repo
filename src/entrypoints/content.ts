@@ -8,7 +8,7 @@ import {
 } from '../lib/adapters/workday';
 import { isLinkedInApplicationPage, extractLinkedInJdText, fillLinkedInApplication } from '../lib/adapters/linkedin';
 import { isLikelyApplicationForm, extractGenericJdText, getGenericJobDetails, fillGenericApplication, drainR030CandidateLabels } from '../lib/adapters/generic';
-import { isAtsApplicationPage, extractAtsJdText, fillAtsApplication, gatedPortalNotice, specForCurrentPage } from '../lib/adapters/ats-2026-07';
+import { atsCanAutoSubmit, clickAtsSubmitIfAllowed, clickDashboardSubmitIfAllowed, isAtsApplicationPage, extractAtsJdText, fillAtsApplication, gatedPortalNotice, specForCurrentPage } from '../lib/adapters/ats-2026-07';
 import { getPortalAccounts, recordPortalAccount } from '../lib/storage';
 import { COLOR, DISMISS_MS, FONT, OVERLAY, RADIUS, SHADOW, markSvg } from '../styles/tokens';
 
@@ -85,6 +85,9 @@ export default defineContentScript({
     // posting route and /careers/ is BambooHR's; both also cover the JD page, so nothing is lost.
     'https://*.breezy.hr/p/*',
     'https://*.bamboohr.com/careers/*',
+    // Public application routes captured on two unrelated tenants per family on 2026-08-09.
+    'https://*.recruitee.com/o/*',
+    'https://*.teamtailor.com/jobs/*',
     // The four below have no adapter and never will until their gates change. They are matched so
     // Litos can RECOGNISE the page and say plainly why it cannot fill it, which is worth more to a
     // job seeker than a card that never appears. See gatedPortalNotice.
@@ -1483,7 +1486,7 @@ export default defineContentScript({
         // already on the page, so it is accurate by the time this reads it.
         const autoSubmitHeld =
           autoSubmitOn &&
-          (!finalSubmitBtn || resumeMissing || needsReview || hasEmptyRequiredFields() || document.hidden || captchaWaiting);
+          (!atsCanAutoSubmit(fillResult.ats_name) || !finalSubmitBtn || resumeMissing || needsReview || hasEmptyRequiredFields() || document.hidden || captchaWaiting);
         reportEvent(false);
 
         if (autoSubmitOn && !autoSubmitHeld && finalSubmitBtn) {
@@ -1505,6 +1508,9 @@ export default defineContentScript({
         ];
 
         submitFromDashboard = async (approvedQuestions) => {
+          if (!atsCanAutoSubmit(fillResult.ats_name)) {
+            return { ok: false, error: 'This application needs your direct confirmation on the company page. Nothing was sent.' };
+          }
           if (!finalSubmitBtn || !finalSubmitBtn.isConnected) {
             return { ok: false, error: 'This page no longer has a Submit button. Finish it yourself.' };
           }
@@ -1527,7 +1533,9 @@ export default defineContentScript({
           if (captchaWaiting || detectChallenge().waiting) {
             return { ok: false, error: 'This company asks you to prove you are human. Solve that check on the page, then send it yourself.' };
           }
-          finalSubmitBtn.click();
+          if (!clickDashboardSubmitIfAllowed(fillResult.ats_name, finalSubmitBtn)) {
+            return { ok: false, error: 'This application needs your direct confirmation on the company page. Nothing was sent.' };
+          }
           const started = Date.now();
           while (Date.now() - started < 45_000) {
             const text = document.body.innerText;
@@ -1833,7 +1841,11 @@ export default defineContentScript({
               if (started.ok && safeAfterReservation) {
                 if (statusEl) statusEl.textContent = `${actionLabel}...`;
                 const baselineTexts = new Set(visibleSubmissionOutcomeTexts());
-                target.click();
+                if (!clickAtsSubmitIfAllowed(fillResult.ats_name, target)) {
+                  if (statusEl) statusEl.textContent = 'This application needs your direct confirmation. Nothing was sent.';
+                  reportEvent(false);
+                  return;
+                }
                 monitorExtensionSubmission(applicationId, baselineTexts);
                 reportEvent(true);
               } else {
