@@ -55,6 +55,7 @@ import {
 import { mountThinkingOrb } from '../lib/thinking-orb';
 import { derivePortalPassword, portalKeyForHost, currentSaltFingerprint } from '../lib/portal-password';
 import { automaticSubmissionEnabled } from '../lib/auto-submit-consent';
+import { applicantEmailForGeneratedPacket } from '../lib/applicant-email';
 import {
   WORKDAY_ACCOUNT_PROMPT_BODY,
   WORKDAY_ACCOUNT_PROMPT_TITLE,
@@ -1280,6 +1281,16 @@ export default defineContentScript({
           return;
         }
         const { profile, applicationProfile, resume } = result;
+        const applicantEmail = applicantEmailForGeneratedPacket(resume, profile.email);
+        if (!applicantEmail) {
+          if (statusEl) statusEl.textContent = 'Litos could not preserve one email across the resume and application, so nothing was filled.';
+          generationController.announce('The application email did not save. Try again.');
+          if (yesBtn) {
+            yesBtn.disabled = false;
+            yesBtn.textContent = 'Retry';
+          }
+          return;
+        }
 
         if (!result.resume.quality?.ready_to_attach || result.resume.quality.issues.length > 0) {
           if (statusEl) statusEl.textContent = 'The resume did not come out right, so nothing was attached and nothing was sent.';
@@ -1330,7 +1341,7 @@ export default defineContentScript({
           fillResult = await withInactivityTimeout(
             (reportProgress, signal) => fill({
               fullName: profile.full_name ?? '',
-              email: profile.email,
+              email: applicantEmail,
               profile,
               applicationProfile: fillApplicationProfile,
               resumeBlob,
