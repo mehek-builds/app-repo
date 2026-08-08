@@ -168,9 +168,14 @@ export function atsCanAutoSubmit(atsName: string): boolean {
   return spec?.autoSubmit !== 'never';
 }
 
-export function clickAtsSubmitIfAllowed(atsName: string, submitButton: Pick<HTMLElement, 'click'>): boolean {
+export function clickAtsSubmitIfAllowed(
+  atsName: string,
+  submitButton: Pick<HTMLElement, 'click'>,
+  afterClick?: () => void,
+): boolean {
   if (!atsCanAutoSubmit(atsName)) return false;
   submitButton.click();
+  afterClick?.();
   return true;
 }
 
