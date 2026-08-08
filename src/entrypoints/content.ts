@@ -37,6 +37,7 @@ import {
 import { fetchResumeBlob, resumeFetchSkipReason } from '../lib/resume-fetch';
 import { startHarvest } from '../lib/harvest';
 import { withInactivityTimeout } from '../lib/inactivity-timeout';
+import { asSentence } from '../lib/sentence';
 import type { Profile, ApplicationProfile, AutofillResult, GeneratedResume } from '../lib/types';
 import { detectChallenge, waitForChallengeCleared, watchForChallenge } from '../lib/captcha-detection';
 import type { PostingCompensation } from '../lib/adapters/salary';
@@ -1079,7 +1080,7 @@ export default defineContentScript({
           <div style="display:flex;align-items:flex-start;gap:9px;margin-bottom:12px;line-height:1.4;">
             ${markSvg()}
             <div>
-              <div style="font-weight:500;font-size:13px;color:${COLOR.ink};line-height:1.4;">Fill this application for you?</div>
+              <div id="wp-resume-heading" style="font-weight:500;font-size:13px;color:${COLOR.ink};line-height:1.4;">Fill this application for you?</div>
               <div style="font-size:12px;color:${COLOR.muted};margin-top:2px;word-break:break-word;line-height:1.4;">${escapeHtml(title)} at ${escapeHtml(company)}</div>
             </div>
           </div>
@@ -1270,7 +1271,7 @@ export default defineContentScript({
         // cached per job, so nothing paid for is thrown away; re-opening the card reuses it.
         if (!card.isConnected) return;
         if (!result || result.error || !result.profile || !result.applicationProfile || !result.resume) {
-          if (statusEl) statusEl.textContent = `${result?.error || 'We could not build a resume.'} Nothing was attached or submitted.`;
+          if (statusEl) statusEl.textContent = `${asSentence(result?.error) || 'We could not build a resume.'} Nothing was attached or submitted.`;
           generationController.announce('The resume did not build. Try again.');
           if (yesBtn) {
             yesBtn.disabled = false;
@@ -1543,6 +1544,32 @@ export default defineContentScript({
             : response?.error ?? 'Could not open your review. Nothing was sent.';
         });
       });
+
+      /* The attended handoff: "Finish this one" on the Litos dashboard.
+       *
+       * The dashboard tells the background which portal URLs the applicant is about to be sent to,
+       * and the background hands out each arming exactly once. Landing here on an armed URL means
+       * the applicant has ALREADY said "finish this application" on Litos's own surface, seconds
+       * ago, so asking again is not consent, it is a second obstacle in front of the one thing they
+       * came to do.
+       *
+       * This deliberately clicks the real button rather than calling the fill directly: the entire
+       * consent, resume-quality, review and never-auto-submit path lives behind that handler, and a
+       * second entrance into it is a second thing to keep in step. Nothing here submits anything;
+       * auto-submit remains behind its own separate opt-in.
+       */
+      chrome.runtime.sendMessage(
+        { type: 'CLAIM_HANDOFF', url: window.location.href },
+        (response: { armed?: boolean } | undefined) => {
+          if (chrome.runtime.lastError || !response?.armed) return;
+          if (!card.isConnected) return;
+          const yesBtn = card.querySelector<HTMLButtonElement>('#wp-resume-yes');
+          if (!yesBtn || yesBtn.disabled) return;
+          const heading = card.querySelector<HTMLElement>('#wp-resume-heading');
+          if (heading) heading.textContent = 'Finishing this application';
+          yesBtn.click();
+        },
+      );
     }
 
     const AUTO_SUBMIT_COUNTDOWN_SECONDS = 15;
