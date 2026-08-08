@@ -30,6 +30,7 @@ import { badgeState } from '../lib/badge';
 import { applicantEmailForGeneratedPacket, atsNameForPortalUrl } from '../lib/applicant-email';
 import {
   clearPacketApplicantIdentity,
+  packetIdentityMatchesCurrentRoute,
   readPacketApplicantIdentity,
   storePacketApplicantIdentity,
 } from '../lib/packet-applicant-identity';
@@ -750,11 +751,31 @@ export default defineBackground(() => {
             if (!packetEmail || !applicationId || tabId === undefined || typeof url !== 'string') {
               throw new Error('Litos could not preserve one email across this application, so nothing was filled. Try again.');
             }
+            const routeResponse = await timeoutBackendFetch('/application-email', {}, token);
+            const route = routeResponse.ok
+              ? await routeResponse.json().catch(() => null) as {
+                tracking_active?: unknown;
+                domain?: unknown;
+                route_generation_fingerprint?: unknown;
+              } | null
+              : null;
+            const routeFingerprint = route?.route_generation_fingerprint;
+            if (
+              typeof routeFingerprint !== 'string'
+              || !packetIdentityMatchesCurrentRoute({
+                applicationId,
+                email: packetEmail,
+                routeFingerprint,
+              }, route ?? {})
+            ) {
+              throw new Error('Litos could not verify the current application email route, so nothing was filled. Try again.');
+            }
             await storePacketApplicantIdentity({
               tabId,
               applicationId,
               email: packetEmail,
               portalUrl: url,
+              routeFingerprint,
             });
             void trackExtensionEvent('application_generation_completed');
             sendResponse({ ...result, posting_compensation: await compensationPromise });
@@ -813,6 +834,18 @@ export default defineBackground(() => {
               : await readPacketApplicantIdentity({ tabId, portalUrl });
             if (!identity) {
               sendResponse({ error: 'Litos has not prepared this application email yet. Return to the job page and prepare the application first.' });
+              return;
+            }
+            const routeResponse = await timeoutBackendFetch('/application-email', {}, token);
+            const route = routeResponse.ok
+              ? await routeResponse.json().catch(() => null) as {
+                tracking_active?: unknown;
+                domain?: unknown;
+                route_generation_fingerprint?: unknown;
+              } | null
+              : null;
+            if (!route || !packetIdentityMatchesCurrentRoute(identity, route)) {
+              sendResponse({ error: 'The Litos application email route changed after this application was prepared. Regenerate it before creating the employer account.' });
               return;
             }
             sendResponse({ email: identity.email, applicationId: identity.applicationId });
