@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { ageOfMajorityAnswer, desiredAnswer, isDraftableQuestion, linkQuestion, locationQuestion, matchOption, eeoAnswer, unreadableQuestionSkipReason, WORK_ELIGIBILITY_QUESTION, type Desired } from './generic';
+import { ageOfMajorityAnswer, desiredAnswer, isDraftableQuestion, linkQuestion, locationQuestion, matchOption, eeoAnswer, namesTheCompanySite, unreadableQuestionSkipReason, WORK_ELIGIBILITY_QUESTION, type Desired } from './generic';
 import { firstNonEmptyText } from './shared/dom';
+import { skippedReasonsNeedReview } from '../autosubmit-gate';
 // desiredAnswer/matchOption/eeoAnswer remain exported from generic; commitChoice (the shared
 // radio/checkbox commit that every adapter now routes through) lives in ./shared/dom.
 import type { ApplicationProfile } from '../types';
@@ -451,6 +452,170 @@ describe('linkQuestion', () => {
     // ...and the referral question still resolves as a referral.
     expect(desiredAnswer('how did you hear about us? (e.g. linkedin, referral, job board)',
       ap({ referral_source_default: 'LinkedIn' }), {})).toMatchObject({ mode: 'oneof' });
+  });
+});
+
+describe('referral source never invents a channel the profile does not store', () => {
+  // "How did you hear about us?" is a factual claim about THIS application. With
+  // referral_source_default unset - which is how the owner's own profile ships - the answer used
+  // to walk "company website" -> "company careers" -> "careers page" -> "company site" before
+  // reaching "other", so every fill asserted she came through the careers page, including on
+  // postings found via a job board or a referral. Nothing in the profile supports that sentence.
+  const REFERRAL_LABEL = 'how did you hear about us?';
+  const INVENTED = ['company website', 'company careers', 'careers page', 'company site'];
+
+  const valuesOf = (d: Desired): string[] => (d as { values: string[] }).values;
+
+  it('claims nothing at all when no referral source is stored', () => {
+    // No values, just the catch-all flag. The first version of this fix passed the literal string
+    // 'other' as a value; see the catch-all matrix below for what that actually selected.
+    expect(desiredAnswer(REFERRAL_LABEL, ap(), {})).toEqual({ mode: 'oneof', values: [], catchall: true });
+  });
+
+  it('names no company-website channel on any unset-profile referral phrasing', () => {
+    for (const label of [
+      'how did you hear about us?',
+      'how did you first hear about this role?',
+      'referral source',
+      'how did you hear about this opportunity? linkedin / indeed / other',
+    ]) {
+      const values = valuesOf(desiredAnswer(label, ap(), {}));
+      for (const claim of INVENTED) expect(values, `${label} -> ${claim}`).not.toContain(claim);
+    }
+  });
+
+  it('leaves the question for the student when the form has no "Other" option', () => {
+    // The live shape of the bug: a form that lists real channels and no catch-all. Before, the
+    // first fallback landed "Company website" confidently; now nothing matches, and the caller's
+    // "dropdown left for you" reason is what the student sees instead.
+    const options = opts('LinkedIn', 'Indeed', 'Company website', 'Employee referral');
+    expect(matchOption(options, desiredAnswer(REFERRAL_LABEL, ap(), {}))).toBeNull();
+  });
+
+  it('holds the auto-submit countdown on the reason that replaces the invented answer', () => {
+    // The refusal is only safe because the caller's skip reason carries "left for", the phrase
+    // autosubmit-gate's REVIEW_FLAG matches. Asserted here so a reworded reason cannot quietly
+    // turn a flagged referral question into a silent blank that auto-submits.
+    expect(skippedReasonsNeedReview([`dropdown left for you: "${REFERRAL_LABEL}"`])).toBe(true);
+    expect(skippedReasonsNeedReview([`radio question left for you: "${REFERRAL_LABEL}"`])).toBe(true);
+  });
+
+  it('still picks "Other" when the form offers one', () => {
+    const options = opts('LinkedIn', 'Job board', 'Other');
+    expect(matchOption(options, desiredAnswer(REFERRAL_LABEL, ap(), {}))?.text).toBe('Other');
+  });
+
+  it('treats an empty, whitespace, or zero-width stored value as unset rather than as an answer', () => {
+    // The zero-width case is not academic: values[0] is what adapters type into a combobox as the
+    // typeahead query, so a lone U+200B surviving the guard gets typed into a live form field.
+    for (const blank of ['', '   ', '​', ' ​ ﻿ ', ' ']) {
+      expect(desiredAnswer(REFERRAL_LABEL, ap({ referral_source_default: blank }), {}), JSON.stringify(blank))
+        .toEqual({ mode: 'oneof', values: [], catchall: true });
+    }
+  });
+
+  it('keeps the synonym widening for a value the student actually stored', () => {
+    const values = valuesOf(desiredAnswer(REFERRAL_LABEL, ap({ referral_source_default: 'Company website' }), {}));
+    expect(values[0]).toBe('Company website');
+    expect(values).toContain('careers page');
+    expect(matchOption(opts('LinkedIn', 'Careers page', 'Other'), desiredAnswer(REFERRAL_LABEL,
+      ap({ referral_source_default: 'Company website' }), {}))?.text).toBe('Careers page');
+  });
+
+  it('answers a stored referral source with the value the student wrote, first', () => {
+    expect(valuesOf(desiredAnswer(REFERRAL_LABEL, ap({ referral_source_default: 'LinkedIn' }), {}))[0])
+      .toBe('LinkedIn');
+  });
+
+  // Second half of the same defect: a stored value used to license the WHOLE fallback list, so a
+  // student who found the job on LinkedIn and met a form without a LinkedIn option was answered
+  // "Company website" anyway. Same invented fact as the unset branch, only harder to see.
+  it('never widens a stored channel into a different channel', () => {
+    for (const source of ['LinkedIn', 'Indeed', 'A friend', 'University career fair', 'Glassdoor']) {
+      const values = valuesOf(desiredAnswer(REFERRAL_LABEL, ap({ referral_source_default: source }), {}));
+      expect(values, source).toEqual([source]);
+      for (const claim of INVENTED) expect(values, `${source} -> ${claim}`).not.toContain(claim);
+    }
+  });
+
+  it('leaves a stored channel the form does not list for the student, rather than substituting one', () => {
+    const desired = desiredAnswer(REFERRAL_LABEL, ap({ referral_source_default: 'LinkedIn' }), {});
+    expect(matchOption(opts('Indeed', 'Company website', 'Employee referral'), desired)).toBeNull();
+    // With a catch-all present the answer is "Other", which is true by construction: the channel
+    // she stored is not on this list.
+    expect(matchOption(opts('Indeed', 'Company website', 'Other'), desired)?.text).toBe('Other');
+    // And the form that does list it still gets the real answer.
+    expect(matchOption(opts('LinkedIn', 'Indeed', 'Other'), desired)?.text).toBe('LinkedIn');
+  });
+
+  it('widens only wordings that name the same channel the student stored', () => {
+    // These all mean "I found it on the employer's own site", so a form wording the option
+    // differently is a spelling difference, not a different answer. Each entry also exercises one
+    // step of the normalizer: a typographic apostrophe, a leading article behind whitespace,
+    // punctuation, a doubled space.
+    for (const source of [
+      'Company website',
+      'Careers page',
+      "The company's careers page",
+      'The company’s careers page',
+      '  The company´s careers page  ',
+      'Company Website.',
+      'careers-page',
+      'company  website',
+      'career site',
+    ]) {
+      expect(namesTheCompanySite(source), source).toBe(true);
+      expect(matchOption(opts('LinkedIn', 'Careers page', 'Other'),
+        desiredAnswer(REFERRAL_LABEL, ap({ referral_source_default: source }), {}))?.text, source).toBe('Careers page');
+    }
+    // Near misses, not far ones. Each is a word away from the allowlist, so any reimplementation
+    // as a loose regex (/website|careers?/) fails here rather than silently widening "my portfolio
+    // website" into a claim that she came through the employer's careers page.
+    for (const source of [
+      'LinkedIn', 'Indeed', 'A friend', 'Job board', 'Recruiter', 'Twitter',
+      'Website', 'web site', 'careers',
+      'personal website', 'my website', 'portfolio website',
+      'company blog', 'LinkedIn company page', 'recruiter website',
+    ]) {
+      expect(namesTheCompanySite(source), source).toBe(false);
+    }
+  });
+
+  // The catch-all is a MATCHING RULE, not a value, and this matrix is why. Passing the literal
+  // string 'other' as a oneof value routes it through matchOption's word-boundary widening, where
+  // \bother\b hits "Other referral" and "Other job board" just as readily as "Other" - and a
+  // single hit commits, filled, with no skip reason. Measured on the first version of this fix.
+  it('accepts only a catch-all that names no channel', () => {
+    const desired = desiredAnswer(REFERRAL_LABEL, ap(), {});
+    for (const [options, expected] of [
+      [['LinkedIn', 'Other'], 'Other'],
+      [['LinkedIn', 'Other (please specify)'], 'Other (please specify)'],
+      [['LinkedIn', 'Other, please specify'], 'Other, please specify'],
+      [['LinkedIn', 'Other - please specify'], 'Other - please specify'],
+      [['LinkedIn', 'Other:'], 'Other:'],
+      [['LinkedIn', 'Others'], 'Others'],
+      // Every one of these NAMES A CHANNEL. Selecting one is the invention, wearing "Other" as a
+      // prefix. They must go to the student instead.
+      [['LinkedIn', 'Indeed', 'Other job board'], null],
+      [['LinkedIn', 'Employee referral', 'Other referral'], null],
+      [['Company website', 'Other job boards'], null],
+      [['Job boards (Other)', 'LinkedIn'], null],
+      [['LinkedIn', 'Other social media'], null],
+      [['LinkedIn', 'Other source'], null],
+      // No catch-all at all, and ambiguity, both go to the student.
+      [['LinkedIn', 'Indeed', 'Company website', 'Employee referral'], null],
+      [['Other', 'Other (please specify)'], null],
+    ] as Array<[string[], string | null]>) {
+      expect(matchOption(opts(...options), desired)?.text ?? null, options.join(' | ')).toBe(expected);
+    }
+  });
+
+  it('keeps the catch-all behind a stored value, and never ahead of it', () => {
+    const desired = desiredAnswer(REFERRAL_LABEL, ap({ referral_source_default: 'LinkedIn' }), {});
+    expect(matchOption(opts('LinkedIn', 'Other'), desired)?.text).toBe('LinkedIn');
+    expect(matchOption(opts('Indeed', 'Other'), desired)?.text).toBe('Other');
+    // The stored value must not reach a channel-naming "Other ..." either.
+    expect(matchOption(opts('Indeed', 'Other job board'), desired)).toBeNull();
   });
 });
 
