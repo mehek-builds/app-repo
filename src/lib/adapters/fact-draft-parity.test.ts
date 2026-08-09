@@ -20,8 +20,9 @@ import type { ApplicationProfile, Profile } from '../types';
 // date of birth, school, degree, graduation date, citizenship and phone each came back as an
 // LLM-authored paragraph asserting a fact the student never recorded.
 //
-// Location was already covered by locationQuestion and GPA/major by gradeQuestion, which is the
-// same doctrine arrived at one field at a time; this guard generalises it.
+// The guard covers the referral question only. Two earlier versions tried to cover every
+// ProfileKey and were measured failing in both directions; see REFERRAL_FACT in generic.ts for the
+// corpus that settled it. The essay cases below are the ones those versions blanked.
 
 const RECT = {
   width: 200, height: 24, top: 0, left: 0, right: 200, bottom: 24, x: 0, y: 0,
@@ -60,23 +61,26 @@ const ADAPTERS: Array<[name: string, wrap: (q: string) => string, fill: Fill]> =
   ['workday', (q) => `<fieldset><legend>${q}</legend><textarea></textarea></fieldset>`, fillWorkdayApplication as unknown as Fill],
 ];
 
-// Every one of these drafted a paragraph on every adapter before the fix.
+// Every one of these drafted a paragraph on every adapter before the guard existed.
 const FACTS = [
   'How did you hear about us?',
-  'What is your date of birth?',
-  'What school do you attend?',
-  'What degree are you pursuing?',
-  'What is your expected graduation date?',
-  'What is your country of citizenship?',
-  'What is your phone number?',
-];
-
-// A prompt that merely contains a field word is still an essay. Blanking one is its own failure,
+  'How did you first hear about this position?',
+  'Where did you hear about this job?',
+  'Who referred you?',
+  'How did you come across this posting?',
+];// A prompt that merely contains a field word is still an essay. Blanking one is its own failure,
 // so the refusal has to be scoped, not blanket.
 const ESSAYS = [
   'Why do you want to work here?',
   'Tell us about a project you worked on at school',
   'Describe your degree and how it prepared you for this role',
+  // NB: GPA- and location-themed essays are NOT listed here. gradeQuestion and locationQuestion
+  // intercept those labels on these five adapters before this guard runs, which is pre-existing
+  // behaviour verified against main. The helper test in referral-textarea-draft.test.ts covers
+  // those cases for THIS guard.
+  'Share an example of a project where you had to learn something new quickly',
+  'Tell us about a time you solved a hard problem',
+  'What is the source of your motivation to build things?',
 ];
 
 async function fillOne(wrap: (q: string) => string, fill: Fill, question: string) {
@@ -98,16 +102,25 @@ async function fillOne(wrap: (q: string) => string, fill: Fill, question: string
   return { drafted, result, textarea: document.querySelector('textarea') };
 }
 
-describe.each(ADAPTERS)('%s: a fact the profile owns is never AI-drafted', (name, wrap, fill) => {
+describe.each(ADAPTERS)('%s: a referral question is never AI-drafted', (name, wrap, fill) => {
   it.each(FACTS)('leaves "%s" for the student', async (question) => {
     const { drafted, result, textarea } = await fillOne(wrap, fill, question);
 
     expect(drafted, `${name} sent the question to the drafter`).toEqual([]);
     expect(textarea?.value).toBe('');
-    // The reason has to hold the auto-submit countdown, or the field goes blank into a submit.
-    // Read what the adapter emitted rather than restating it: a reworded reason that no longer
-    // matches REVIEW_FLAG would otherwise leave this suite green.
-    expect(skippedReasonsNeedReview(result.skipped_reasons), `${name} emitted no review-holding reason for "${question}": ${JSON.stringify(result.skipped_reasons)}`)
+    // Anchor to THIS question's reason, not to "some reason in the list holds the countdown".
+    // Review caught the looser form: an unrelated review reason from an earlier adapter branch
+    // (a resume warning, a consent flag) satisfied skippedReasonsNeedReview on its own, so the
+    // assertion would have passed even if the fact reason was never emitted.
+    const reason = result.skipped_reasons.find((r) => r.toLowerCase().includes(question.toLowerCase().slice(0, 20)));
+    expect(reason, `${name} emitted no reason naming "${question}": ${JSON.stringify(result.skipped_reasons)}`)
+      .toBeTruthy();
+    // Assert the PROPERTY (this reason holds the countdown), not a specific phrase. Two different
+    // code paths legitimately answer these labels: the new fact guard emits "left for", while a
+    // referral question on these five is caught earlier by the pre-existing `known` branch and
+    // emits "no matching control, left blank". Both satisfy REVIEW_FLAG; pinning the wording would
+    // fail on a correct path.
+    expect(skippedReasonsNeedReview([reason!]), `${name}'s reason does not hold the countdown: ${reason}`)
       .toBe(true);
   });
 
