@@ -180,6 +180,9 @@ function groupQuestionText(group: HTMLInputElement[], optionTexts: string[]): st
 // Drive a combobox / react-select control to the desired answer: open it, read its rendered
 // options, and click the match. Returns 'filled' on a confident selection, 'skipped' otherwise
 // (menu never opened, or no option matched - better to leave it for the student than guess).
+// Both skips go through closeOpenCombobox, which RETRACTS the typeahead query openCombobox typed
+// to open the menu: a skip that left that text in the box reported "dropdown left for you" about a
+// field the student sees as full, and submitted the query as the answer on a plain combobox.
 async function fillComboboxFor(trigger: HTMLElement, desired: Desired): Promise<'filled' | 'skipped'> {
   if (!desired) return 'skipped';
   const typeahead =

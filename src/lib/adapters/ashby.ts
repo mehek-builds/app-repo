@@ -122,7 +122,9 @@ async function writeReactText(el: HTMLInputElement | HTMLTextAreaElement, value:
 
 // Drive a react-select / listbox combobox to the desired answer: open it, read the rendered
 // options, click the confident match. Returns false (never guesses) when the menu never opens or
-// no option matches, dismissing any open portal first.
+// no option matches, dismissing any open portal first - and retracting the typeahead query
+// openCombobox typed to open it, so a skipped field is left EMPTY rather than holding Litos's
+// uncommitted query (see closeOpenCombobox).
 async function fillCombobox(trigger: HTMLElement, desired: Desired): Promise<boolean> {
   if (!desired) return false;
   const typeahead =
