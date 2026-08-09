@@ -1280,19 +1280,35 @@ export function desiredAnswer(label: string, ap: ApplicationProfile, eeo: Record
 
     // The option set varies wildly per form (LinkedIn, Company website, Job board, Other, ...), so
     // a single value rarely matches. Try the student's own answer, then near-synonyms, then
-    // "Other" as the safe catch-all. No value guard: the fallbacks stand on their own.
-    case 'referral_source_default':
+    // "Other" as the safe catch-all.
+    //
+    // "No value guard: the fallbacks stand on their own" was the defect. "How did you hear about
+    // us?" asks for a FACT about this application, and the first four fallbacks answer it:
+    // "Company website" says she went to the careers page and found the posting there. No stored
+    // column says that. The owner's own profile leaves referral_source_default unset, so the
+    // guardless branch was the one that actually shipped - every fill claimed a channel nobody
+    // recorded, and claimed the same one on postings found through a job board or a referral. The
+    // backend's corpus sweep deleted this exact constant on its side; this is the extension half.
+    //
+    // Unset now offers "Other" ALONE, because "Other" is the one option that asserts nothing about
+    // the channel - a non-claim, not a cheaper claim. When the form offers no such option
+    // matchOption returns null, and the caller's own reason ("dropdown left for you" / "radio
+    // question left for you" / "unrecognized field left blank") holds the auto-submit countdown:
+    // "left for" is what autosubmit-gate's REVIEW_FLAG matches, the same load-bearing phrase as
+    // R-010's. A referral question left for the student costs her one click; an invented source is
+    // a false statement on a real application.
+    case 'referral_source_default': {
+      // Trimmed, because an empty string is an unset field wearing a value's clothes - the shape
+      // the old `.filter(Boolean)` handled and a bare `?? undefined` would not.
+      const stored = ap.referral_source_default?.trim();
+      if (!stored) return { mode: 'oneof', values: ['other'] };
+      // A value the student actually stored keeps the widening unchanged: the synonyms exist so a
+      // stored "Company website" still matches a form that words the same option "Careers page".
       return {
         mode: 'oneof',
-        values: [
-          ap.referral_source_default,
-          'company website',
-          'company careers',
-          'careers page',
-          'company site',
-          'other',
-        ].filter(Boolean) as string[],
+        values: [stored, 'company website', 'company careers', 'careers page', 'company site', 'other'],
       };
+    }
 
     // Salary answers route through the R-031 rule rather than the bare stored value: a range
     // stated in the label fills its MEDIAN (currency-safe by construction), a stored prose answer

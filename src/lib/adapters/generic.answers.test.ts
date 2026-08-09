@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { ageOfMajorityAnswer, desiredAnswer, isDraftableQuestion, linkQuestion, locationQuestion, matchOption, eeoAnswer, unreadableQuestionSkipReason, WORK_ELIGIBILITY_QUESTION, type Desired } from './generic';
 import { firstNonEmptyText } from './shared/dom';
+import { skippedReasonsNeedReview } from '../autosubmit-gate';
 // desiredAnswer/matchOption/eeoAnswer remain exported from generic; commitChoice (the shared
 // radio/checkbox commit that every adapter now routes through) lives in ./shared/dom.
 import type { ApplicationProfile } from '../types';
@@ -451,6 +452,73 @@ describe('linkQuestion', () => {
     // ...and the referral question still resolves as a referral.
     expect(desiredAnswer('how did you hear about us? (e.g. linkedin, referral, job board)',
       ap({ referral_source_default: 'LinkedIn' }), {})).toMatchObject({ mode: 'oneof' });
+  });
+});
+
+describe('referral source never invents a channel the profile does not store', () => {
+  // "How did you hear about us?" is a factual claim about THIS application. With
+  // referral_source_default unset - which is how the owner's own profile ships - the answer used
+  // to walk "company website" -> "company careers" -> "careers page" -> "company site" before
+  // reaching "other", so every fill asserted she came through the careers page, including on
+  // postings found via a job board or a referral. Nothing in the profile supports that sentence.
+  const REFERRAL_LABEL = 'how did you hear about us?';
+  const INVENTED = ['company website', 'company careers', 'careers page', 'company site'];
+
+  const valuesOf = (d: Desired): string[] => (d as { values: string[] }).values;
+
+  it('offers "Other" alone when no referral source is stored', () => {
+    expect(desiredAnswer(REFERRAL_LABEL, ap(), {})).toEqual({ mode: 'oneof', values: ['other'] });
+  });
+
+  it('names no company-website channel on any unset-profile referral phrasing', () => {
+    for (const label of [
+      'how did you hear about us?',
+      'how did you first hear about this role?',
+      'referral source',
+      'how did you hear about this opportunity? linkedin / indeed / other',
+    ]) {
+      const values = valuesOf(desiredAnswer(label, ap(), {}));
+      for (const claim of INVENTED) expect(values, `${label} -> ${claim}`).not.toContain(claim);
+    }
+  });
+
+  it('leaves the question for the student when the form has no "Other" option', () => {
+    // The live shape of the bug: a form that lists real channels and no catch-all. Before, the
+    // first fallback landed "Company website" confidently; now nothing matches, and the caller's
+    // "dropdown left for you" reason is what the student sees instead.
+    const options = opts('LinkedIn', 'Indeed', 'Company website', 'Employee referral');
+    expect(matchOption(options, desiredAnswer(REFERRAL_LABEL, ap(), {}))).toBeNull();
+  });
+
+  it('holds the auto-submit countdown on the reason that replaces the invented answer', () => {
+    // The refusal is only safe because the caller's skip reason carries "left for", the phrase
+    // autosubmit-gate's REVIEW_FLAG matches. Asserted here so a reworded reason cannot quietly
+    // turn a flagged referral question into a silent blank that auto-submits.
+    expect(skippedReasonsNeedReview([`dropdown left for you: "${REFERRAL_LABEL}"`])).toBe(true);
+    expect(skippedReasonsNeedReview([`radio question left for you: "${REFERRAL_LABEL}"`])).toBe(true);
+  });
+
+  it('still picks "Other" when the form offers one', () => {
+    const options = opts('LinkedIn', 'Job board', 'Other');
+    expect(matchOption(options, desiredAnswer(REFERRAL_LABEL, ap(), {}))?.text).toBe('Other');
+  });
+
+  it('treats an empty stored value as unset rather than as an answer', () => {
+    expect(desiredAnswer(REFERRAL_LABEL, ap({ referral_source_default: '   ' }), {}))
+      .toEqual({ mode: 'oneof', values: ['other'] });
+  });
+
+  it('keeps the synonym widening for a value the student actually stored', () => {
+    const values = valuesOf(desiredAnswer(REFERRAL_LABEL, ap({ referral_source_default: 'Company website' }), {}));
+    expect(values[0]).toBe('Company website');
+    expect(values).toContain('careers page');
+    expect(matchOption(opts('LinkedIn', 'Careers page', 'Other'), desiredAnswer(REFERRAL_LABEL,
+      ap({ referral_source_default: 'Company website' }), {}))?.text).toBe('Careers page');
+  });
+
+  it('answers a stored referral source with the value the student wrote, first', () => {
+    expect(valuesOf(desiredAnswer(REFERRAL_LABEL, ap({ referral_source_default: 'LinkedIn' }), {}))[0])
+      .toBe('LinkedIn');
   });
 });
 
