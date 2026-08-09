@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { ageOfMajorityAnswer, desiredAnswer, isDraftableQuestion, linkQuestion, locationQuestion, matchOption, eeoAnswer, unreadableQuestionSkipReason, WORK_ELIGIBILITY_QUESTION, type Desired } from './generic';
+import { ageOfMajorityAnswer, desiredAnswer, isDraftableQuestion, linkQuestion, locationQuestion, matchOption, eeoAnswer, namesTheCompanySite, unreadableQuestionSkipReason, WORK_ELIGIBILITY_QUESTION, type Desired } from './generic';
 import { firstNonEmptyText } from './shared/dom';
 import { skippedReasonsNeedReview } from '../autosubmit-gate';
 // desiredAnswer/matchOption/eeoAnswer remain exported from generic; commitChoice (the shared
@@ -519,6 +519,40 @@ describe('referral source never invents a channel the profile does not store', (
   it('answers a stored referral source with the value the student wrote, first', () => {
     expect(valuesOf(desiredAnswer(REFERRAL_LABEL, ap({ referral_source_default: 'LinkedIn' }), {}))[0])
       .toBe('LinkedIn');
+  });
+
+  // Second half of the same defect: a stored value used to license the WHOLE fallback list, so a
+  // student who found the job on LinkedIn and met a form without a LinkedIn option was answered
+  // "Company website" anyway. Same invented fact as the unset branch, only harder to see.
+  it('never widens a stored channel into a different channel', () => {
+    for (const source of ['LinkedIn', 'Indeed', 'A friend', 'University career fair', 'Glassdoor']) {
+      const values = valuesOf(desiredAnswer(REFERRAL_LABEL, ap({ referral_source_default: source }), {}));
+      expect(values, source).toEqual([source, 'other']);
+      for (const claim of INVENTED) expect(values, `${source} -> ${claim}`).not.toContain(claim);
+    }
+  });
+
+  it('leaves a stored channel the form does not list for the student, rather than substituting one', () => {
+    const desired = desiredAnswer(REFERRAL_LABEL, ap({ referral_source_default: 'LinkedIn' }), {});
+    expect(matchOption(opts('Indeed', 'Company website', 'Employee referral'), desired)).toBeNull();
+    // With a catch-all present the answer is "Other", which is true by construction: the channel
+    // she stored is not on this list.
+    expect(matchOption(opts('Indeed', 'Company website', 'Other'), desired)?.text).toBe('Other');
+    // And the form that does list it still gets the real answer.
+    expect(matchOption(opts('LinkedIn', 'Indeed', 'Other'), desired)?.text).toBe('LinkedIn');
+  });
+
+  it('widens only wordings that name the same channel the student stored', () => {
+    // These all mean "I found it on the employer's own site", so a form wording the option
+    // differently is a spelling difference, not a different answer.
+    for (const source of ['Company website', 'Careers page', "The company's careers page", 'career site', 'Website']) {
+      expect(namesTheCompanySite(source), source).toBe(true);
+      expect(matchOption(opts('LinkedIn', 'Careers page', 'Other'),
+        desiredAnswer(REFERRAL_LABEL, ap({ referral_source_default: source }), {}))?.text, source).toBe('Careers page');
+    }
+    for (const source of ['LinkedIn', 'Indeed', 'A friend', 'Job board', 'Recruiter', 'Twitter']) {
+      expect(namesTheCompanySite(source), source).toBe(false);
+    }
   });
 });
 

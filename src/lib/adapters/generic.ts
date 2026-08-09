@@ -467,6 +467,50 @@ export type LinkQuestion = { field: 'linkedin' | 'github' | 'portfolio'; url?: s
 // desiredAnswer (to answer them), so the two can never drift apart on what counts as a referral.
 export const REFERRAL_QUESTION = /how did you .*hear|how did you hear|first hear|referral source|hear about (this|us|the)|source of/i;
 
+// The wordings a form uses for ONE channel: the employer's own site. A referral answer widens
+// along this list and nowhere else, because widening is only sound between spellings of the same
+// fact. "Company website" -> "Careers page" restates the stored answer; "LinkedIn" -> "Company
+// website" replaces it with a different one, which is the R-118 invention wearing a stored value
+// as cover. Kept as literal wordings rather than a loose regex so the set cannot quietly grow to
+// cover a channel it was never meant to speak for; anything outside it degrades to the stored
+// value plus "Other", which is safe.
+const COMPANY_SITE_SYNONYMS = ['company website', 'company careers', 'careers page', 'company site'];
+
+// Wordings a student may have typed that MEAN the employer's own site, which is a wider set than
+// the option spellings above (nobody types "company careers" into a settings field, but "the
+// company's careers page" is ordinary). Matching is on a normalized form, and a miss is cheap:
+// the answer falls back to the stored value plus "Other" rather than to a different channel.
+const COMPANY_SITE_STORED_WORDINGS = new Set([
+  ...COMPANY_SITE_SYNONYMS,
+  'company web site',
+  'company careers page',
+  'company careers site',
+  'company career page',
+  'company job page',
+  'careers site',
+  'careers portal',
+  'careers webpage',
+  'career page',
+  'career site',
+  'employer website',
+  'employer site',
+  'job posting on company website',
+  'website',
+  'web site',
+  'careers',
+]);
+
+export function namesTheCompanySite(stored: string): boolean {
+  const normalized = stored
+    .toLowerCase()
+    .replace(/['’]s\b/g, '') // "the company's careers page" -> "the company careers page"
+    .replace(/^the\s+/, '')
+    .replace(/[^a-z ]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return COMPANY_SITE_STORED_WORDINGS.has(normalized);
+}
+
 // "When can you start", broadened by R-014: "starting date" / "earliest possible starting date"
 // (Enpal's verbatim label) matched neither "start date" nor "earliest start". Hoisted out of
 // desiredAnswer so classifyField reads the SAME regex - two copies would drift, and the drift is
@@ -1302,12 +1346,16 @@ export function desiredAnswer(label: string, ap: ApplicationProfile, eeo: Record
       // the old `.filter(Boolean)` handled and a bare `?? undefined` would not.
       const stored = ap.referral_source_default?.trim();
       if (!stored) return { mode: 'oneof', values: ['other'] };
-      // A value the student actually stored keeps the widening unchanged: the synonyms exist so a
-      // stored "Company website" still matches a form that words the same option "Careers page".
-      return {
-        mode: 'oneof',
-        values: [stored, 'company website', 'company careers', 'careers page', 'company site', 'other'],
-      };
+      // A stored value does not license the whole list either. The synonyms are spellings of ONE
+      // channel (see COMPANY_SITE_SYNONYMS), so they may stand in for a stored "Company website"
+      // and for nothing else: a student who stored "LinkedIn" and meets a form with no LinkedIn
+      // option was, until now, answered "Company website" - the same invented fact as the unset
+      // branch, just harder to see because a value WAS stored.
+      // Every other stored answer gets itself, then "Other", which stays true by construction: it
+      // says the channel is not on this list, which is exactly what happened.
+      return namesTheCompanySite(stored)
+        ? { mode: 'oneof', values: [stored, ...COMPANY_SITE_SYNONYMS, 'other'] }
+        : { mode: 'oneof', values: [stored, 'other'] };
     }
 
     // Salary answers route through the R-031 rule rather than the bare stored value: a range
