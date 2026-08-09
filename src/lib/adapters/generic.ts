@@ -245,7 +245,7 @@ export function getGenericJobDetails(): { title: string; company: string } {
 
 export type Desired =
   | { mode: 'value'; value: string; exact?: true }
-  | { mode: 'oneof'; values: string[]; exact?: true }
+  | { mode: 'oneof'; values: string[]; exact?: true; catchall?: true }
   | { mode: 'yes' }
   | { mode: 'no' }
   | { mode: 'decline' }
@@ -479,7 +479,13 @@ const COMPANY_SITE_SYNONYMS = ['company website', 'company careers', 'careers pa
 // Wordings a student may have typed that MEAN the employer's own site, which is a wider set than
 // the option spellings above (nobody types "company careers" into a settings field, but "the
 // company's careers page" is ordinary). Matching is on a normalized form, and a miss is cheap:
-// the answer falls back to the stored value plus "Other" rather than to a different channel.
+// the answer falls back to the stored value plus a catch-all rather than to a different channel.
+//
+// EVERY ENTRY MUST NAME THE EMPLOYER OR THE CAREERS SURFACE. A bare "website" / "careers" was
+// here and came out in review: a student who typed "Website" may have meant the job board's site
+// or a link a recruiter sent, and widening that into "Careers page" asserts she came through the
+// employer's own site. That is the invention this whole rule exists to stop, reached through the
+// allowlist instead of around it. Bare wordings degrade to [stored, catch-all], which is safe.
 const COMPANY_SITE_STORED_WORDINGS = new Set([
   ...COMPANY_SITE_SYNONYMS,
   'company web site',
@@ -495,19 +501,20 @@ const COMPANY_SITE_STORED_WORDINGS = new Set([
   'employer website',
   'employer site',
   'job posting on company website',
-  'website',
-  'web site',
-  'careers',
 ]);
 
 export function namesTheCompanySite(stored: string): boolean {
-  const normalized = stored
+  // Normalize FIRST, strip the article LAST. The other order (which shipped to review) anchored
+  // /^the\s+/ against raw input, so one leading space or quote defeated it, and only two of the
+  // five apostrophe characters in circulation were handled. clean() takes the zero-width and
+  // non-breaking characters that `trim` leaves behind.
+  const normalized = clean(stored)
     .toLowerCase()
-    .replace(/['’]s\b/g, '') // "the company's careers page" -> "the company careers page"
-    .replace(/^the\s+/, '')
+    .replace(/[’‘'`´ʼ]s\b/g, '') // "the company's careers page" -> "the company careers page"
     .replace(/[^a-z ]+/g, ' ')
     .replace(/\s+/g, ' ')
-    .trim();
+    .trim()
+    .replace(/^the /, '');
   return COMPANY_SITE_STORED_WORDINGS.has(normalized);
 }
 
@@ -1334,28 +1341,32 @@ export function desiredAnswer(label: string, ap: ApplicationProfile, eeo: Record
     // recorded, and claimed the same one on postings found through a job board or a referral. The
     // backend's corpus sweep deleted this exact constant on its side; this is the extension half.
     //
-    // Unset now offers "Other" ALONE, because "Other" is the one option that asserts nothing about
-    // the channel - a non-claim, not a cheaper claim. When the form offers no such option
-    // matchOption returns null, and the caller's own reason ("dropdown left for you" / "radio
-    // question left for you" / "unrecognized field left blank") holds the auto-submit countdown:
-    // "left for" is what autosubmit-gate's REVIEW_FLAG matches, the same load-bearing phrase as
-    // R-010's. A referral question left for the student costs her one click; an invented source is
-    // a false statement on a real application.
+    // Unset now claims NOTHING: no values at all, just `catchall`, which accepts a pure "Other"
+    // option and nothing else. The first version of this fix passed the literal string 'other' as
+    // a value, and review measured what that actually selects - "Other referral" and "Other job
+    // board", through matchOption's word-boundary widening. Both name a channel. See CATCHALL_RE:
+    // the catch-all needed its own matching rule, not a value in a list.
+    // When the form offers no qualifying option matchOption returns null, and the caller's own
+    // reason ("dropdown left for you" / "radio question left for you" / "unrecognized field left
+    // blank") holds the auto-submit countdown: "left for" is what autosubmit-gate's REVIEW_FLAG
+    // matches, the same load-bearing phrase as R-010's. A referral question left for the student
+    // costs her one click; an invented source is a false statement on a real application.
     case 'referral_source_default': {
-      // Trimmed, because an empty string is an unset field wearing a value's clothes - the shape
-      // the old `.filter(Boolean)` handled and a bare `?? undefined` would not.
-      const stored = ap.referral_source_default?.trim();
-      if (!stored) return { mode: 'oneof', values: ['other'] };
+      // clean(), not trim(): an empty string is an unset field wearing a value's clothes (the
+      // shape the old `.filter(Boolean)` handled), and so is a lone zero-width space, which trim
+      // leaves standing and which adapters then type into a combobox as a typeahead query.
+      const stored = clean(ap.referral_source_default ?? '');
+      if (!stored) return { mode: 'oneof', values: [], catchall: true };
       // A stored value does not license the whole list either. The synonyms are spellings of ONE
       // channel (see COMPANY_SITE_SYNONYMS), so they may stand in for a stored "Company website"
       // and for nothing else: a student who stored "LinkedIn" and meets a form with no LinkedIn
       // option was, until now, answered "Company website" - the same invented fact as the unset
       // branch, just harder to see because a value WAS stored.
-      // Every other stored answer gets itself, then "Other", which stays true by construction: it
+      // Every stored answer keeps the catch-all behind it, which stays true by construction: it
       // says the channel is not on this list, which is exactly what happened.
       return namesTheCompanySite(stored)
-        ? { mode: 'oneof', values: [stored, ...COMPANY_SITE_SYNONYMS, 'other'] }
-        : { mode: 'oneof', values: [stored, 'other'] };
+        ? { mode: 'oneof', values: [stored, ...COMPANY_SITE_SYNONYMS], catchall: true }
+        : { mode: 'oneof', values: [stored], catchall: true };
     }
 
     // Salary answers route through the R-031 rule rather than the bare stored value: a range
@@ -1408,6 +1419,16 @@ const TERM_QUESTION =
 // required EEO field with that wording gets a decline selection instead of being left blank (which
 // would block submission).
 const DECLINE_RE = /decline|prefer not|don'?t wish|do not wish|wish not|rather not|choose not|not to (say|answer|disclose|identify|self.?identify)|not wish to (disclose|identify)/i;
+
+// An option that means "none of the ones you listed" and NOTHING MORE. "Other", "Others",
+// "Other (please specify)", "Other, please specify", "Other - please specify", "Other:" all
+// qualify. "Other job board", "Other referral", "Other social media" deliberately do NOT: the
+// trailing noun names a channel, and naming a channel is a factual claim. Everything unmatched
+// falls to the student, which is the cheap direction to be wrong in.
+// The dash and ellipsis characters are written as escapes: an ATS may render the qualifier with
+// an en dash, em dash, or a single-character ellipsis, and all three read as ordinary punctuation
+// in an option label.
+const CATCHALL_RE = /^others?\s*(?:$|[\[\(:,\u2013\u2014-]|\.{3}|\u2026)/i;
 
 // Common nationality adjective -> country name, so a citizenship stored as "Indian" can still
 // answer a country dropdown that lists "India". Keys/values are lowercased to match `norm()`.
@@ -1489,6 +1510,18 @@ export function matchOption<T extends { text: string }>(options: T[], desired: D
     for (const val of desired.values) {
       const m = matchValue(val);
       if (m) return m;
+    }
+    // `catchall` opts a question INTO accepting a pure "Other" option once no stored value
+    // matched. It is a flag and not just another value in the list, because the widening above
+    // cannot tell "Other" from "Other job board": \bother\b hits both, contains.length === 1
+    // commits, and the second one NAMES A CHANNEL. Measured on the referral rule before this
+    // existed: ["LinkedIn","Employee referral","Other referral"] committed "Other referral", and
+    // ["LinkedIn","Indeed","Other job board"] committed "Other job board" - a claim, filled with
+    // no skip reason, from a caller whose whole point was to make no claim.
+    // Two qualifying options is ambiguity, so it goes to the student, same as the yes/no arm.
+    if (desired.catchall) {
+      const hits = options.filter((o) => CATCHALL_RE.test(clean(o.text)));
+      return hits.length === 1 ? hits[0] : null;
     }
     return null;
   }
