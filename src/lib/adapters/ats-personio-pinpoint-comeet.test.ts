@@ -168,9 +168,10 @@ describe('never-auto-submit gate', () => {
   });
 
   it('is default-deny for unknown provider identities', () => {
-    for (const provider of ['greenhouse', 'lever', 'ashby', 'workday', 'linkedin', 'generic', 'recruitee', 'rippling', 'breezy', 'bamboohr']) {
+    for (const provider of ['greenhouse', 'lever', 'ashby', 'workday', 'linkedin', 'generic', 'recruitee', 'rippling', 'breezy']) {
       expect(atsCanAutoSubmit(provider), provider).toBe(true);
     }
+    expect(atsCanAutoSubmit('bamboohr')).toBe(false);
     expect(atsCanAutoSubmit('unknown')).toBe(false);
     const click = vi.fn();
     expect(clickAtsSubmitIfAllowed('unknown', { click })).toBe(false);

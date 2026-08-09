@@ -32,12 +32,14 @@ export const KNOWN_ATS_HOSTS = [
   'jobs.jobvite.com',
   'icims.com',
   'oraclecloud.com',
+  'enterpriseplatform.dell.com',
   'recruiting.ultipro.com',
   'fa007.taleo.net',
   'aa270.taleo.net',
   'myjobs.adp.com',
   'utilidata.applytojob.com',
   'foundationai.applytojob.com',
+  'avature.net',
 ] as const;
 
 const EXACT_HOSTS = new Set([
@@ -51,6 +53,7 @@ const EXACT_HOSTS = new Set([
   'myjobs.adp.com',
   'utilidata.applytojob.com',
   'foundationai.applytojob.com',
+  'enterpriseplatform.dell.com',
 ]);
 
 function matchesKnownHost(hostname: string, known: string): boolean {
@@ -72,6 +75,14 @@ function isZohoRecruitHost(hostname: string): boolean {
   return /(?:^|\.)zohorecruit\.(?:com|eu|in)$/i.test(hostname);
 }
 
+function isExactRouteOnlyHost(hostname: string): boolean {
+  return (hostname.endsWith('.bamboohr.com') && hostname !== 'www.bamboohr.com')
+    || hostname.endsWith('.oraclecloud.com')
+    || hostname === 'enterpriseplatform.dell.com'
+    || hostname === 'recruiting.ultipro.com'
+    || /^(?!www\.)[a-z0-9-]+\.avature\.net$/i.test(hostname);
+}
+
 function isVendorProductOrLoginHost(hostname: string, pathname: string): boolean {
   return hostname === 'accounts.zoho.com'
     || (hostname === 'www.zoho.com' && /^\/recruit(?:\/|$)/i.test(pathname))
@@ -89,6 +100,7 @@ export function bullhornEmployerName(hostname: string): string | null {
 }
 
 const APPLICATION_SCOPED_ADAPTERS = new Set([
+  'bamboohr',
   'recruitee',
   'teamtailor',
   'zoho_recruit',
@@ -112,13 +124,14 @@ export function contentInitRoute(
   const spec = specForLocation(location);
   if (spec) {
     if (APPLICATION_SCOPED_ADAPTERS.has(spec.id)
-      && !spec.isApplicationPath(location.pathname, location.search, location.hash)) return 'ignore';
+      && !spec.isApplicationPath(location.pathname, location.search, location.hash, host)) return 'ignore';
     return 'ats';
   }
 
   // Zoho account and marketing hosts are not tenant application hosts. They remain known so a
   // popup-triggered injection cannot fall through to the generic form engine.
   if (isZohoRecruitHost(host)) return 'ignore';
+  if (isExactRouteOnlyHost(host)) return 'ignore';
   if (isKnownAtsHost(host)) return 'ats';
   return 'generic';
 }

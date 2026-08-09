@@ -101,7 +101,8 @@ export default defineContentScript({
     // Chrome Web Store shows and puts Litos on pages it has no business seeing. /p/ is Breezy's
     // posting route and /careers/ is BambooHR's; both also cover the JD page, so nothing is lost.
     'https://*.breezy.hr/p/*',
-    'https://*.bamboohr.com/careers/*',
+    'https://mpathic2.bamboohr.com/careers/*',
+    'https://prentkeromich.bamboohr.com/careers/*',
     // Public application routes captured on two unrelated tenants per family on 2026-08-09.
     'https://*.recruitee.com/o/*',
     'https://*.teamtailor.com/jobs/*',
@@ -126,8 +127,12 @@ export default defineContentScript({
     // The one that matters most. oraclecloud.com hosts EVERY Oracle Cloud application - payroll,
     // ERP, finance - so a bare host match would inject this script into somebody's payroll session.
     // /hcmUI/CandidateExperience/ is the candidate-facing recruiting app and nothing else.
-    'https://*.oraclecloud.com/hcmUI/CandidateExperience/*',
-    'https://recruiting.ultipro.com/*/JobBoard/*',
+    'https://fa-etxx-saasfaprod1.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/*/sites/*/job/*',
+    'https://fa-etxx-saasfaprod1.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/*/sites/*/opportunity/*',
+    'https://iawmqy.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/*/sites/*/job/*',
+    'https://enterpriseplatform.dell.com/hcmUI/CandidateExperience/*/sites/*/job/*',
+    'https://enterpriseplatform.dell.com/hcmUI/CandidateExperience/*/sites/*/opportunity/*',
+    'https://recruiting.ultipro.com/*/JobBoard/*/OpportunityDetail*',
     // Exact tenants and routes captured 2026-08-09. Taleo and ADP stop at a legal or account wall;
     // JazzHR exposes only the fixed factual controls before its Human Check.
     'https://fa007.taleo.net/careersection/*',
@@ -136,6 +141,8 @@ export default defineContentScript({
     'https://myjobs.adp.com/kaisercareers/cx/job-details*',
     'https://utilidata.applytojob.com/apply/jobs/details/*',
     'https://foundationai.applytojob.com/apply/jobs/details/*',
+    'https://maximus.avature.net/careers/*',
+    'https://sandboxxerox.avature.net/*/careers/*',
     'https://*.jobs.personio.de/job/*',
     'https://*.jobs.personio.com/job/*',
     'https://*.pinpointhq.com/postings/*',

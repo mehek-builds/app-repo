@@ -25,7 +25,7 @@ type FieldKey = 'fullName' | 'firstName' | 'lastName' | 'email' | 'confirmEmail'
 interface AtsSpec {
   readonly id: 'smartrecruiters' | 'rippling' | 'breezy' | 'bamboohr' | 'recruitee' | 'teamtailor' | 'personio' | 'pinpoint' | 'comeet' | 'zoho_recruit' | 'bullhorn' | 'jazzhr';
   readonly host: (hostname: string) => boolean;
-  readonly isApplicationPath: (pathname: string, rawSearch: string, hash: string) => boolean;
+  readonly isApplicationPath: (pathname: string, rawSearch: string, hash: string, hostname?: string) => boolean;
   /** Selectors for the fields the profile can answer factually. Absent keys are simply not filled. */
   readonly fields: Partial<Record<FieldKey, string>>;
   readonly resume?: string;
@@ -59,7 +59,7 @@ const AUTO_SUBMIT_CAPABILITIES = {
   recruitee: 'conditional',
   rippling: 'conditional',
   breezy: 'conditional',
-  bamboohr: 'conditional',
+  bamboohr: 'never',
   teamtailor: 'never',
   personio: 'never',
   pinpoint: 'never',
@@ -296,10 +296,12 @@ export const ATS_SPECS: readonly AtsSpec[] = [
   },
   {
     id: 'bamboohr',
-    host: (h) => h.endsWith('.bamboohr.com') && h !== 'www.bamboohr.com',
+    host: (h) => h === 'mpathic2.bamboohr.com' || h === 'prentkeromich.bamboohr.com',
     // Numeric job id. Excludes www.bamboohr.com/careers/application, which is BambooHR's OWN careers
     // page and runs on Greenhouse, and the /careers/{department}-team marketing routes.
-    isApplicationPath: (p) => /^\/careers\/\d+/.test(p),
+    isApplicationPath: (p, _search, _hash, host) =>
+      (host === 'mpathic2.bamboohr.com' && /^\/careers\/99\/?$/.test(p))
+      || (host === 'prentkeromich.bamboohr.com' && /^\/careers\/480\/?$/.test(p)),
     // ids are FabricTextField-<n>, sequential and render-dependent, so everything matches on name.
     fields: {
       firstName: 'input[name="firstName"]',
@@ -336,7 +338,7 @@ export function specForCurrentPage(): AtsSpec | null {
 
 export function isAtsApplicationPage(): boolean {
   const spec = specForCurrentPage();
-  return spec ? spec.isApplicationPath(window.location.pathname, window.location.search, window.location.hash) : false;
+  return spec ? spec.isApplicationPath(window.location.pathname, window.location.search, window.location.hash, window.location.hostname) : false;
 }
 
 export function atsCanAutoSubmit(atsName: string): boolean {
@@ -362,7 +364,13 @@ export function clickDashboardSubmitIfAllowed(atsName: string, submitButton: Pic
 
 function visibleSafeFixedInput(selector: string): HTMLInputElement | null {
   return [...document.querySelectorAll<HTMLInputElement>(selector)].find((candidate) => {
-    if (candidate.closest('[id*="litos"]') || isHoneypotField(candidate)) return false;
+    if (candidate.disabled || candidate.closest('[id*="litos"]') || isHoneypotField(candidate)) return false;
+    for (let ancestor = candidate.parentElement; ancestor; ancestor = ancestor.parentElement) {
+      const ancestorStyle = getComputedStyle(ancestor);
+      if (ancestor.hidden || ancestor.getAttribute('aria-hidden') === 'true'
+        || ancestorStyle.display === 'none' || ancestorStyle.visibility === 'hidden'
+        || ancestorStyle.maxHeight === '0px') return false;
+    }
     const rect = candidate.getBoundingClientRect();
     const style = getComputedStyle(candidate);
     return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
@@ -461,11 +469,11 @@ export async function fillAtsApplication(params: GenericFillParams): Promise<Aut
   // text) and so picks whichever is first in the DOM. Right today, wrong the day Rippling reorders,
   // and the failure mode is a resume filed as a cover letter.
   // SmartRecruiters keeps the upload inside the same open-shadow component boundary as its text
-  // controls. Attach it here because generic.ts intentionally scans only the light DOM. For every
-  // other ATS, generic keeps using the exact captured selector as before.
+  // controls. JazzHR and BambooHR attach here so their fixed-only boundaries never invoke generic
+  // fill. Every other ATS keeps using the exact captured selector through the generic engine.
   let exactResumeAttached = false;
-  if ((spec.openShadowRoots || spec.id === 'jazzhr') && spec.resume && params.resumeBlob && params.resumeFileName) {
-    const input = spec.id === 'jazzhr'
+  if ((spec.openShadowRoots || spec.id === 'jazzhr' || spec.id === 'bamboohr') && spec.resume && params.resumeBlob && params.resumeFileName) {
+    const input = spec.id === 'jazzhr' || spec.id === 'bamboohr'
       ? visibleSafeFixedInput(spec.resume)
       : queryAtsControl<HTMLInputElement>(spec, spec.resume);
     if (input) {
@@ -478,10 +486,10 @@ export async function fillAtsApplication(params: GenericFillParams): Promise<Aut
     }
   }
 
-  // SmartRecruiters is intentionally fixed-field-only. Its measured capability is the exact
-  // first-page shadow controls above, not arbitrary light-DOM fields that a tenant, injected page,
-  // or later wizard step may expose. Do not call the generic writer at all for this family.
-  if (spec.id === 'smartrecruiters' || spec.id === 'jazzhr') {
+  // These adapters are intentionally fixed-field-only. Their measured capability is the exact
+  // first-page controls above, not arbitrary fields that a tenant, injected page, or later wizard
+  // step may expose. Do not call the generic writer for these families.
+  if (spec.id === 'smartrecruiters' || spec.id === 'jazzhr' || spec.id === 'bamboohr') {
     const resumeReason = !params.resumeBlob || !params.resumeFileName
       ? 'resume: no generated resume file available'
       : exactResumeAttached
@@ -541,7 +549,7 @@ export async function fillAtsApplication(params: GenericFillParams): Promise<Aut
 // application field exists, so there is no selector worth writing and an adapter would be a
 // fill that silently does nothing. All four read live 2026-07-29.
 
-type GatedPortal = 'jobvite' | 'icims' | 'oraclecloud' | 'ultipro' | 'sap_successfactors' | 'oracle_taleo' | 'adp_recruiting';
+type GatedPortal = 'jobvite' | 'icims' | 'oraclecloud' | 'ultipro' | 'sap_successfactors' | 'oracle_taleo' | 'adp_recruiting' | 'avature';
 
 const GATED_PORTALS: ReadonlyArray<{
   id: GatedPortal;
@@ -568,17 +576,17 @@ const GATED_PORTALS: ReadonlyArray<{
   },
   {
     id: 'oraclecloud',
-    host: (h) => h.endsWith('.oraclecloud.com'),
-    path: (p) => /^\/hcmUI\/CandidateExperience\//i.test(p),
+    host: (h) => h === 'iawmqy.fa.ocs.oraclecloud.com' || h === 'fa-etxx-saasfaprod1.fa.ocs.oraclecloud.com' || h === 'enterpriseplatform.dell.com',
+    path: (p) => /^\/hcmUI\/CandidateExperience\/(?:[a-z]{2}\/)?sites\/[a-z0-9_-]+\/(?:job|opportunity)\/\d+\/?$/i.test(p),
     notice:
       'This company emails you a code and asks you to agree to their terms before the application form opens. Both of those need you.',
   },
   {
     id: 'ultipro',
     host: (h) => h === 'recruiting.ultipro.com',
-    path: (p) => /^\/[a-z0-9._-]+\/JobBoard\//i.test(p),
+    path: (p) => /^\/[a-z0-9._-]+\/JobBoard\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/OpportunityDetail\/?$/i.test(p),
     notice:
-      'Litos can find this job but cannot read this company’s application form yet. Everything you need is ready to paste in, so apply on the page itself.',
+      'This company requires an applicant account or asks you to make an AI-scoring consent choice before the application form opens. Litos leaves both to you.',
   },
   {
     id: 'sap_successfactors',
@@ -601,6 +609,13 @@ const GATED_PORTALS: ReadonlyArray<{
     notice:
       'This ADP Recruiting application requires an account before any application fields open. Litos leaves the account and every later legal choice to you.',
   },
+  {
+    id: 'avature',
+    host: (h) => h === 'maximus.avature.net' || h === 'sandboxxerox.avature.net',
+    path: (p) => /^\/(?:[a-z]{2}_[a-z]{2}\/)?careers\/(?:JobDetail(?:\/[^/]+\/\d+)?|Job-Application|Login)\/?$/i.test(p),
+    notice:
+      'This company routes the application through an Avature login or tenant-specific resume intake. Litos leaves that account and every later choice to you.',
+  },
 ];
 
 /**
@@ -621,6 +636,30 @@ export function gatedPortalNotice(
   }
   if (portal.id === 'adp_recruiting') {
     return /^\d+$/.test(new URLSearchParams(search).get('reqId') ?? '') ? portal.notice : null;
+  }
+  if (portal.id === 'oraclecloud') {
+    const exactDell = (hostname === 'enterpriseplatform.dell.com' || hostname === 'iawmqy.fa.ocs.oraclecloud.com')
+      && /^\/hcmUI\/CandidateExperience\/en\/sites\/careers\/job\/295586\/?$/i.test(pathname);
+    const exactAldar = hostname === 'fa-etxx-saasfaprod1.fa.ocs.oraclecloud.com'
+      && /^\/hcmUI\/CandidateExperience\/en\/sites\/CX_1\/job\/2850\/?$/i.test(pathname);
+    if (!exactDell && !exactAldar) return null;
+  }
+  if (portal.id === 'ultipro') {
+    const opportunityId = new URLSearchParams(search).get('opportunityId');
+    const identity = `${pathname}?opportunityId=${opportunityId ?? ''}`;
+    const windquest = identity === '/WIN1014WINDQ/JobBoard/08eb8299-5b26-4208-adb7-897aa42c6959/OpportunityDetail?opportunityId=f6cd56f9-5b2f-4b53-9e86-2553b54524f9';
+    const little = identity === '/LIT1004LDAC/JobBoard/30702fd2-636e-4886-b1ce-4fc3b07e37ec/OpportunityDetail?opportunityId=4fc30c2a-e2b3-42e0-bcaf-7805f741c04a';
+    if (!windquest && !little) return null;
+  }
+  if (portal.id === 'avature') {
+    const exactDetail = hostname === 'sandboxxerox.avature.net'
+      && /^\/en_US\/careers\/JobDetail\/2nd-Line-Technical-Analyst\/44460\/?$/i.test(pathname);
+    const exactLogin = hostname === 'sandboxxerox.avature.net'
+      && /^\/en_US\/careers\/Login\/?$/i.test(pathname)
+      && new URLSearchParams(search).get('jobId') === '44460';
+    const exactIntake = hostname === 'maximus.avature.net'
+      && /^\/careers\/Job-Application\/?$/i.test(pathname);
+    if (!exactDetail && !exactLogin && !exactIntake) return null;
   }
   if (portal.id !== 'sap_successfactors') return portal.notice;
   const query = new URLSearchParams(search);
