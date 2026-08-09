@@ -2,11 +2,19 @@
 // writes, including the backward-compatible fallback to the legacy Volley-era key name.
 import {
   clearAll as clearStoredSession,
+  abandonPendingPortalAccount,
+  activatePendingPortalAccount,
+  getPendingPortalAccount,
+  getPortalAccount,
   getToken as getStoredToken,
   migrateLegacyStorage,
   setProfile,
   setToken,
   setAutoSubmitEnabled,
+  recordPendingPortalAccount,
+  currentAuthEpoch,
+  authEpochIsCurrent,
+  pendingPortalAccountClaimIsCurrent,
 } from '../lib/storage';
 import { overloadWaitMs, overloadBudgetRemains, RESUME_OVERLOAD_BUDGET_MS } from '../lib/overload';
 // Pure salary/posting helpers (R-031). adapters/salary is a LEAF module (types only), so this
@@ -31,6 +39,7 @@ import { applicantEmailForGeneratedPacket, atsNameForPortalUrl } from '../lib/ap
 import {
   clearPacketApplicantIdentity,
   packetIdentityMatchesCurrentRoute,
+  peekPacketApplicantIdentity,
   readPacketApplicantIdentity,
   storePacketApplicantIdentity,
 } from '../lib/packet-applicant-identity';
@@ -65,7 +74,7 @@ async function setPendingSubmission(tabId: number, pending: PendingExtensionSubm
   else await chrome.storage.session.remove(key);
 }
 
-async function postExtensionOutcome(pending: PendingExtensionSubmission, outcome: 'confirmed' | 'failed' | 'unknown', finalUrl: string, confirmationText?: string) {
+async function postExtensionOutcome(pending: PendingExtensionSubmission, outcome: 'confirmed' | 'failed' | 'unknown' | 'cancelled', finalUrl: string, confirmationText?: string) {
   const token = await getStoredToken();
   if (!token) throw new Error('Sign in to Litos again before updating this application.');
   const response = await timeoutBackendFetch(`/applications/${pending.applicationId}/submission/extension-outcome`, {
@@ -151,6 +160,48 @@ function timeoutBackendFetch(
   ms = FETCH_TIMEOUT_MS,
 ): Promise<Response> {
   return backendFetch(path, init, { token, timeoutMs: ms });
+}
+
+type VerifiedWorkdayPacket = {
+  userId: string;
+  applicationId: string;
+  email: string;
+  host: string;
+  routeFingerprint: string;
+};
+
+async function verifyWorkdayPacketForTab(token: string, tabId: number, portalUrl: string): Promise<VerifiedWorkdayPacket | null> {
+  const candidate = await peekPacketApplicantIdentity({ tabId, portalUrl });
+  if (!candidate) return null;
+  const response = await timeoutBackendFetch(`/applications/${candidate.applicationId}/workday-account-identity`, {}, token);
+  if (!response.ok) return null;
+  const owned = await response.json().catch(() => null) as {
+    user_id?: unknown;
+    application_id?: unknown;
+    email?: unknown;
+    portal_host?: unknown;
+  } | null;
+  if (
+    typeof owned?.user_id !== 'string'
+    || typeof owned.application_id !== 'string'
+    || typeof owned.email !== 'string'
+    || typeof owned.portal_host !== 'string'
+  ) return null;
+  const identity = await readPacketApplicantIdentity({ tabId, portalUrl, userId: owned.user_id });
+  if (!identity) return null;
+  const expectedHost = new URL(portalUrl).hostname.toLowerCase().replace(/^www\./, '');
+  if (
+    owned.application_id !== identity.applicationId
+    || owned.email.trim().toLowerCase() !== identity.email
+    || owned.portal_host.trim().toLowerCase().replace(/^www\./, '') !== expectedHost
+  ) return null;
+  return {
+    userId: owned.user_id.toLowerCase(),
+    applicationId: identity.applicationId,
+    email: identity.email,
+    host: expectedHost,
+    routeFingerprint: identity.routeFingerprint,
+  };
 }
 
 // ─── Website → extension session handover ────────────────────────────────────
@@ -649,7 +700,13 @@ export default defineBackground(() => {
           }
           await postExtensionOutcome(
             pending,
-            message.payload?.outcome === 'confirmed' ? 'confirmed' : message.payload?.outcome === 'failed' ? 'failed' : 'unknown',
+            message.payload?.outcome === 'confirmed'
+              ? 'confirmed'
+              : message.payload?.outcome === 'failed'
+                ? 'failed'
+                : message.payload?.outcome === 'cancelled'
+                  ? 'cancelled'
+                  : 'unknown',
             String(message.payload?.finalUrl ?? sender.tab?.url ?? 'https://trylitos.com'),
             typeof message.payload?.confirmationText === 'string' ? message.payload.confirmationText : undefined,
           );
@@ -732,6 +789,7 @@ export default defineBackground(() => {
             .sendMessage(tabId, { type: 'RESUME_GEN_RETRYING', payload: { company, role, attempt, waitMs } })
             .catch(() => {});
         };
+        const requestAuthEpoch = currentAuthEpoch();
         getStoredToken().then(async (token) => {
           if (!token) {
             sendResponse({ error: NOT_SIGNED_IN_MESSAGE });
@@ -770,13 +828,31 @@ export default defineBackground(() => {
             ) {
               throw new Error('Litos could not verify the current application email route, so nothing was filled. Try again.');
             }
-            await storePacketApplicantIdentity({
-              tabId,
-              applicationId,
-              email: packetEmail,
-              portalUrl: url,
-              routeFingerprint,
-            });
+            if (atsNameForPortalUrl(url) === 'workday') {
+              const ownedResponse = await timeoutBackendFetch(`/applications/${applicationId}/workday-account-identity`, {}, token);
+              const owned = ownedResponse.ok
+                ? await ownedResponse.json().catch(() => null) as { user_id?: unknown; application_id?: unknown; email?: unknown; portal_host?: unknown } | null
+                : null;
+              const portalHost = new URL(url).hostname.toLowerCase().replace(/^www\./, '');
+              if (
+                typeof owned?.user_id !== 'string'
+                || owned.application_id !== applicationId
+                || typeof owned.email !== 'string'
+                || owned.email.trim().toLowerCase() !== packetEmail.trim().toLowerCase()
+                || owned.portal_host !== portalHost
+              ) {
+                throw new Error('Litos could not verify that this application packet belongs to the signed-in account. Nothing was filled.');
+              }
+              await storePacketApplicantIdentity({
+                tabId,
+                userId: owned.user_id,
+                applicationId,
+                email: packetEmail,
+                portalUrl: url,
+                routeFingerprint,
+                expectedAuthEpoch: requestAuthEpoch,
+              });
+            }
             void trackExtensionEvent('application_generation_completed');
             sendResponse({ ...result, posting_compensation: await compensationPromise });
           } catch (err) {
@@ -831,7 +907,7 @@ export default defineBackground(() => {
             const portalUrl = sender.tab?.url;
             const identity = tabId === undefined || !portalUrl
               ? null
-              : await readPacketApplicantIdentity({ tabId, portalUrl });
+              : await verifyWorkdayPacketForTab(token, tabId, portalUrl);
             if (!identity) {
               sendResponse({ error: 'Litos has not prepared this application email yet. Return to the job page and prepare the application first.' });
               return;
@@ -851,6 +927,110 @@ export default defineBackground(() => {
             sendResponse({ email: identity.email, applicationId: identity.applicationId });
           } catch (err) {
             sendResponse({ error: err instanceof Error ? err.message : 'could not load account data' });
+          }
+        });
+        return true;
+      }
+
+      case 'GET_WORKDAY_ACCOUNT_STATE':
+      case 'CLAIM_WORKDAY_ACCOUNT':
+      case 'VALIDATE_WORKDAY_ACCOUNT_ACTION':
+      case 'ABANDON_WORKDAY_ACCOUNT_CLAIM':
+      case 'ACTIVATE_WORKDAY_ACCOUNT': {
+        const operationAuthEpoch = currentAuthEpoch();
+        getStoredToken().then(async (token) => {
+          if (!token) throw new Error(NOT_SIGNED_IN_MESSAGE);
+          const tabId = sender.tab?.id;
+          const portalUrl = sender.tab?.url;
+          if (tabId === undefined || !portalUrl) throw new Error('The Workday account tab is unavailable.');
+          const identity = await verifyWorkdayPacketForTab(token, tabId, portalUrl);
+          if (!identity) throw new Error('The Workday account identity does not belong to the signed-in Litos account.');
+          const { userId, host, email, applicationId } = identity;
+          const requestedHost = String(message.payload?.host ?? '').trim().toLowerCase().replace(/^www\./, '');
+          if (requestedHost && requestedHost !== host) throw new Error('The Workday account identity is invalid.');
+
+          if (message.type === 'GET_WORKDAY_ACCOUNT_STATE') {
+            const [active, pending] = await Promise.all([
+              getPortalAccount(userId, host, applicationId, email),
+              getPendingPortalAccount(userId, host, applicationId, email),
+            ]);
+            sendResponse({ active, pending, authEpoch: operationAuthEpoch });
+            return;
+          }
+          if (message.type === 'VALIDATE_WORKDAY_ACCOUNT_ACTION') {
+            const claimedEpoch = Number(message.payload?.authEpoch);
+            const action = message.payload?.action === 'sign_in' ? 'sign_in' : 'create';
+            const valid = claimedEpoch === operationAuthEpoch
+              && authEpochIsCurrent(claimedEpoch)
+              && (action === 'create'
+                ? await pendingPortalAccountClaimIsCurrent(claimedEpoch, userId, host, applicationId, email)
+                : Boolean(await getPortalAccount(userId, host, applicationId, email)));
+            sendResponse({ valid });
+            return;
+          }
+          if (message.type === 'CLAIM_WORKDAY_ACCOUNT') {
+            const saltFingerprint = String(message.payload?.saltFingerprint ?? '');
+            const requestedAt = Number(message.payload?.requestedAt);
+            if (!saltFingerprint || !Number.isFinite(requestedAt)) throw new Error('The Workday account claim is incomplete.');
+            const claimed = await recordPendingPortalAccount(
+              { userId, host, email, applicationId, saltFingerprint, requestedAt },
+              operationAuthEpoch,
+            );
+            sendResponse({ claimed, ...(claimed ? { authEpoch: operationAuthEpoch } : {}) });
+            return;
+          }
+          if (message.type === 'ABANDON_WORKDAY_ACCOUNT_CLAIM') {
+            sendResponse({ abandoned: await abandonPendingPortalAccount(userId, host, email, applicationId) });
+            return;
+          }
+          sendResponse({ activated: await activatePendingPortalAccount(userId, host, email, applicationId) });
+        }).catch((error) => sendResponse({
+          error: error instanceof Error ? error.message : 'The Workday account operation failed.',
+        }));
+        return true;
+      }
+
+      case 'GET_WORKDAY_VERIFICATION_CODE': {
+        getStoredToken().then(async (token) => {
+          if (!token) {
+            sendResponse({ error: NOT_SIGNED_IN_MESSAGE });
+            return;
+          }
+          const tabId = sender.tab?.id;
+          const portalUrl = sender.tab?.url;
+          const identity = tabId === undefined || !portalUrl ? null : await verifyWorkdayPacketForTab(token, tabId, portalUrl);
+          if (!identity) {
+            sendResponse({ error: 'The Workday verification session is incomplete.' });
+            return;
+          }
+          const pending = await getPendingPortalAccount(identity.userId, identity.host, identity.applicationId, identity.email);
+          if (!pending) {
+            sendResponse({ error: 'The Workday verification session is no longer active.' });
+            return;
+          }
+          const applicationId = identity.applicationId;
+          const requestedAt = new Date(pending.requestedAt).toISOString();
+          try {
+            for (let attempt = 0; attempt < 10; attempt += 1) {
+              const response = await timeoutBackendFetch(`/applications/${applicationId}/workday-verification-code`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ requested_at: requestedAt }),
+              }, token);
+              const body = await response.json().catch(() => null) as { status?: unknown; code?: unknown; provider?: unknown; error?: unknown } | null;
+              if (response.ok && body?.status === 'ready' && typeof body.code === 'string') {
+                sendResponse({ code: body.code, provider: body.provider });
+                return;
+              }
+              if (response.status !== 202) {
+                sendResponse({ error: typeof body?.error === 'string' ? body.error : 'Could not read the Workday verification email.' });
+                return;
+              }
+              if (attempt < 9) await new Promise((resolve) => setTimeout(resolve, 3_000));
+            }
+            sendResponse({ error: 'The Workday verification email has not arrived yet. Try again when it does.' });
+          } catch (err) {
+            sendResponse({ error: err instanceof Error ? err.message : 'Could not read the Workday verification email.' });
           }
         });
         return true;
@@ -1033,7 +1213,7 @@ export default defineBackground(() => {
       // alternative is an extension quietly applying as whoever was signed in last week.
       clearStoredSession()
         .then(() => sendResponse({ ok: true }))
-        .catch(() => sendResponse({ ok: false }));
+        .catch(() => sendResponse({ ok: false, error: 'Litos could not clear the extension session. Nothing changed in the popup.' }));
       return true;
     }
 

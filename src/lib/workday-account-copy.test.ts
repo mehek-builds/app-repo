@@ -8,8 +8,23 @@ import {
 describe('Workday account disclosure', () => {
   it('says before the click that Litos can make and fill a password', () => {
     expect(WORKDAY_ACCOUNT_PROMPT_TITLE).toBe('Fill in your account details?');
-    expect(WORKDAY_ACCOUNT_PROMPT_BODY).toContain('makes a unique password');
-    expect(WORKDAY_ACCOUNT_PROMPT_BODY).toContain('never submits this form');
+    expect(WORKDAY_ACCOUNT_PROMPT_BODY).toContain('makes a unique password on this device');
+    expect(WORKDAY_ACCOUNT_PROMPT_BODY).toContain('stops for CAPTCHA or consent');
+  });
+
+  it('reports bounded account actions without claiming the account is active', () => {
+    expect(workdayAccountCompletion({
+      creatingAccount: true,
+      emailFilled: true,
+      passwordFilled: true,
+      actionStarted: 'create',
+    })).toBe('Account creation started. Waiting for Workday to confirm it.');
+    expect(workdayAccountCompletion({
+      creatingAccount: false,
+      emailFilled: true,
+      passwordFilled: true,
+      actionStarted: 'sign_in',
+    })).toBe('Sign-in started. Waiting for Workday to confirm it.');
   });
 
   it('reports exactly which account fields were filled', () => {
@@ -32,6 +47,15 @@ describe('Workday account disclosure', () => {
       passwordFilled: false,
       passwordWithheldReason: 'Litos did not make this account, so type your password in yourself.',
     })).toBe('Email filled. Litos did not make this account, so type your password in yourself.');
+  });
+
+  it('surfaces a legal or CAPTCHA handoff even after safe fields were filled', () => {
+    expect(workdayAccountCompletion({
+      creatingAccount: true,
+      emailFilled: true,
+      passwordFilled: true,
+      blockingReason: 'Workday is asking you to accept legal or privacy terms. That choice is yours.',
+    })).toBe('Safe account fields filled. Workday is asking you to accept legal or privacy terms. That choice is yours.');
   });
 
   it('distinguishes an email-only write from a page where nothing changed', () => {

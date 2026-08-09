@@ -9,7 +9,6 @@ import {
 import { isLinkedInApplicationPage, extractLinkedInJdText, fillLinkedInApplication } from '../lib/adapters/linkedin';
 import { isLikelyApplicationForm, extractGenericJdText, getGenericJobDetails, fillGenericApplication, drainR030CandidateLabels } from '../lib/adapters/generic';
 import { atsCanAutoSubmit, clickAtsSubmitIfAllowed, clickDashboardSubmitIfAllowed, isAtsApplicationPage, extractAtsJdText, fillAtsApplication, gatedPortalNotice, specForCurrentPage } from '../lib/adapters/ats-2026-07';
-import { getPortalAccounts, recordPortalAccount } from '../lib/storage';
 import { PendingSubmissionRecoveryGate } from '../lib/submission-recovery';
 import { COLOR, DISMISS_MS, FONT, OVERLAY, RADIUS, SHADOW, markSvg } from '../styles/tokens';
 
@@ -63,6 +62,22 @@ import {
   workdayAccountCompletion,
 } from '../lib/workday-account-copy';
 import { bullhornEmployerName, contentInitRoute } from '../lib/content-init-routing';
+import {
+  fillWorkdayVerificationCode,
+  findWorkdayAccountSubmit,
+  findWorkdayFinalSubmitButton,
+  findWorkdayNextButton,
+  findWorkdayVerificationContinue,
+  inspectWorkdayAccountGate,
+  isTrustedWorkdayAccountIntent,
+  readWorkdayApplicationStep,
+  runBoundedWorkdayAccountAction,
+  workdayAccountReceiptProof,
+  workdayApplicationCanAdvance,
+  workdayProgrammaticFinalSubmitAllowed,
+  replayWorkdayFinalSubmitIfAllowed,
+  workdayVerificationStage,
+} from '../lib/workday-account-flow';
 
 export default defineContentScript({
   matches: [
@@ -217,7 +232,7 @@ export default defineContentScript({
       controller.scan();
     }
 
-    function armManualSubmissionTracking(submitButton: HTMLElement, applicationId: string, statusEl: HTMLElement | null) {
+    function armManualSubmissionTracking(submitButton: HTMLElement, applicationId: string, statusEl: HTMLElement | null, atsName: string) {
       let reserving = false;
       const onClick = (event: MouseEvent) => {
         if (!event.isTrusted) return;
@@ -237,8 +252,35 @@ export default defineContentScript({
             if (statusEl) statusEl.textContent = response?.error ?? 'Litos could not safely track this submission. Try again.';
             return;
           }
+          const clicked = atsName === 'workday'
+            ? replayWorkdayFinalSubmitIfAllowed({
+              expectedControl: submitButton,
+              tabVisible: !document.hidden,
+              tabFocused: document.hasFocus(),
+              requiredFieldsClear: !hasEmptyRequiredFields(),
+            })
+            : (() => { submitButton.click(); return true; })();
+          if (!clicked) {
+            const cancelReservation = (attempt = 0) => chrome.runtime.sendMessage({
+                type: 'EXTENSION_SUBMISSION_OUTCOME',
+                payload: {
+                  applicationId,
+                  outcome: 'cancelled',
+                  finalUrl: window.location.href,
+                  confirmationText: 'Workday changed after the reservation. Nothing was sent.',
+                },
+              }, (cancelResponse: { ok?: boolean } | undefined) => {
+                if (!cancelResponse?.ok && attempt < 4) {
+                  window.setTimeout(() => cancelReservation(attempt + 1), 1000 * (attempt + 1));
+                  return;
+                }
+                pendingRecoveryGate.endLocal(applicationId);
+              });
+            cancelReservation();
+            if (statusEl) statusEl.textContent = 'Workday changed before submission. Review the final page and click Submit again.';
+            return;
+          }
           submitButton.removeEventListener('click', onClick, true);
-          submitButton.click();
           monitorExtensionSubmission(applicationId, baselineTexts);
           pendingRecoveryGate.endLocal(applicationId);
         });
@@ -441,9 +483,14 @@ export default defineContentScript({
     // ─── Submit button detection ─────────────────────────────────────────────
 
     function findSubmitButton(): Element | null {
-      // Workday's final-step button has a stable id and no "submit" text, so match it directly.
+      // Workday reuses this automation id for intermediate Next and final Submit controls. Only
+      // the latter may start submission monitoring. Treating Next as final can arm receipt logic
+      // several pages before the applicant has reviewed the application.
       const workday = document.querySelector('[data-automation-id="bottom-navigation-next-button"]');
-      if (workday) return workday;
+      if (workday) {
+        const finalWorkdaySubmit = findWorkdayFinalSubmitButton();
+        if (finalWorkdaySubmit) return finalWorkdaySubmit;
+      }
 
       // Everything else: SCORE every button/submit-like control by what it says, rather than
       // taking the first `input[type=submit]`. Real forms often carry more than one submit-type
@@ -516,6 +563,12 @@ export default defineContentScript({
         if (SUBMIT.test(text)) return el;
       }
       return null;
+    }
+
+    function findProgrammaticFinalSubmitButton(atsName: string): HTMLElement | null {
+      if (atsName !== 'workday') return findFinalSubmitButton();
+      const control = findWorkdayFinalSubmitButton();
+      return control && workdayProgrammaticFinalSubmitAllowed(control) ? control : null;
     }
 
     // Is any on-screen required field still empty? Used to hold back auto-submit: the browser's own
@@ -1462,7 +1515,7 @@ export default defineContentScript({
         }
 
         const autoSubmitOn = await serverAutoSubmitEnabled();
-        const finalSubmitBtn = findFinalSubmitButton();
+        const finalSubmitBtn = findProgrammaticFinalSubmitButton(fillResult.ats_name);
         // Resume is "missing" if the blob never reached us (fetch failed upstream) or the adapter
         // reported it could not attach it. Never auto-submit an application with no resume.
         const resumeMissing = !resumeBlob || fillResult.skipped_reasons.some((r) => /^resume:/i.test(r));
@@ -1473,6 +1526,33 @@ export default defineContentScript({
         const needsReview = skippedReasonsNeedReview(fillResult.skipped_reasons, {
           allowGroundedDrafts: autoSubmitOn,
         });
+
+        const workdayStep = fillResult.ats_name === 'workday' ? readWorkdayApplicationStep() : null;
+        const workdayNext = fillResult.ats_name === 'workday' ? findWorkdayNextButton() : null;
+        if (workdayApplicationCanAdvance({
+          step: workdayStep,
+          nextButton: workdayNext,
+          needsReview,
+          hasEmptyRequiredFields: hasEmptyRequiredFields(),
+          challengeWaiting: captchaWaiting || detectChallenge().waiting,
+          accountGate: inspectWorkdayAccountGate(),
+          tabVisible: !document.hidden,
+        }) && workdayNext) {
+          chrome.runtime.sendMessage({
+            type: 'AUTOFILL_EVENT',
+            payload: {
+              ats_name: fillResult.ats_name,
+              job_context: { company, role: title },
+              fields_filled: fillResult.fields_filled,
+              fields_skipped: fillResult.fields_skipped,
+              auto_submitted: false,
+            },
+          });
+          if (statusEl) statusEl.textContent = `Step ${workdayStep?.current ?? ''} filled. Moving to the next Workday step...`;
+          dismiss();
+          workdayNext.click();
+          return;
+        }
 
         // R-030 observation (register: the "cheapest next step"): labels where linkQuestion
         // committed with asksForLink false on an input[type=text] - the population that fills a
@@ -1538,7 +1618,7 @@ export default defineContentScript({
           return;
         }
 
-        if (finalSubmitBtn) armManualSubmissionTracking(finalSubmitBtn, resume.resume_id, statusEl);
+        if (finalSubmitBtn) armManualSubmissionTracking(finalSubmitBtn, resume.resume_id, statusEl, fillResult.ats_name);
 
         const dashboardQuestions = [
           ...draftedQuestions,
@@ -1576,6 +1656,9 @@ export default defineContentScript({
           // application AWAY from the guarded countdown and into this click.
           if (captchaWaiting || detectChallenge().waiting) {
             return { ok: false, error: 'This company asks you to prove you are human. Solve that check on the page, then send it yourself.' };
+          }
+          if (fillResult.ats_name === 'workday' && findProgrammaticFinalSubmitButton('workday') !== finalSubmitBtn) {
+            return { ok: false, error: 'Workday no longer shows the exact reviewed final step, or it added a legal confirmation. Nothing was sent.' };
           }
           if (!clickDashboardSubmitIfAllowed(fillResult.ats_name, finalSubmitBtn)) {
             return { ok: false, error: 'This application needs your direct confirmation on the company page. Nothing was sent.' };
@@ -1831,7 +1914,9 @@ export default defineContentScript({
           // Reuse the anchored button only if it's still live AND visible (a re-render can hide its
           // step container via an ancestor display:none without detaching the button); otherwise
           // re-resolve (findFinalSubmitButton already returns only visible controls).
-          const target = submitBtn.isConnected && isElementVisible(submitBtn) ? submitBtn : findFinalSubmitButton();
+          const target = fillResult.ats_name === 'workday'
+            ? findProgrammaticFinalSubmitButton('workday')
+            : submitBtn.isConnected && isElementVisible(submitBtn) ? submitBtn : findFinalSubmitButton();
           // Re-validate at the instant of click: 15s is long enough for the form - or the tab - to
           // change under us. Fire ONLY when the target is still live AND visible, the tab is visible
           // AND focused (never submit into a background or blurred tab), and no required field is now
@@ -1846,6 +1931,7 @@ export default defineContentScript({
             isElementVisible(target) &&
             tabActive &&
             !challengeNow &&
+            (fillResult.ats_name !== 'workday' || workdayProgrammaticFinalSubmitAllowed(target)) &&
             !hasEmptyRequiredFields();
           if (!portalStillSafe) {
             cleanupChrome();
@@ -1870,7 +1956,8 @@ export default defineContentScript({
             permissionSettled = true;
             window.clearTimeout(permissionTimer);
             const stillSafe = target.isConnected && isElementVisible(target) && !document.hidden && document.hasFocus()
-              && !captchaWaiting && !detectChallenge().waiting && !hasEmptyRequiredFields();
+              && !captchaWaiting && !detectChallenge().waiting && !hasEmptyRequiredFields()
+              && (fillResult.ats_name !== 'workday' || workdayProgrammaticFinalSubmitAllowed(target));
             cleanupChrome();
             restoreSubmitButton();
             if (settings?.automatic_submission_enabled === true && stillSafe) {
@@ -1883,7 +1970,9 @@ export default defineContentScript({
                     payload: { applicationId, authorization: 'standing_consent' },
                   }, (response) => resolve(response ?? { ok: false, error: 'Litos did not respond.' }));
                 });
-                const safeAfterReservation = target.isConnected && isElementVisible(target) && !document.hidden && document.hasFocus() && !hasEmptyRequiredFields();
+                const safeAfterReservation = target.isConnected && isElementVisible(target) && !document.hidden && document.hasFocus()
+                  && !hasEmptyRequiredFields()
+                  && (fillResult.ats_name !== 'workday' || workdayProgrammaticFinalSubmitAllowed(target));
                 if (started.ok && safeAfterReservation) {
                   if (statusEl) statusEl.textContent = `${actionLabel}...`;
                   const baselineTexts = new Set(visibleSubmissionOutcomeTexts());
@@ -1929,9 +2018,9 @@ export default defineContentScript({
     }
 
     // ─── Workday account-creation speed-up (2026-07-03) ────────────────────────
-    // Litos can fill the email and derive a per-employer password. It never clicks Create Account
-    // or completes email verification. This is not a fill-and-stop-with-countdown card because
-    // account creation always stays with the student.
+    // Litos can fill the frozen application email and derive a per-employer password. The card's
+    // affirmative click authorizes only an exact Workday account action. Legal consent, an
+    // attestation, CAPTCHA, an ambiguous control, or an existing claim always stops the click.
 
     function accountCreationCardShell(): string {
       return `
@@ -1970,6 +2059,18 @@ export default defineContentScript({
       `;
     }
 
+    function workdayAccountMessage<T>(type: string, payload: Record<string, unknown>): Promise<T> {
+      return new Promise((resolve, reject) => {
+        chrome.runtime.sendMessage({ type, payload }, (response: T & { error?: string } | undefined) => {
+          if (chrome.runtime.lastError || !response || response.error) {
+            reject(new Error(response?.error ?? chrome.runtime.lastError?.message ?? 'The Workday account operation failed.'));
+            return;
+          }
+          resolve(response);
+        });
+      });
+    }
+
     function injectWorkdayAccountCreationCard() {
       if (document.getElementById('litos-account-card')) return;
       const card = document.createElement('div');
@@ -1980,7 +2081,8 @@ export default defineContentScript({
       const dismiss = () => card.remove();
       card.querySelector('#wp-account-close')?.addEventListener('click', dismiss);
       card.querySelector('#wp-account-no')?.addEventListener('click', dismiss);
-      card.querySelector('#wp-account-yes')?.addEventListener('click', () => {
+      card.querySelector('#wp-account-yes')?.addEventListener('click', async (event) => {
+        if (!isTrustedWorkdayAccountIntent(event)) return;
         const statusEl = card.querySelector<HTMLElement>('#wp-account-status');
         const yesBtn = card.querySelector<HTMLButtonElement>('#wp-account-yes');
         const orbCanvas = card.querySelector<HTMLCanvasElement>('#wp-account-orb');
@@ -1995,9 +2097,50 @@ export default defineContentScript({
         if (statusEl) { statusEl.style.display = 'block'; statusEl.textContent = 'Filling...'; }
         if (orbCanvas) stopOrb = mountThinkingOrb(orbCanvas, 'working', 20);
 
+        if (workdayVerificationStage()) {
+          const portalHost = portalKeyForHost(window.location.hostname);
+          const gate = inspectWorkdayAccountGate();
+          if (gate.kind !== 'clear') {
+            stopOrbAnd(() => { if (statusEl) statusEl.textContent = gate.reason; });
+            return;
+          }
+          const identity = await workdayAccountMessage<{ email: string; applicationId: string }>('GET_ACCOUNT_CREATION_DATA', {})
+            .catch(() => null);
+          const state = identity
+            ? await workdayAccountMessage<{ pending: { applicationId: string; requestedAt: number } | null }>(
+              'GET_WORKDAY_ACCOUNT_STATE',
+              { host: portalHost, email: identity.email },
+            ).catch(() => null)
+            : null;
+          const pendingCandidate = state?.pending ?? null;
+          const pending = pendingCandidate?.applicationId === identity?.applicationId ? pendingCandidate : null;
+          if (!pending) {
+            stopOrbAnd(() => { if (statusEl) statusEl.textContent = 'Litos did not start this account, so enter the code yourself.'; });
+            return;
+          }
+          chrome.runtime.sendMessage({
+            type: 'GET_WORKDAY_VERIFICATION_CODE',
+            payload: { applicationId: pending.applicationId, requestedAt: new Date(pending.requestedAt).toISOString() },
+          }, (verification: { code?: string; error?: string } | undefined) => {
+            if (!verification?.code) {
+              stopOrbAnd(() => { if (statusEl) statusEl.textContent = verification?.error ?? 'The verification email is not ready yet.'; });
+              return;
+            }
+            const filled = fillWorkdayVerificationCode(verification.code);
+            const continueButton = findWorkdayVerificationContinue();
+            if (!filled || !continueButton || inspectWorkdayAccountGate().kind !== 'clear') {
+              stopOrbAnd(() => { if (statusEl) statusEl.textContent = 'Litos could not safely continue this verification. Enter the code yourself.'; });
+              return;
+            }
+            continueButton.click();
+            stopOrbAnd(() => { if (statusEl) statusEl.textContent = 'Verification code entered. Waiting for Workday to confirm the account.'; });
+          });
+          return;
+        }
+
         chrome.runtime.sendMessage(
           { type: 'GET_ACCOUNT_CREATION_DATA' },
-          async (result: { error?: string; email?: string }) => {
+          async (result: { error?: string; email?: string; applicationId?: string }) => {
             if (!result || result.error) {
               stopOrbAnd(() => { if (statusEl) statusEl.textContent = result?.error || 'Could not load your account data.'; });
               return;
@@ -2012,7 +2155,12 @@ export default defineContentScript({
             // conjured into existence just by opening the card.
             const portalHost = portalKeyForHost(window.location.hostname);
             const creatingAccount = isWorkdayCreateAccountStage();
-            const knownAccount = (await getPortalAccounts())[portalHost];
+            const accountState = await workdayAccountMessage<{
+              active: { saltFingerprint: string } | null;
+              pending: { applicationId: string } | null;
+              authEpoch: number;
+            }>('GET_WORKDAY_ACCOUNT_STATE', { host: portalHost, email: result.email }).catch(() => ({ active: null, pending: null, authEpoch: Number.NaN }));
+            const knownAccount = accountState.active;
             let password: string | undefined;
             let passwordWithheldReason: string | undefined;
             let saltFingerprint: string | undefined;
@@ -2036,15 +2184,65 @@ export default defineContentScript({
               passwordWithheldReason,
             });
 
-            // Only claim this account after Workday accepted a write to a password field. Recording
-            // earlier would make a changed or partially loaded page look like a Litos-managed
-            // account, causing future sign-in attempts to receive a password that was never used.
-            if (creatingAccount && password && saltFingerprint && fillResult.password_filled) {
-              await recordPortalAccount({
-                host: portalHost,
-                saltFingerprint,
-                createdAt: Date.now(),
-              });
+            // A password write is not account-creation proof. A crash, validation error, legal
+            // checkbox or CAPTCHA can all leave the form standing after the write. Recording the
+            // tenant here would later authorize a sign-in to an account Litos may never have made.
+            // Account activation is intentionally deferred until a later stage can prove the
+            // create form disappeared and an authenticated application marker replaced it.
+            const gate = inspectWorkdayAccountGate();
+            let actionStarted: 'create' | 'sign_in' | undefined;
+            let blockingReason = gate.kind === 'clear' ? undefined : gate.reason;
+            if (!blockingReason && password && fillResult.password_filled) {
+              const action = creatingAccount ? 'create' : 'sign_in';
+              const actionControl = findWorkdayAccountSubmit(action);
+              if (!actionControl) {
+                blockingReason = 'Litos could not identify a safe Workday account button. Complete this step yourself.';
+              } else if (creatingAccount && (!saltFingerprint || !result.applicationId)) {
+                blockingReason = 'Litos could not bind this account to the prepared application. Complete this step yourself.';
+              } else if (!creatingAccount && !knownAccount) {
+                blockingReason = 'Litos could not prove it made this account for this application email, so it did not sign in.';
+              } else {
+                const claimPayload = {
+                  host: portalHost,
+                  email: result.email,
+                  applicationId: result.applicationId ?? '',
+                };
+                let claimedAuthEpoch: number | null = Number.isSafeInteger(accountState.authEpoch) ? accountState.authEpoch : null;
+                const outcome = await runBoundedWorkdayAccountAction({
+                  action,
+                  control: actionControl,
+                  claim: creatingAccount && saltFingerprint && result.applicationId
+                    ? async () => {
+                      const claim = await workdayAccountMessage<{ claimed: boolean; authEpoch?: number }>('CLAIM_WORKDAY_ACCOUNT', {
+                        ...claimPayload,
+                        saltFingerprint,
+                        requestedAt: Date.now(),
+                      });
+                      claimedAuthEpoch = claim.claimed && Number.isSafeInteger(claim.authEpoch) ? claim.authEpoch! : null;
+                      return claimedAuthEpoch !== null;
+                    }
+                    : undefined,
+                  revalidateClaim: async () => claimedAuthEpoch !== null && (await workdayAccountMessage<{ valid: boolean }>(
+                      'VALIDATE_WORKDAY_ACCOUNT_ACTION',
+                      { ...claimPayload, authEpoch: claimedAuthEpoch, action },
+                    )).valid,
+                  abandon: creatingAccount && result.applicationId
+                    ? () => workdayAccountMessage('ABANDON_WORKDAY_ACCOUNT_CLAIM', claimPayload)
+                    : undefined,
+                });
+                if (outcome.started) actionStarted = action;
+                else if (outcome.reason === 'claim_denied') {
+                  blockingReason = 'Litos already has an unfinished account attempt for this Workday email. It stopped to avoid creating a duplicate.';
+                } else if (outcome.reason === 'gate') {
+                  blockingReason = outcome.gate?.kind === 'clear' || !outcome.gate
+                    ? 'The Workday account page changed. Complete this step yourself.'
+                    : outcome.gate.reason;
+                } else if (outcome.reason === 'control_changed') {
+                  blockingReason = 'The Workday account button changed before Litos could use it. Complete this step yourself.';
+                } else {
+                  blockingReason = 'Workday did not accept the account action. Complete this step yourself.';
+                }
+              }
             }
 
             chrome.runtime.sendMessage({
@@ -2065,6 +2263,8 @@ export default defineContentScript({
                   emailFilled: fillResult.email_filled,
                   passwordFilled: fillResult.password_filled,
                   passwordWithheldReason,
+                  blockingReason,
+                  actionStarted,
                 });
               }
             });
@@ -2224,6 +2424,20 @@ export default defineContentScript({
       // title exists in the DOM and getJobDetails() falls back to site chrome
       // ("CAREERS AT NVIDIA"). So Workday routes stage-by-stage here and returns early.
       if (h.includes('myworkdayjobs.com') || h.includes('workday.com')) {
+        chrome.runtime.sendMessage(
+          { type: 'GET_ACCOUNT_CREATION_DATA' },
+          (identity: { email?: string; applicationId?: string } | undefined) => {
+            if (!identity?.email || !identity.applicationId || !workdayAccountReceiptProof(identity.email)) return;
+            chrome.runtime.sendMessage({
+              type: 'ACTIVATE_WORKDAY_ACCOUNT',
+              payload: {
+                host: portalKeyForHost(window.location.hostname),
+                email: identity.email,
+                applicationId: identity.applicationId,
+              },
+            }).catch(() => undefined);
+          },
+        );
         if (isWorkdayApplicationPage()) {
           injectActionCard(job.title, job.company, window.location.href);
           watchSubmitButton(job.title, job.company, window.location.href);

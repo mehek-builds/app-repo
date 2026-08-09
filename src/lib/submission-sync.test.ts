@@ -17,7 +17,8 @@ describe('extension submission synchronization wiring', () => {
   it('reserves manual submissions before allowing the employer click', () => {
     expect(content).toMatch(/event\.preventDefault\(\)/);
     expect(content).toMatch(/event\.stopImmediatePropagation\(\)/);
-    expect(content).toMatch(/submitButton\.removeEventListener[\s\S]*?submitButton\.click\(\)/);
+    expect(content).toMatch(/replayWorkdayFinalSubmitIfAllowed[\s\S]*?submitButton\.removeEventListener/);
+    expect(content).toMatch(/outcome: 'cancelled'/);
   });
 
   it('ignores pre-existing and hidden confirmation content', () => {

@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { getToken, getProfile, clearAll } from '../../lib/storage';
+import { getToken, getProfile } from '../../lib/storage';
+import { requestBackgroundSessionClear } from '../../lib/popup-session';
 import type { Contact, Draft, JobContext, PendingDraft, Profile, Screen, Tier, ContactStatus } from '../../lib/types';
 import OnboardingScreen from '../../components/OnboardingScreen';
 import MainScreen from '../../components/MainScreen';
@@ -151,7 +152,7 @@ export default function App() {
   };
 
   const handleLogout = async () => {
-    await clearAll();
+    await requestBackgroundSessionClear();
     setToken(null);
     setProfile(null);
     setContacts([]);
