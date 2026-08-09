@@ -470,55 +470,39 @@ export type LinkQuestion = { field: 'linkedin' | 'github' | 'portfolio'; url?: s
 // desiredAnswer (to answer them), so the two can never drift apart on what counts as a referral.
 export const REFERRAL_QUESTION = /how did you .*hear|how did you hear|first hear|referral source|hear about (this|us|the)|source of/i;
 
-// The wordings a form uses for ONE channel: the employer's own site. A referral answer widens
-// along this list and nowhere else, because widening is only sound between spellings of the same
-// fact. "Company website" -> "Careers page" restates the stored answer; "LinkedIn" -> "Company
-// website" replaces it with a different one, which is the R-118 invention wearing a stored value
-// as cover. Kept as literal wordings rather than a loose regex so the set cannot quietly grow to
-// cover a channel it was never meant to speak for; anything outside it degrades to the stored
-// value plus "Other", which is safe.
-const COMPANY_SITE_SYNONYMS = ['company website', 'company careers', 'careers page', 'company site'];
-
-// Wordings a student may have typed that MEAN the employer's own site, which is a wider set than
-// the option spellings above (nobody types "company careers" into a settings field, but "the
-// company's careers page" is ordinary). Matching is on a normalized form, and a miss is cheap:
-// the answer falls back to the stored value plus a catch-all rather than to a different channel.
-//
-// EVERY ENTRY MUST NAME THE EMPLOYER OR THE CAREERS SURFACE. A bare "website" / "careers" was
-// here and came out in review: a student who typed "Website" may have meant the job board's site
-// or a link a recruiter sent, and widening that into "Careers page" asserts she came through the
-// employer's own site. That is the invention this whole rule exists to stop, reached through the
-// allowlist instead of around it. Bare wordings degrade to [stored, catch-all], which is safe.
-const COMPANY_SITE_STORED_WORDINGS = new Set([
-  ...COMPANY_SITE_SYNONYMS,
-  'company web site',
-  'company careers page',
-  'company careers site',
-  'company career page',
-  'company job page',
-  'careers site',
-  'careers portal',
-  'careers webpage',
-  'career page',
-  'career site',
-  'employer website',
-  'employer site',
-  'job posting on company website',
-]);
-
-export function namesTheCompanySite(stored: string): boolean {
-  // Normalize FIRST, strip the article LAST. The other order (which shipped to review) anchored
-  // /^the\s+/ against raw input, so one leading space or quote defeated it, and only two of the
-  // five apostrophe characters in circulation were handled. clean() takes the zero-width and
-  // non-breaking characters that `trim` leaves behind.
-  const normalized = clean(stored)
+// The extension knows the page being filled, but not how the applicant found it. Arriving on an
+// employer form is not evidence that the posting was discovered on that employer's site. These
+// profile values therefore remain review-only here, including the bare ambiguous words that used
+// to exact-match options named "Website" or "Careers". The backend managed path can answer when
+// its packet carries application-specific acquisition evidence; this client path carries none.
+function normalizedReferralSource(stored: string): string {
+  return clean(stored)
     .toLowerCase()
-    .replace(/[’‘'`´ʼ]s\b/g, '') // "the company's careers page" -> "the company careers page"
+    .replace(/[’‘'`´ʼ]s\b/g, '')
     .replace(/[^a-z ]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
     .replace(/^the /, '');
-  return COMPANY_SITE_STORED_WORDINGS.has(normalized);
+}
+
+/**
+ * Does this source semantically name the employer's own hiring surface?
+ *
+ * This is deliberately structural rather than a finite phrase list. Portals vary articles,
+ * possessives, punctuation, owner nouns, singular/plural "career", and page/site/portal wording.
+ * Missing one spelling lets an unevidenced historical profile value exact-match a form option.
+ * The shape stays narrow to employer ownership, so LinkedIn, Indeed, recruiters, university
+ * career fairs, and even "University careers page" remain explicit non-site channels.
+ */
+export function namesTheCompanySite(stored: string): boolean {
+  const normalized = normalizedReferralSource(stored);
+  if (/^careers? (?:page|site|web site|website|webpage|portal)$/.test(normalized)) return true;
+  return /^(?:(?:job )?posting (?:on|via|from|at) )?(?:company|employer|organi[sz]ation)(?: own)? (?:(?:career|careers|job|jobs|hiring) )?(?:web site|website|webpage|site|page|portal|careers?)$/.test(normalized);
+}
+
+function isUnverifiedCompanySiteSource(stored: string): boolean {
+  const normalized = normalizedReferralSource(stored);
+  return /^(?:web site|website|webpage|careers?)$/.test(normalized) || namesTheCompanySite(normalized);
 }
 
 // "When can you start", broadened by R-014: "starting date" / "earliest possible starting date"
@@ -1450,18 +1434,12 @@ export function desiredAnswer(label: string, ap: ApplicationProfile, eeo: Record
       // leaves standing and which adapters then type into a combobox as a typeahead query.
       const stored = clean(ap.referral_source_default ?? '');
       if (!stored) return null;
-      // A stored value does not license the whole list either. The synonyms are spellings of ONE
-      // channel (see COMPANY_SITE_SYNONYMS), so they may stand in for a stored "Company website"
-      // and for nothing else: a student who stored "LinkedIn" and meets a form with no LinkedIn
-      // option was, until now, answered "Company website" - the same invented fact as the unset
-      // branch, just harder to see because a value WAS stored.
-      // Exact matching prevents a bare stored "Website" or "Careers" from widening into the
-      // employer's own site. Explicit company-site synonyms remain available as exact alternatives.
-      // Every stored answer keeps the catch-all behind it, which stays true by construction: it
-      // says the recorded channel is not on this list, which is exactly what happened.
-      return namesTheCompanySite(stored)
-        ? { mode: 'oneof', values: [stored, ...COMPANY_SITE_SYNONYMS], exact: true, catchall: true }
-        : { mode: 'oneof', values: [stored], exact: true, catchall: true };
+      if (isUnverifiedCompanySiteSource(stored)) return null;
+      // A stored value does not license the whole list either. Company-site values returned above
+      // because this path lacks packet evidence. Every remaining explicit channel keeps only its
+      // exact value and the catch-all behind it. The catch-all stays true by construction: it says
+      // the recorded channel is not on this list, which is exactly what happened.
+      return { mode: 'oneof', values: [stored], exact: true, catchall: true };
     }
 
     // Salary answers route through the R-031 rule rather than the bare stored value: a range

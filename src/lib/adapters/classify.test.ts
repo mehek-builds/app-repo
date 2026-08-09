@@ -72,17 +72,8 @@ describe('desiredAnswer value branches (characterization - behaviour predates cl
     expect(JSON.stringify(d)).not.toContain('Emirates');
   });
 
-  it('referral source offers the stored answer, its spellings, and a catch-all behind them', () => {
-    // The old name here said "neutral fallbacks" and the old assertion only read values[0], so it
-    // passed identically before and after the fix that removed the invented fallbacks. It now
-    // pins the whole shape. FULL stores "Company website", so this is the widening branch: the
-    // synonyms are spellings of that same channel, never a substitute for it.
-    expect(desiredAnswer('how did you hear about this role?', FULL, NO_EEO)).toEqual({
-      mode: 'oneof',
-      values: ['Company website', 'company website', 'company careers', 'careers page', 'company site'],
-      exact: true,
-      catchall: true,
-    });
+  it('historical Company website profile data is not packet-specific evidence', () => {
+    expect(desiredAnswer('how did you hear about this role?', FULL, NO_EEO)).toBeNull();
   });
 
   it('academic profile fields answer school, degree, graduation date, and discipline', () => {

@@ -512,12 +512,12 @@ describe('referral source never invents a channel the profile does not store', (
     }
   });
 
-  it('keeps the synonym widening for a value the student actually stored', () => {
-    const values = valuesOf(desiredAnswer(REFERRAL_LABEL, ap({ referral_source_default: 'Company website' }), {}));
-    expect(values[0]).toBe('Company website');
-    expect(values).toContain('careers page');
-    expect(matchOption(opts('LinkedIn', 'Careers page', 'Other'), desiredAnswer(REFERRAL_LABEL,
-      ap({ referral_source_default: 'Company website' }), {}))?.text).toBe('Careers page');
+  it('holds the historical company-site default without packet-specific acquisition evidence', () => {
+    for (const source of ['Company website', 'Website', 'Web site', 'Careers', 'Careers page']) {
+      expect(desiredAnswer(REFERRAL_LABEL, ap({ referral_source_default: source }), {}), source).toBeNull();
+      expect(matchOption(opts(source, 'Other'), desiredAnswer(REFERRAL_LABEL,
+        ap({ referral_source_default: source }), {})), source).toBeNull();
+    }
   });
 
   it('answers a stored referral source with the value the student wrote, first', () => {
@@ -546,11 +546,10 @@ describe('referral source never invents a channel the profile does not store', (
     expect(matchOption(opts('LinkedIn', 'Indeed', 'Other'), desired)?.text).toBe('LinkedIn');
   });
 
-  it('widens only wordings that name the same channel the student stored', () => {
-    // These all mean "I found it on the employer's own site", so a form wording the option
-    // differently is a spelling difference, not a different answer. Each entry also exercises one
-    // step of the normalizer: a typographic apostrophe, a leading article behind whitespace,
-    // punctuation, a doubled space.
+  it('recognises company-site wordings without treating recognition as submission evidence', () => {
+    // These all claim the employer's own site. The matrix varies owner nouns, possessives,
+    // punctuation, articles, and surface nouns so a finite phrase set cannot accidentally pass a
+    // new portal spelling through exact-match or Other.
     for (const source of [
       'Company website',
       'Careers page',
@@ -561,10 +560,17 @@ describe('referral source never invents a channel the profile does not store', (
       'careers-page',
       'company  website',
       'career site',
+      'Employer careers page',
+      'The employer’s careers page',
+      "The employer's career-site",
+      'Company careers portal',
+      'Company hiring portal',
+      'Organization jobs site',
+      'Organisation career webpage',
+      'Job posting on company website',
     ]) {
       expect(namesTheCompanySite(source), source).toBe(true);
-      expect(matchOption(opts('LinkedIn', 'Careers page', 'Other'),
-        desiredAnswer(REFERRAL_LABEL, ap({ referral_source_default: source }), {}))?.text, source).toBe('Careers page');
+      expect(desiredAnswer(REFERRAL_LABEL, ap({ referral_source_default: source }), {}), source).toBeNull();
     }
     // Near misses, not far ones. Each is a word away from the allowlist, so any reimplementation
     // as a loose regex (/website|careers?/) fails here rather than silently widening "my portfolio
@@ -574,8 +580,32 @@ describe('referral source never invents a channel the profile does not store', (
       'Website', 'web site', 'careers',
       'personal website', 'my website', 'portfolio website',
       'company blog', 'LinkedIn company page', 'recruiter website',
+      'University careers page', 'Handshake career portal', 'Employer referral',
     ]) {
       expect(namesTheCompanySite(source), source).toBe(false);
+    }
+  });
+
+  it('fails closed before exact or Other matching for every ambiguous employer-site source', () => {
+    for (const source of [
+      'Website',
+      'Website!',
+      'Careers',
+      'Employer careers page',
+      'The employer’s careers page',
+      'Company careers portal',
+    ]) {
+      const desired = desiredAnswer(REFERRAL_LABEL, ap({ referral_source_default: source }), {});
+      expect(desired, source).toBeNull();
+      expect(matchOption(opts(source, 'Other'), desired), source).toBeNull();
+    }
+  });
+
+  it('keeps genuine explicit non-site sources eligible for exact and truthful catch-all matching', () => {
+    for (const source of ['LinkedIn', 'Indeed', 'Recruiter', 'Employee referral', 'University career fair']) {
+      const desired = desiredAnswer(REFERRAL_LABEL, ap({ referral_source_default: source }), {});
+      expect(matchOption(opts(source, 'Other'), desired)?.text, source).toBe(source);
+      expect(matchOption(opts('Not listed', 'Other'), desired)?.text, source).toBe('Other');
     }
   });
 
@@ -623,6 +653,7 @@ describe('referral source never invents a channel the profile does not store', (
   it('never widens ambiguous stored words into an employer-site claim', () => {
     for (const source of ['Website', 'Web site', 'Careers']) {
       const desired = desiredAnswer(REFERRAL_LABEL, ap({ referral_source_default: source }), {});
+      expect(desired, source).toBeNull();
       for (const option of ['Company website', 'Company web site', 'Company careers', 'Careers page']) {
         expect(matchOption(opts(option), desired), `${source} -> ${option}`).toBeNull();
       }
