@@ -33,6 +33,11 @@ export const KNOWN_ATS_HOSTS = [
   'icims.com',
   'oraclecloud.com',
   'recruiting.ultipro.com',
+  'fa007.taleo.net',
+  'aa270.taleo.net',
+  'myjobs.adp.com',
+  'utilidata.applytojob.com',
+  'foundationai.applytojob.com',
 ] as const;
 
 const EXACT_HOSTS = new Set([
@@ -41,6 +46,11 @@ const EXACT_HOSTS = new Set([
   'www.staffingsolutionsenterprises.com',
   'jobs.jobvite.com',
   'recruiting.ultipro.com',
+  'fa007.taleo.net',
+  'aa270.taleo.net',
+  'myjobs.adp.com',
+  'utilidata.applytojob.com',
+  'foundationai.applytojob.com',
 ]);
 
 function matchesKnownHost(hostname: string, known: string): boolean {
@@ -83,6 +93,7 @@ const APPLICATION_SCOPED_ADAPTERS = new Set([
   'teamtailor',
   'zoho_recruit',
   'bullhorn',
+  'jazzhr',
 ]);
 
 /** The one routing decision used by both automatic and popup-triggered initialization. */
@@ -92,6 +103,7 @@ export function contentInitRoute(
   const host = location.hostname.toLowerCase();
   if (isVendorProductOrLoginHost(host, location.pathname)) return 'ignore';
   if (gatedPortalNotice(host, location.pathname, location.search)) return 'gated';
+  if (host === 'fa007.taleo.net' || host === 'aa270.taleo.net' || host === 'myjobs.adp.com') return 'ignore';
 
   // The manifest must cover SuccessFactors wildcard hosts, but only the exact career route above
   // is relevant. Every other product, login, and administrative page stays untouched.

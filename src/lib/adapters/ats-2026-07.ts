@@ -23,7 +23,7 @@ import { browserApplicationCapability } from './browser-application-capabilities
 type FieldKey = 'fullName' | 'firstName' | 'lastName' | 'email' | 'confirmEmail' | 'phone' | 'city' | 'linkedin' | 'portfolio';
 
 interface AtsSpec {
-  readonly id: 'smartrecruiters' | 'rippling' | 'breezy' | 'bamboohr' | 'recruitee' | 'teamtailor' | 'personio' | 'pinpoint' | 'comeet' | 'zoho_recruit' | 'bullhorn';
+  readonly id: 'smartrecruiters' | 'rippling' | 'breezy' | 'bamboohr' | 'recruitee' | 'teamtailor' | 'personio' | 'pinpoint' | 'comeet' | 'zoho_recruit' | 'bullhorn' | 'jazzhr';
   readonly host: (hostname: string) => boolean;
   readonly isApplicationPath: (pathname: string, rawSearch: string, hash: string) => boolean;
   /** Selectors for the fields the profile can answer factually. Absent keys are simply not filled. */
@@ -68,6 +68,24 @@ const AUTO_SUBMIT_CAPABILITIES = {
 } as const satisfies Record<string, 'conditional' | 'never'>;
 
 export const ATS_SPECS: readonly AtsSpec[] = [
+  {
+    id: 'jazzhr',
+    host: (h) => h === 'utilidata.applytojob.com' || h === 'foundationai.applytojob.com',
+    isApplicationPath: (p) => /^\/apply\/jobs\/details\/[A-Za-z0-9]{10}\/?$/.test(p),
+    fields: {
+      firstName: 'input[name="resumator-firstname-value"]',
+      lastName: 'input[name="resumator-lastname-value"]',
+      email: 'input[name="resumator-email-value"]',
+      phone: 'input[name="resumator-phone-value"]',
+      city: 'input[name="resumator-city-value"]',
+      linkedin: 'input[name="resumator-linkedin-value"]',
+    },
+    resume: 'input[type="file"][name="resumator-resume-value"]',
+    jd: 'main, #resumator-job-description',
+    autoSubmit: 'never',
+    ceiling:
+      'JazzHR requires a Human Check and can add tenant-specific legal, EEO, availability and compensation questions. Litos filled only the fixed factual controls and left every other control and the send button to you.',
+  },
   {
     id: 'smartrecruiters',
     host: (h) => h === 'jobs.smartrecruiters.com',
@@ -428,7 +446,7 @@ export async function fillAtsApplication(params: GenericFillParams): Promise<Aut
   for (const [key, selector] of Object.entries(spec.fields) as Array<[FieldKey, string]>) {
     const value = values[key];
     if (!value) continue;
-    const el = spec.id === 'zoho_recruit' || spec.id === 'bullhorn'
+    const el = spec.id === 'zoho_recruit' || spec.id === 'bullhorn' || spec.id === 'jazzhr'
       ? visibleSafeFixedInput(selector)
       : queryAtsControl<HTMLInputElement>(spec, selector);
     // Never overwrite: the student may have typed something, or the platform may have prefilled it
@@ -445,26 +463,28 @@ export async function fillAtsApplication(params: GenericFillParams): Promise<Aut
   // SmartRecruiters keeps the upload inside the same open-shadow component boundary as its text
   // controls. Attach it here because generic.ts intentionally scans only the light DOM. For every
   // other ATS, generic keeps using the exact captured selector as before.
-  let shadowResumeAttached = false;
-  if (spec.openShadowRoots && spec.resume && params.resumeBlob && params.resumeFileName) {
-    const input = queryAtsControl<HTMLInputElement>(spec, spec.resume);
+  let exactResumeAttached = false;
+  if ((spec.openShadowRoots || spec.id === 'jazzhr') && spec.resume && params.resumeBlob && params.resumeFileName) {
+    const input = spec.id === 'jazzhr'
+      ? visibleSafeFixedInput(spec.resume)
+      : queryAtsControl<HTMLInputElement>(spec, spec.resume);
     if (input) {
       const file = new File([params.resumeBlob], params.resumeFileName, { type: 'application/pdf' });
       const transfer = new DataTransfer();
       transfer.items.add(file);
       input.files = transfer.files;
       input.dispatchEvent(new Event('change', { bubbles: true }));
-      shadowResumeAttached = true;
+      exactResumeAttached = true;
     }
   }
 
   // SmartRecruiters is intentionally fixed-field-only. Its measured capability is the exact
   // first-page shadow controls above, not arbitrary light-DOM fields that a tenant, injected page,
   // or later wizard step may expose. Do not call the generic writer at all for this family.
-  if (spec.id === 'smartrecruiters') {
+  if (spec.id === 'smartrecruiters' || spec.id === 'jazzhr') {
     const resumeReason = !params.resumeBlob || !params.resumeFileName
       ? 'resume: no generated resume file available'
-      : shadowResumeAttached
+      : exactResumeAttached
         ? null
         : 'resume: no file input found on this form';
     const skippedReasons = [
@@ -473,7 +493,7 @@ export async function fillAtsApplication(params: GenericFillParams): Promise<Aut
     ];
     const result = {
       ats_name: spec.id,
-      fields_filled: filled + (shadowResumeAttached ? 1 : 0),
+      fields_filled: filled + (exactResumeAttached ? 1 : 0),
       fields_skipped: resumeReason ? 1 : 0,
       ai_drafted: 0,
       skipped_reasons: skippedReasons,
@@ -497,7 +517,7 @@ export async function fillAtsApplication(params: GenericFillParams): Promise<Aut
   const genericMissingResume = 'resume: no generated resume file available';
   const skippedReasons = spec.openShadowRoots
     ? rest.skipped_reasons.map((reason) => reason === genericMissingResume
-      ? shadowResumeAttached
+      ? exactResumeAttached
         ? ''
         : 'resume: no file input found on this form'
       : reason).filter(Boolean)
@@ -507,8 +527,8 @@ export async function fillAtsApplication(params: GenericFillParams): Promise<Aut
     // Names the real platform rather than inheriting generic's label, so the run's own record says
     // which adapter ran. The student's card and the issue register both read this.
     ats_name: spec.id,
-    fields_filled: rest.fields_filled + filled + (shadowResumeAttached ? 1 : 0),
-    fields_skipped: Math.max(0, rest.fields_skipped - (shadowResumeAttached ? 1 : 0)),
+    fields_filled: rest.fields_filled + filled + (exactResumeAttached ? 1 : 0),
+    fields_skipped: Math.max(0, rest.fields_skipped - (exactResumeAttached ? 1 : 0)),
     // The ceiling is surfaced to the student as a skip reason rather than swallowed, so a run that
     // stops one step short reads as a known platform limit instead of an unexplained partial fill.
     skipped_reasons: spec.ceiling ? [...skippedReasons, spec.ceiling] : skippedReasons,
@@ -521,7 +541,7 @@ export async function fillAtsApplication(params: GenericFillParams): Promise<Aut
 // application field exists, so there is no selector worth writing and an adapter would be a
 // fill that silently does nothing. All four read live 2026-07-29.
 
-type GatedPortal = 'jobvite' | 'icims' | 'oraclecloud' | 'ultipro' | 'sap_successfactors';
+type GatedPortal = 'jobvite' | 'icims' | 'oraclecloud' | 'ultipro' | 'sap_successfactors' | 'oracle_taleo' | 'adp_recruiting';
 
 const GATED_PORTALS: ReadonlyArray<{
   id: GatedPortal;
@@ -567,6 +587,20 @@ const GATED_PORTALS: ReadonlyArray<{
     notice:
       'This company asks you to sign in or create a SuccessFactors account before the application form opens. Litos leaves that account and every later legal choice to you.',
   },
+  {
+    id: 'oracle_taleo',
+    host: (h) => h === 'fa007.taleo.net' || h === 'aa270.taleo.net',
+    path: (p) => /^\/careersection\/ex\/jobdetail\.ftl$/i.test(p),
+    notice:
+      'This Taleo application asks you to accept the employer legal notice before any application fields open. Litos leaves that decision and the later account flow to you.',
+  },
+  {
+    id: 'adp_recruiting',
+    host: (h) => h === 'myjobs.adp.com',
+    path: (p) => /^\/(?:guitarcenterexternal|kaisercareers)\/cx\/job-details\/?$/i.test(p),
+    notice:
+      'This ADP Recruiting application requires an account before any application fields open. Litos leaves the account and every later legal choice to you.',
+  },
 ];
 
 /**
@@ -582,7 +616,13 @@ export function gatedPortalNotice(
 ): string | null {
   const portal = GATED_PORTALS.find((candidate) => candidate.host(hostname) && candidate.path(pathname));
   if (!portal) return null;
-  if (portal?.id !== 'sap_successfactors') return portal?.notice ?? null;
+  if (portal.id === 'oracle_taleo') {
+    return /^\d+$/.test(new URLSearchParams(search).get('job') ?? '') ? portal.notice : null;
+  }
+  if (portal.id === 'adp_recruiting') {
+    return /^\d+$/.test(new URLSearchParams(search).get('reqId') ?? '') ? portal.notice : null;
+  }
+  if (portal.id !== 'sap_successfactors') return portal.notice;
   const query = new URLSearchParams(search);
   const jobId = query.get('jobId') ?? query.get('career_job_req_id') ?? query.get('job_application');
   const company = query.get('company');

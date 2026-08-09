@@ -128,6 +128,14 @@ export default defineContentScript({
     // /hcmUI/CandidateExperience/ is the candidate-facing recruiting app and nothing else.
     'https://*.oraclecloud.com/hcmUI/CandidateExperience/*',
     'https://recruiting.ultipro.com/*/JobBoard/*',
+    // Exact tenants and routes captured 2026-08-09. Taleo and ADP stop at a legal or account wall;
+    // JazzHR exposes only the fixed factual controls before its Human Check.
+    'https://fa007.taleo.net/careersection/*',
+    'https://aa270.taleo.net/careersection/*',
+    'https://myjobs.adp.com/guitarcenterexternal/cx/job-details*',
+    'https://myjobs.adp.com/kaisercareers/cx/job-details*',
+    'https://utilidata.applytojob.com/apply/jobs/details/*',
+    'https://foundationai.applytojob.com/apply/jobs/details/*',
     'https://*.jobs.personio.de/job/*',
     'https://*.jobs.personio.com/job/*',
     'https://*.pinpointhq.com/postings/*',
