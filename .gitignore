@@ -1,4 +1,7 @@
-node_modules/
+# No trailing slash on purpose: "node_modules/" is a DIRECTORY-only pattern, and a symlink named
+# node_modules is not a directory to git, so it slipped past this line and got committed once
+# already (blob 120000, added in aee47fe). Without the slash the name is ignored whatever it is.
+node_modules
 .output/
 .wxt/
 dist/
