@@ -467,9 +467,7 @@ describe('referral source never invents a channel the profile does not store', (
   const valuesOf = (d: Desired): string[] => (d as { values: string[] }).values;
 
   it('claims nothing at all when no referral source is stored', () => {
-    // No values, just the catch-all flag. The first version of this fix passed the literal string
-    // 'other' as a value; see the catch-all matrix below for what that actually selected.
-    expect(desiredAnswer(REFERRAL_LABEL, ap(), {})).toEqual({ mode: 'oneof', values: [], catchall: true });
+    expect(desiredAnswer(REFERRAL_LABEL, ap(), {})).toBeNull();
   });
 
   it('names no company-website channel on any unset-profile referral phrasing', () => {
@@ -479,8 +477,7 @@ describe('referral source never invents a channel the profile does not store', (
       'referral source',
       'how did you hear about this opportunity? linkedin / indeed / other',
     ]) {
-      const values = valuesOf(desiredAnswer(label, ap(), {}));
-      for (const claim of INVENTED) expect(values, `${label} -> ${claim}`).not.toContain(claim);
+      expect(desiredAnswer(label, ap(), {}), label).toBeNull();
     }
   });
 
@@ -500,9 +497,10 @@ describe('referral source never invents a channel the profile does not store', (
     expect(skippedReasonsNeedReview([`radio question left for you: "${REFERRAL_LABEL}"`])).toBe(true);
   });
 
-  it('still picks "Other" when the form offers one', () => {
+  it('leaves an exact "Other" option unanswered when no source is stored', () => {
     const options = opts('LinkedIn', 'Job board', 'Other');
-    expect(matchOption(options, desiredAnswer(REFERRAL_LABEL, ap(), {}))?.text).toBe('Other');
+    expect(matchOption(options, desiredAnswer(REFERRAL_LABEL, ap(), {}))).toBeNull();
+    expect(skippedReasonsNeedReview([`dropdown left for you: "${REFERRAL_LABEL}"`])).toBe(true);
   });
 
   it('treats an empty, whitespace, or zero-width stored value as unset rather than as an answer', () => {
@@ -510,7 +508,7 @@ describe('referral source never invents a channel the profile does not store', (
     // typeahead query, so a lone U+200B surviving the guard gets typed into a live form field.
     for (const blank of ['', '   ', '​', ' ​ ﻿ ', ' ']) {
       expect(desiredAnswer(REFERRAL_LABEL, ap({ referral_source_default: blank }), {}), JSON.stringify(blank))
-        .toEqual({ mode: 'oneof', values: [], catchall: true });
+        .toBeNull();
     }
   });
 
@@ -586,7 +584,7 @@ describe('referral source never invents a channel the profile does not store', (
   // \bother\b hits "Other referral" and "Other job board" just as readily as "Other" - and a
   // single hit commits, filled, with no skip reason. Measured on the first version of this fix.
   it('accepts only a catch-all that names no channel', () => {
-    const desired = desiredAnswer(REFERRAL_LABEL, ap(), {});
+    const desired = desiredAnswer(REFERRAL_LABEL, ap({ referral_source_default: 'Source not listed' }), {});
     for (const [options, expected] of [
       [['LinkedIn', 'Other'], 'Other'],
       [['LinkedIn', 'Other (please specify)'], 'Other (please specify)'],
@@ -602,6 +600,10 @@ describe('referral source never invents a channel the profile does not store', (
       [['Job boards (Other)', 'LinkedIn'], null],
       [['LinkedIn', 'Other social media'], null],
       [['LinkedIn', 'Other source'], null],
+      [['Indeed', 'Other: job board'], null],
+      [['Indeed', 'Other - employee referral'], null],
+      [['Indeed', 'Other (job board)'], null],
+      [['Indeed', 'Other, recruiter website'], null],
       // No catch-all at all, and ambiguity, both go to the student.
       [['LinkedIn', 'Indeed', 'Company website', 'Employee referral'], null],
       [['Other', 'Other (please specify)'], null],
@@ -616,6 +618,15 @@ describe('referral source never invents a channel the profile does not store', (
     expect(matchOption(opts('Indeed', 'Other'), desired)?.text).toBe('Other');
     // The stored value must not reach a channel-naming "Other ..." either.
     expect(matchOption(opts('Indeed', 'Other job board'), desired)).toBeNull();
+  });
+
+  it('never widens ambiguous stored words into an employer-site claim', () => {
+    for (const source of ['Website', 'Web site', 'Careers']) {
+      const desired = desiredAnswer(REFERRAL_LABEL, ap({ referral_source_default: source }), {});
+      for (const option of ['Company website', 'Company web site', 'Company careers', 'Careers page']) {
+        expect(matchOption(opts(option), desired), `${source} -> ${option}`).toBeNull();
+      }
+    }
   });
 });
 
