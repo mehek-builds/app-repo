@@ -99,6 +99,12 @@ export default defineContentScript({
     // /hcmUI/CandidateExperience/ is the candidate-facing recruiting app and nothing else.
     'https://*.oraclecloud.com/hcmUI/CandidateExperience/*',
     'https://recruiting.ultipro.com/*/JobBoard/*',
+    'https://*.jobs.personio.de/job/*',
+    'https://*.jobs.personio.com/job/*',
+    'https://*.pinpointhq.com/postings/*',
+    // Comeet renders the actual application as a token-bearing iframe on .co. allFrames below
+    // lets the adapter run inside that frame without reaching across origins.
+    'https://www.comeet.co/jobs/*',
   ],
   // Some companies embed their Greenhouse board in an iframe hosted on greenhouse.io while the
   // parent page is on the company's own domain (Section 9/12.3 of PRD-v2). `matches` is evaluated
@@ -352,17 +358,24 @@ export default defineContentScript({
         if (title && company) return { title, company };
       }
 
-      // Rippling / BreezyHR / BambooHR. All three put the role in the page's only h1 and none names
-      // the employer in the DOM reliably, so the company comes from the tenant subdomain, which IS
-      // the employer on every one of them (zinier.breezy.hr, prentkeromich.bamboohr.com). Rippling
-      // is the exception - ats.rippling.com/{tenant}/... carries it in the first path segment.
+      // Declarative ATS pages generally put the role in h1 and the employer in the tenant label.
+      // Rippling carries the tenant in its first path segment. Comeet's .co iframe carries the
+      // employer in its query or in the public wrapper referrer.
       if (specForCurrentPage()) {
-        const title =
-          document.querySelector<HTMLElement>('h1')?.textContent?.trim() ??
-          document.title.replace(/^apply\s*[-|]\s*/i, '').trim();
+        let referrerParts: string[] = [];
+        try {
+          referrerParts = new URL(document.referrer).pathname.split('/').filter(Boolean);
+        } catch {
+          referrerParts = [];
+        }
+        const title = document.querySelector<HTMLElement>('h1')?.textContent?.trim()
+          ?? (h === 'www.comeet.co' ? referrerParts.at(-2)?.replace(/[-_]+/g, ' ') : undefined)
+          ?? document.title.replace(/^apply\s*[-|]\s*/i, '').trim();
         const tenant = h === 'ats.rippling.com'
           ? window.location.pathname.split('/').filter(Boolean)[0]
-          : h.split('.')[0];
+          : h === 'www.comeet.co'
+            ? new URLSearchParams(window.location.search).get('company-name') ?? referrerParts[1]
+            : h.split('.')[0];
         const company = tenant ? tenant.replace(/[-_]+/g, ' ').trim() : undefined;
         if (title && company) return { title, company };
       }
@@ -2097,6 +2110,7 @@ export default defineContentScript({
       // the ATS path.
       'ats.rippling.com', 'breezy.hr', 'bamboohr.com',
       'jobs.jobvite.com', 'icims.com', 'oraclecloud.com', 'recruiting.ultipro.com',
+      'jobs.personio.de', 'jobs.personio.com', 'pinpointhq.com', 'comeet.co',
     ];
 
     // Company-hosted application forms (vercel.com/careers, lifeatspotify.com, ...): this

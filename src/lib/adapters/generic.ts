@@ -1377,7 +1377,8 @@ export interface GenericFillParams {
   // the generic adapter runs on company-hosted forms where nobody does, and falls back to scoring.
   resumeSelector?: string;
   // ATS-scoped safety policy. Some providers render privacy or retention consent as an ordinary
-  // radio, select, or checkbox that the generic answer engine would otherwise treat as routine.
+  // radio, select, checkbox, or text field that the generic answer engine would otherwise treat as
+  // routine. This policy is deny-only and cannot grant permission to fill a shared refusal field.
   providerPolicy?: GenericProviderPolicy;
   draftAnswer?: (question: string) => Promise<string | null>;
   signal?: AbortSignal;
@@ -1385,8 +1386,10 @@ export interface GenericFillParams {
 }
 
 export interface GenericProviderPolicy {
-  provider: 'recruitee' | 'teamtailor';
-  forbidConsentWrites: true;
+  provider: 'recruitee' | 'teamtailor' | 'personio' | 'pinpoint' | 'comeet';
+  forbidConsentWrites?: true;
+  neverFillSelectors?: readonly string[];
+  reviewReason?: string;
 }
 
 const PROVIDER_CONSENT_QUESTION =
@@ -1404,7 +1407,15 @@ export function providerPolicyForbidsControl(
   policy: GenericProviderPolicy | undefined,
   control: Element,
 ): boolean {
-  if (!policy?.forbidConsentWrites) return false;
+  if (!policy) return false;
+  if ((policy.neverFillSelectors ?? []).some((selector) => {
+    try {
+      return control.matches(selector) || !!control.closest(selector);
+    } catch {
+      return true;
+    }
+  })) return true;
+  if (!policy.forbidConsentWrites) return false;
   const name = control.getAttribute('name') ?? '';
   const supportedShape = control instanceof HTMLSelectElement
     || (control instanceof HTMLInputElement && /^(?:checkbox|radio)$/i.test(control.type));
@@ -1444,6 +1455,14 @@ export async function fillGenericApplication(params: GenericFillParams): Promise
   const blockedConsentControls = new Set<Element>();
   const recordedConsentLabels = new Set<string>();
   const recordConsentBlock = (label: string) => {
+    const policyReason = params.providerPolicy?.reviewReason;
+    if (policyReason) {
+      if (recordedConsentLabels.has(policyReason)) return;
+      recordedConsentLabels.add(policyReason);
+      fields_skipped++;
+      skipped_reasons.push(policyReason);
+      return;
+    }
     const normalized = label.replace(/\s+/g, ' ').trim();
     if (recordedConsentLabels.has(normalized)) return;
     recordedConsentLabels.add(normalized);
@@ -1454,7 +1473,7 @@ export async function fillGenericApplication(params: GenericFillParams): Promise
   // Preflight every control, including already-checked and visually hidden mirrors. Recruitee may
   // auto-submit only when a consent gate is absent, so a provider default or a hidden duplicate
   // must still hold the countdown even though the write loops would normally skip it.
-  if (params.providerPolicy?.forbidConsentWrites) {
+  if (params.providerPolicy) {
     for (const control of document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>('input, textarea, select')) {
       if (!providerPolicyForbidsControl(params.providerPolicy, control)) continue;
       blockedConsentControls.add(control);

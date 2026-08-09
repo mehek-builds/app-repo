@@ -22,9 +22,9 @@ import { fillGenericApplication, type GenericFillParams, type GenericProviderPol
 type FieldKey = 'fullName' | 'firstName' | 'lastName' | 'email' | 'phone' | 'city' | 'linkedin' | 'portfolio';
 
 interface AtsSpec {
-  readonly id: 'rippling' | 'breezy' | 'bamboohr' | 'recruitee' | 'teamtailor';
+  readonly id: 'rippling' | 'breezy' | 'bamboohr' | 'recruitee' | 'teamtailor' | 'personio' | 'pinpoint' | 'comeet';
   readonly host: (hostname: string) => boolean;
-  readonly isApplicationPath: (pathname: string) => boolean;
+  readonly isApplicationPath: (pathname: string, rawSearch: string) => boolean;
   /** Selectors for the fields the profile can answer factually. Absent keys are simply not filled. */
   readonly fields: Partial<Record<FieldKey, string>>;
   readonly resume?: string;
@@ -38,10 +38,30 @@ interface AtsSpec {
   readonly revealConfirms?: string;
   /** Present when the platform stops short of a submit even after a perfect fill. */
   readonly ceiling?: string;
-  /** Enforced by the content-script submit gate, separate from explanatory prose. */
+  /** Mirrors the single capability registry for tests and adapter diagnostics. */
   readonly autoSubmit: 'conditional' | 'never';
   readonly genericPolicy?: GenericProviderPolicy;
 }
+
+// One capability registry guards every non-user-initiated click path. It is intentionally
+// default-deny: a newly added or misspelled provider cannot inherit submission permission merely
+// because it is absent. Direct clicks by the applicant do not call this capability.
+const AUTO_SUBMIT_CAPABILITIES = {
+  greenhouse: 'conditional',
+  lever: 'conditional',
+  ashby: 'conditional',
+  workday: 'conditional',
+  linkedin: 'conditional',
+  generic: 'conditional',
+  recruitee: 'conditional',
+  rippling: 'conditional',
+  breezy: 'conditional',
+  bamboohr: 'conditional',
+  teamtailor: 'never',
+  personio: 'never',
+  pinpoint: 'never',
+  comeet: 'never',
+} as const satisfies Record<string, 'conditional' | 'never'>;
 
 export const ATS_SPECS: readonly AtsSpec[] = [
   {
@@ -55,7 +75,7 @@ export const ATS_SPECS: readonly AtsSpec[] = [
     },
     resume: 'input[type="file"][name="candidate.cv"]',
     jd: '[data-cy="offer-description"], main',
-    autoSubmit: 'conditional',
+    autoSubmit: AUTO_SUBMIT_CAPABILITIES.recruitee,
     genericPolicy: { provider: 'recruitee', forbidConsentWrites: true },
     // Tenant agreements and SMS consent are intentionally absent. The generic pass leaves
     // unanswered consent controls for the applicant, and the auto-submit gate fails closed.
@@ -72,11 +92,84 @@ export const ATS_SPECS: readonly AtsSpec[] = [
     },
     resume: '#upload_resume_field input[type="file"]',
     jd: '[data-job-description], main',
-    autoSubmit: 'never',
+    autoSubmit: AUTO_SUBMIT_CAPABILITIES.teamtailor,
     genericPolicy: { provider: 'teamtailor', forbidConsentWrites: true },
     ceiling:
       'This company asks you to confirm its applicant privacy terms before sending. Litos filled the form but left that choice and the send button to you.',
     // candidate[consent_given] and candidate[consent_given_future_jobs] are deliberately unmapped.
+  },
+  {
+    id: 'personio',
+    host: (h) => /^[a-z0-9-]+\.jobs\.personio\.(?:de|com)$/i.test(h),
+    isApplicationPath: (p) => /^\/job\/\d+\/apply\/?$/i.test(p),
+    fields: {
+      firstName: 'input[name="first_name"]',
+      lastName: 'input[name="last_name"]',
+      email: 'input[name="email"]',
+      phone: 'input[name="phone"]',
+      city: 'input[name="location"]',
+      linkedin: 'input[name="public_profile"]',
+    },
+    resume: 'input[type="file"][name="documents.cv"]',
+    jd: 'main, [data-testid="job-description"]',
+    autoSubmit: AUTO_SUBMIT_CAPABILITIES.personio,
+    genericPolicy: {
+      provider: 'personio',
+      neverFillSelectors: ['input[name="salary_expectations"]', 'input[name="available_from"]'],
+      reviewReason: 'Personio final review left for you: the page does not expose every required field to Litos.',
+    },
+    ceiling: 'Personio does not expose every required field to Litos. Review the form and send it yourself.',
+  },
+  {
+    id: 'pinpoint',
+    host: (h) => h !== 'www.pinpointhq.com' && /^[a-z0-9-]+\.pinpointhq\.com$/i.test(h),
+    isApplicationPath: (p) => /^\/(?:[a-z]{2}\/)?postings\/[0-9a-f-]+\/applications\/new\/?$/i.test(p),
+    fields: {
+      firstName: 'input[name="application_form[application][first_name]"]',
+      lastName: 'input[name="application_form[application][last_name]"]',
+      email: 'input[name="application_form[application][email]"]',
+      phone: 'input[name="application_form[application][phone]"]',
+      city: 'input[name="application_form[application][town]"]',
+      linkedin: 'input[name="application_form[application][linkedin_url]"][type="text"]',
+    },
+    resume: 'input[type="file"][name="application_form[application][cv]"]',
+    jd: 'main, [class*="posting-description"]',
+    autoSubmit: AUTO_SUBMIT_CAPABILITIES.pinpoint,
+    genericPolicy: {
+      provider: 'pinpoint',
+      forbidConsentWrites: true,
+      neverFillSelectors: ['input[name="application[process_information]"]', '#application_process_information'],
+      reviewReason: 'Pinpoint privacy-processing choice left for you: review the notice before submitting.',
+    },
+    ceiling: 'Pinpoint requires your privacy-processing choice. Review the notice and send the form yourself.',
+  },
+  {
+    id: 'comeet',
+    host: (h) => h === 'www.comeet.co',
+    // Inspect the raw query instead of URLSearchParams so the opaque token is never decoded,
+    // trimmed, normalized, or re-encoded by runtime detection.
+    isApplicationPath: (p, rawSearch) => /^\/jobs\/[A-Z0-9.]+\/[A-Z0-9.-]+\/apply\/?$/i.test(p)
+      && /(?:^\?|&)token=[^&]+(?:&|$)/.test(rawSearch),
+    fields: {
+      firstName: 'input[name="firstName"]',
+      lastName: 'input[name="lastName"]',
+      email: 'input[name="email"]',
+      phone: 'input[name="phone"]',
+      portfolio: 'input[name="websiteUrl"]',
+    },
+    resume: 'input[type="file"][name="cv"]',
+    jd: 'main, body',
+    autoSubmit: AUTO_SUBMIT_CAPABILITIES.comeet,
+    genericPolicy: {
+      provider: 'comeet',
+      neverFillSelectors: [
+        'textarea[name="g-recaptcha-response"]',
+        'input[name="g-recaptcha-response"]',
+        'textarea[name="comment"]',
+      ],
+      reviewReason: 'Comeet human verification left for you: solve the check and review the form before submitting.',
+    },
+    ceiling: 'Comeet requires human verification. Solve the check, review the form, and send it yourself.',
   },
   {
     id: 'rippling',
@@ -94,7 +187,7 @@ export const ATS_SPECS: readonly AtsSpec[] = [
     },
     resume: 'input[type="file"][data-testid="input-resume"]',
     jd: '[data-testid="job-description"], main',
-    autoSubmit: 'conditional',
+    autoSubmit: AUTO_SUBMIT_CAPABILITIES.rippling,
     // NOT mapped, deliberately: all three of Rippling's comboboxes share ONE data-testid
     // ("input-select-search-input") and are pronouns, phone country code, and "Please identify your
     // race". Two are the applicant's own to declare or decline and the third is part of the phone
@@ -115,7 +208,7 @@ export const ATS_SPECS: readonly AtsSpec[] = [
     },
     resume: 'input[type="file"][name="cResume"]',
     jd: '.description, [class*="job-description"], main',
-    autoSubmit: 'conditional',
+    autoSubmit: AUTO_SUBMIT_CAPABILITIES.breezy,
     // NOT mapped: textarea[name="cSummary"] is candidate-authored positioning, the same judgement
     // made for Workable's headline. smsConsent and gdprAgreement are consent checkboxes. hp_<hex> is
     // the honeypot, and it is isHoneypotField's job rather than an omission here - see the
@@ -140,7 +233,7 @@ export const ATS_SPECS: readonly AtsSpec[] = [
     // No name and no stable id on the file input; aria-label is the only hook.
     resume: 'input[type="file"][aria-label="file-input"]',
     jd: '.jss-job-description, main',
-    autoSubmit: 'conditional',
+    autoSubmit: AUTO_SUBMIT_CAPABILITIES.bamboohr,
     // The fields do not exist in the DOM until this is pressed, and /careers/{id}/apply is blank.
     revealButton: 'button',
     revealButtonText: /apply for this job/i,
@@ -160,12 +253,11 @@ export function specForCurrentPage(): AtsSpec | null {
 
 export function isAtsApplicationPage(): boolean {
   const spec = specForCurrentPage();
-  return spec ? spec.isApplicationPath(window.location.pathname) : false;
+  return spec ? spec.isApplicationPath(window.location.pathname, window.location.search) : false;
 }
 
 export function atsCanAutoSubmit(atsName: string): boolean {
-  const spec = ATS_SPECS.find((item) => item.id === atsName);
-  return spec?.autoSubmit !== 'never';
+  return AUTO_SUBMIT_CAPABILITIES[atsName as keyof typeof AUTO_SUBMIT_CAPABILITIES] === 'conditional';
 }
 
 export function clickAtsSubmitIfAllowed(
