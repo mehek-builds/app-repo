@@ -100,26 +100,38 @@ describe('the four platforms with no form to fill', () => {
     ['https://eeho.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/jobsearch/job/1', /code/i],
     ['https://recruiting.ultipro.com/she1011sphs/JobBoard/62d52737', /cannot read/i],
   ])('explains its own gate on %s', (url, expected) => {
-    expect(gatedPortalNotice(new URL(url).hostname)).toMatch(expected);
+    const parsed = new URL(url);
+    expect(gatedPortalNotice(parsed.hostname, parsed.pathname)).toMatch(expected);
   });
 
   it('gives each a DIFFERENT reason rather than one vague sentence', () => {
     const notices = [
-      'jobs.jobvite.com', 'jobs-express.icims.com', 'eeho.fa.us2.oraclecloud.com', 'recruiting.ultipro.com',
-    ].map((h) => gatedPortalNotice(h));
+      'https://jobs.jobvite.com/ness/job/o3mfAfwY/apply',
+      'https://jobs-express.icims.com/jobs/48173/sales-associate/login',
+      'https://eeho.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/jobsearch/job/1',
+      'https://recruiting.ultipro.com/she1011sphs/JobBoard/62d52737',
+    ].map((raw) => {
+      const parsed = new URL(raw);
+      return gatedPortalNotice(parsed.hostname, parsed.pathname);
+    });
     expect(notices.every(Boolean)).toBe(true);
     expect(new Set(notices).size).toBe(4);
   });
 
   it('never claims a form was filled, because none was reached', () => {
-    for (const host of ['jobs.jobvite.com', 'jobs-express.icims.com', 'eeho.fa.us2.oraclecloud.com']) {
-      expect(gatedPortalNotice(host)).not.toMatch(/filled/i);
+    for (const raw of [
+      'https://jobs.jobvite.com/ness/job/o3mfAfwY/apply',
+      'https://jobs-express.icims.com/jobs/48173/sales-associate/login',
+      'https://eeho.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/jobsearch/job/1',
+    ]) {
+      const parsed = new URL(raw);
+      expect(gatedPortalNotice(parsed.hostname, parsed.pathname)).not.toMatch(/filled/i);
     }
   });
 
   it('leaves the vendors’ own marketing and docs sites alone', () => {
     for (const host of ['www.icims.com', 'community.icims.com', 'www.jobvite.com', 'ultipro.com', 'www.oracle.com']) {
-      expect(gatedPortalNotice(host)).toBeNull();
+      expect(gatedPortalNotice(host, '/jobs/123/demo/job')).toBeNull();
     }
   });
 
