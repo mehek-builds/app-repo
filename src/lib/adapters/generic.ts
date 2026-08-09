@@ -506,6 +506,13 @@ const COMPANY_SITE_STORED_WORDINGS = new Set([
   'job posting on company website',
 ]);
 
+// The extension knows the page being filled, but not how the applicant found it. Arriving on an
+// employer form is not evidence that the posting was discovered on that employer's site. These
+// profile values therefore remain review-only here, including the bare ambiguous words that used
+// to exact-match options named "Website" or "Careers". The backend managed path can answer when
+// its packet carries application-specific acquisition evidence; this client path carries none.
+const UNVERIFIED_COMPANY_SITE_SOURCE = /^(?:company\s+)?(?:careers?(?:\s+(?:page|site|website))?|web\s*site|website)$/i;
+
 export function namesTheCompanySite(stored: string): boolean {
   // Normalize FIRST, strip the article LAST. The other order (which shipped to review) anchored
   // /^the\s+/ against raw input, so one leading space or quote defeated it, and only two of the
@@ -1450,18 +1457,12 @@ export function desiredAnswer(label: string, ap: ApplicationProfile, eeo: Record
       // leaves standing and which adapters then type into a combobox as a typeahead query.
       const stored = clean(ap.referral_source_default ?? '');
       if (!stored) return null;
-      // A stored value does not license the whole list either. The synonyms are spellings of ONE
-      // channel (see COMPANY_SITE_SYNONYMS), so they may stand in for a stored "Company website"
-      // and for nothing else: a student who stored "LinkedIn" and meets a form with no LinkedIn
-      // option was, until now, answered "Company website" - the same invented fact as the unset
-      // branch, just harder to see because a value WAS stored.
-      // Exact matching prevents a bare stored "Website" or "Careers" from widening into the
-      // employer's own site. Explicit company-site synonyms remain available as exact alternatives.
-      // Every stored answer keeps the catch-all behind it, which stays true by construction: it
-      // says the recorded channel is not on this list, which is exactly what happened.
-      return namesTheCompanySite(stored)
-        ? { mode: 'oneof', values: [stored, ...COMPANY_SITE_SYNONYMS], exact: true, catchall: true }
-        : { mode: 'oneof', values: [stored], exact: true, catchall: true };
+      if (UNVERIFIED_COMPANY_SITE_SOURCE.test(stored) || namesTheCompanySite(stored)) return null;
+      // A stored value does not license the whole list either. Company-site values returned above
+      // because this path lacks packet evidence. Every remaining explicit channel keeps only its
+      // exact value and the catch-all behind it. The catch-all stays true by construction: it says
+      // the recorded channel is not on this list, which is exactly what happened.
+      return { mode: 'oneof', values: [stored], exact: true, catchall: true };
     }
 
     // Salary answers route through the R-031 rule rather than the bare stored value: a range

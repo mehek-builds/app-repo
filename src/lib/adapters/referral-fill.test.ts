@@ -102,6 +102,16 @@ describe('referral source: what the adapter emits when it refuses to answer', ()
     expect(skippedReasonsNeedReview(result.skipped_reasons)).toBe(true);
   });
 
+  it('leaves legacy and ambiguous company-site defaults blank without packet evidence', async () => {
+    for (const source of ['Company website', 'Website', 'Careers']) {
+      document.body.innerHTML = '';
+      const select = referralSelect(['LinkedIn', source, 'Other']);
+      const result = await run(source);
+      expect(select.value, source).toBe('');
+      expect(skippedReasonsNeedReview(result.skipped_reasons), source).toBe(true);
+    }
+  });
+
   it('fills the stored channel when the form lists it', async () => {
     const select = referralSelect(['LinkedIn', 'Indeed', 'Other']);
 
