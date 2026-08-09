@@ -80,6 +80,7 @@ describe('desiredAnswer value branches (characterization - behaviour predates cl
     expect(desiredAnswer('how did you hear about this role?', FULL, NO_EEO)).toEqual({
       mode: 'oneof',
       values: ['Company website', 'company website', 'company careers', 'careers page', 'company site'],
+      exact: true,
       catchall: true,
     });
   });
