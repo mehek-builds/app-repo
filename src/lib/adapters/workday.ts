@@ -44,7 +44,7 @@ import { gradeQuestion, gradeReviewReason, gradeSkipReason } from './grades';
 import { isDraftTargetAvailable, runDraftQueue } from './shared/drafts';
 // Reuse the generic adapter's pure answer-resolution engine so every adapter maps a question to
 // the same answer and picks the same option. Pure (no DOM), covered by the adapter answer tests.
-import { desiredAnswer, isDraftableQuestion, linkQuestion, linkSkipReason, locationQuestion, locationSkipReason, matchOption, noteLinkFillCandidate, unreadableQuestionSkipReason, WORK_ELIGIBILITY_QUESTION, workEligibilitySkipReason, type Desired } from './generic';
+import { applicationDecisionSkipReason, desiredAnswer, isDraftableQuestion, isPerApplicationDecisionQuestion, linkQuestion, linkSkipReason, locationQuestion, locationSkipReason, matchOption, noteLinkFillCandidate, unreadableQuestionSkipReason, WORK_ELIGIBILITY_QUESTION, workEligibilitySkipReason, type Desired } from './generic';
 
 // ─── Shared answer helpers (mirror generic.ts's engine) ───────────────────────
 
@@ -438,6 +438,11 @@ export async function fillWorkdayApplication(params: WorkdayFillParams): Promise
     if (WORK_ELIGIBILITY_QUESTION.test(label)) {
       fields_skipped++;
       skipped_reasons.push(workEligibilitySkipReason(label));
+      continue;
+    }
+    if (isPerApplicationDecisionQuestion(label)) {
+      fields_skipped++;
+      skipped_reasons.push(applicationDecisionSkipReason(label));
       continue;
     }
 

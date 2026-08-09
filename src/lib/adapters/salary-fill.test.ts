@@ -79,50 +79,49 @@ beforeEach(() => {
 });
 
 describe('Ashby salary branch', () => {
-  it('a range stated in the label fills its median, regardless of the stored currency', async () => {
+  it('leaves a label range unanswered', async () => {
     fieldEntry('<label>What are your salary expectations? (USD 90,000 - 110,000)</label><input type="text" />');
     const result = await runAshby(ap(FIGURE_EUR));
-    expect(document.querySelector('input')!.value).toBe('USD 100,000');
-    expect(result.fields_filled).toBeGreaterThanOrEqual(1);
+    expect(document.querySelector('input')!.value).toBe('');
+    expect(result.skipped_reasons.some((r) => /(?:salary question|application decision) left for you/.test(r))).toBe(true);
   });
 
-  it("the posting API's compensation range fills a NUMERIC salary field with the bare median", async () => {
+  it("does not turn the posting API's compensation range into an applicant expectation", async () => {
     // The exact control shape that parked Proxima Fusion: input[type=number], no unit hint. The
     // old known-answer path could not even see this input (text/url/tel selector).
     fieldEntry('<label>What are your salary expectations?</label><input type="number" />');
     const result = await runAshby(ap(FIGURE_EUR), USD_COMP);
-    expect(document.querySelector('input')!.value).toBe('100000');
-    expect(result.fields_filled).toBeGreaterThanOrEqual(1);
+    expect(document.querySelector('input')!.value).toBe('');
+    expect(result.skipped_reasons.some((r) => /(?:salary question|application decision) left for you/.test(r))).toBe(true);
   });
 
-  it('EUR posting + EUR stored figure fills the figure', async () => {
+  it('does not reuse a stored figure even when currency matches', async () => {
     fieldEntry('<label>Desired salary (EUR)</label><input type="text" />');
     await runAshby(ap(FIGURE_EUR));
-    expect(document.querySelector('input')!.value).toBe('80000');
+    expect(document.querySelector('input')!.value).toBe('');
   });
 
   it('USD posting + EUR stored figure flags, never converts, and the flag holds auto-submit', async () => {
     fieldEntry('<label>Salary expectations (USD)</label><input type="text" />');
     const result = await runAshby(ap(FIGURE_EUR));
     expect(document.querySelector('input')!.value).toBe('');
-    const reason = result.skipped_reasons.find((r) => r.startsWith('salary question left for you'));
+    const reason = result.skipped_reasons.find((r) => /(?:salary question|application decision) left for you/.test(r));
     expect(reason).toBeDefined();
-    expect(reason).toContain('USD');
-    expect(reason).toContain('EUR');
+    expect(reason).toMatch(/current answer|application decision/);
     expect(skippedReasonsNeedReview(result.skipped_reasons)).toBe(true);
   });
 
-  it('a free-text salary question with no stated range keeps the stored Negotiable sentence', async () => {
+  it('does not reuse stored salary prose', async () => {
     fieldEntry('<label>What are your salary expectations?</label><input type="text" />');
     await runAshby(ap(PROSE));
-    expect(document.querySelector('input')!.value).toBe('Negotiable, open to your standard intern rate');
+    expect(document.querySelector('input')!.value).toBe('');
   });
 
   it('a stored prose answer never enters a type=number control: flag instead', async () => {
     fieldEntry('<label>What are your salary expectations?</label><input type="number" />');
     const result = await runAshby(ap(PROSE));
     expect(document.querySelector('input')!.value).toBe('');
-    expect(result.skipped_reasons.some((r) => r.startsWith('salary question left for you'))).toBe(true);
+    expect(result.skipped_reasons.some((r) => /(?:salary question|application decision) left for you/.test(r))).toBe(true);
     expect(skippedReasonsNeedReview(result.skipped_reasons)).toBe(true);
   });
 });
@@ -134,20 +133,20 @@ describe('generic-adapter salary branch', () => {
     const el = genericField('What are your salary expectations?', 'input', 'number');
     const result = await runGeneric(ap(FIGURE_EUR));
     expect(el.value).toBe('');
-    expect(result.skipped_reasons.some((r) => r.startsWith('salary question left for you'))).toBe(true);
+    expect(result.skipped_reasons.some((r) => /(?:salary question|application decision) left for you/.test(r))).toBe(true);
     expect(skippedReasonsNeedReview(result.skipped_reasons)).toBe(true);
   });
 
-  it('a label-stated range fills the median into a numeric field as a bare number', async () => {
+  it('a label-stated range remains unanswered', async () => {
     const el = genericField('Salary expectations (USD 90,000 - 110,000)', 'input', 'number');
     await runGeneric(ap(FIGURE_EUR));
-    expect(el.value).toBe('100000');
+    expect(el.value).toBe('');
   });
 
-  it('a free-text salary field with no range gets the Negotiable sentence', async () => {
+  it('a free-text salary field does not get stored prose', async () => {
     const el = genericField('Desired salary', 'input', 'text');
     await runGeneric(ap(PROSE));
-    expect(el.value).toBe('Negotiable, open to your standard intern rate');
+    expect(el.value).toBe('');
   });
 
   it('a salary TEXTAREA is owned by the salary rule, never the AI essay drafter', async () => {
@@ -160,6 +159,6 @@ describe('generic-adapter salary branch', () => {
       return 'A drafted essay that must never land here.';
     });
     expect(drafted).toEqual([]);
-    expect(el.value).toBe('Negotiable, open to your standard intern rate');
+    expect(el.value).toBe('');
   });
 });

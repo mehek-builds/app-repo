@@ -157,20 +157,20 @@ describe('isDateControl', () => {
 
 // R-014 facet (b): one opaque string was answering two different questions.
 describe('availability: start date vs term', () => {
-  it('answers a start-date question with the date', () => {
+  it('leaves a start-date question for the current application', () => {
     expect(desiredAnswer('what is your earliest possible starting date?', ap({ availability_date: '2026-07-18' }), {}))
-      .toEqual({ mode: 'value', value: '2026-07-18' });
+      .toBeNull();
     expect(desiredAnswer('when can you start?', ap({ availability_date: '2026-07-18' }), {}))
-      .toEqual({ mode: 'value', value: '2026-07-18' });
+      .toBeNull();
   });
 
-  it('answers a term question with the term, NOT the start date', () => {
+  it('leaves a term or cadence commitment for the current application', () => {
     // Espa Labs, verbatim. This got "Immediately" - a start time in answer to a duration.
     const profile = ap({ availability_date: '2026-07-18', availability_term: '14 weeks' });
     expect(desiredAnswer('length or term/length of availability (10-14 weeks):', profile, {}))
-      .toEqual({ mode: 'value', value: '14 weeks' });
+      .toBeNull();
     expect(desiredAnswer('how long are you available for an internship?', profile, {}))
-      .toEqual({ mode: 'value', value: '14 weeks' });
+      .toBeNull();
   });
 
   it('leaves a term question blank rather than falling back to the start date', () => {

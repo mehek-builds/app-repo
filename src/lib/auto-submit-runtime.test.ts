@@ -25,6 +25,27 @@ describe('automatic submission runtime wiring', () => {
     expect(manual).toContain('if (!event.isTrusted) return');
     expect(manual).toContain('submitButton.click()');
     expect(manual).not.toContain('clickAtsSubmitIfAllowed');
+    expect(manual).toContain('findProgrammaticFinalSubmitButton(atsName) === submitButton');
+    expect(manual).toContain('detectChallenge().waiting');
+    expect(manual).toContain('document.hasFocus()');
+  });
+
+  it('rechecks live application decisions and the exact final control on every programmatic route', () => {
+    const dashboard = content.match(/submitFromDashboard = async[\s\S]*?chrome\.runtime\.sendMessage\(\{\s*type: 'APPLICATION_REVIEW_READY'/)?.[0] ?? '';
+    expect(dashboard).toContain('hasApplicationDecisionControls()');
+    expect(dashboard).toContain('findProgrammaticFinalSubmitButton(fillResult.ats_name) !== finalSubmitBtn');
+
+    const countdown = content.match(/function runAutoSubmitCountdown[\s\S]*?Workday account-creation speed-up/)?.[0] ?? '';
+    expect(countdown.match(/hasApplicationDecisionControls\(\)/g)?.length).toBeGreaterThanOrEqual(3);
+    expect(countdown.match(/findProgrammaticFinalSubmitButton\(fillResult\.ats_name\) === target/g)?.length).toBeGreaterThanOrEqual(3);
+    expect(countdown).toMatch(/safeAfterReservation[\s\S]*detectChallenge\(\)\.waiting/);
+    expect(countdown).toMatch(/safeAfterReservation[\s\S]*outcome: 'cancelled'/);
+  });
+
+  it('releases a dashboard reservation when no click occurred and preserves uncertainty after a click', () => {
+    const background = readFileSync('src/entrypoints/background.ts', 'utf8');
+    expect(background).toContain("result?.ok ? 'confirmed' : result?.clicked ? 'unknown' : 'cancelled'");
+    expect(content).toContain("return { ok: false, clicked: true, error: 'The company never confirmed it.");
   });
 
   it('keeps cancellation listeners active during the final permission request', () => {

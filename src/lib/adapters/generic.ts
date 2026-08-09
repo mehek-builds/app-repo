@@ -19,9 +19,8 @@ import {
   type DateOrder,
   type DateParts,
 } from './shared/dates';
-// The salary rule (R-031 + R-011): median of the posting's own stated range first, then the
-// currency-gated stored answer. Pure and shared, so this adapter, the ATS adapters and the
-// background all read the same decision.
+// Salary extraction remains shared with job metadata, but application answers are human-only.
+// resolveSalary is the single fail-closed decision used by generic and ATS-specific controls.
 import { resolveSalary, storedSalaryOf } from './salary';
 import { isDraftTargetAvailable, runDraftQueue } from './shared/drafts';
 
@@ -74,10 +73,16 @@ function isVisible(el: HTMLElement): boolean {
   return style.display !== 'none' && style.visibility !== 'hidden';
 }
 
+function explicitLabelFor(id: string): HTMLLabelElement | null {
+  if (!id) return null;
+  return [...document.querySelectorAll<HTMLLabelElement>('label[for]')]
+    .find((label) => label.htmlFor === id) ?? null;
+}
+
 function visibleLabelFor(el: HTMLInputElement): HTMLElement | null {
   return (
     (el.labels && el.labels[0]) ??
-    (el.id ? document.querySelector<HTMLElement>(`label[for="${CSS.escape(el.id)}"]`) : null) ??
+    explicitLabelFor(el.id) ??
     el.closest('label')
   );
 }
@@ -111,7 +116,7 @@ function controlIdentity(el: Element): string {
   const withLabels = el as HTMLInputElement;
   const label =
     (withLabels.labels && withLabels.labels[0]?.textContent) ||
-    (el.id ? document.querySelector(`label[for="${CSS.escape(el.id)}"]`)?.textContent : '') ||
+    explicitLabelFor(el.id)?.textContent ||
     '';
   parts.push(label ?? '');
   parts.push(el.getAttribute('aria-label') ?? '');
@@ -292,24 +297,6 @@ export function workEligibilitySkipReason(label: string): string {
   return `work-eligibility question left for you: "${label.slice(0, 60)}"`;
 }
 
-function workEligibilityAnswer(label: string, ap: ApplicationProfile): Desired {
-  const asksAuthorization = WORK_AUTHORIZATION_QUESTION.test(label);
-  const asksSponsorship = SPONSORSHIP_QUESTION.test(label);
-  const asksSponsorshipFreeWork = SPONSORSHIP_FREE_WORK_QUESTION.test(label);
-  if (!asksAuthorization && !asksSponsorship) return null;
-  if ((asksAuthorization && asksSponsorship) || asksSponsorshipFreeWork) {
-    if (typeof ap.work_authorized !== 'boolean' || typeof ap.needs_sponsorship !== 'boolean') return null;
-    return ap.work_authorized && !ap.needs_sponsorship ? { mode: 'yes' } : { mode: 'no' };
-  }
-  if (asksAuthorization && typeof ap.work_authorized === 'boolean') {
-    return ap.work_authorized ? { mode: 'yes' } : { mode: 'no' };
-  }
-  if (asksSponsorship && typeof ap.needs_sponsorship === 'boolean') {
-    return ap.needs_sponsorship ? { mode: 'yes' } : { mode: 'no' };
-  }
-  return null;
-}
-
 // EEO / voluntary self-identification. ashby.ts's variant, which is the broadest of the five
 // inline copies in the adapters, hoisted so classifyField does not become a sixth.
 // NOTE: lever/greenhouse/workday/linkedin still carry their own narrower
@@ -488,7 +475,8 @@ export const START_DATE_QUESTION =
   /availab|start(ing)?\s+date|date.*you.*start|when can you start|earliest.*start/i;
 const GRADUATION_DATE_QUESTION =
   /\b(?:expected\s+)?graduat(?:ion|e)\s+(?:date|year)\b|\b(?:date|year)\s+(?:of\s+)?(?:expected\s+)?graduat(?:ion|e)\b|\bexpected\s+grad(?:uation)?\b|\bclass\s+of\b/i;
-const SALARY_QUESTION = /salary|compensation|desired pay|expected pay|pay expectation/i;
+const SALARY_QUESTION =
+  /\b(?:salary|compensation|remuneration|stipend|wage|pay expectation|desired pay|expected pay|hourly rate|pay rate)\b|\b(?:desired|expected|target|minimum|base|annual|hourly)\s+(?:pay|compensation)\b/i;
 const DOB_QUESTION = /date of birth|birth\s*date|\bdob\b/i;
 const CITIZENSHIP_QUESTION = /citizen|nationalit/i;
 // The gap is {0,20} and the verb stem is `resid`, both for ElevenLabs' live "Country you're
@@ -512,9 +500,13 @@ const RESIDENCE_QUESTION =
 // R-030 doctrine; do not widen it against hypotheticals - that is how the phone matcher shipped
 // five attempts (R-020/R-028).
 const LOCATION_COMMITMENT_STEM = /\b(?:are|can|could|do|did|will|would|should|may|might|have)\s+you\b/i;
-const LOCATION_COMMITMENT_VOCAB = /\boffice\b|in[\s-]?office|on[\s-]?site|\bonsite\b|\bhybrid\b|relocat|commut/i;
+const LOCATION_COMMITMENT_VOCAB =
+  /\boffice\b|in[\s-]?office|on[\s-]?site|\bonsite\b|\bhybrid\b|\bremote(?:ly)?\b|\blocation\b|relocat|commut|\b(?:work(?:ing)?|be)\s+(?:in|near|from)\b|\b(?:days?|times?)\s+(?:each|a|per)\s+week\b/i;
+const LOCATION_DECISION_VOCAB =
+  /\b(?:prefer\w*|willing|commit|cadence|frequency|acceptable|prepared|comfortable|open)\b|\bdays?\s+(?:each|a|per)\s+week\b|\bhow\s+many\s+days\b/i;
 export function isLocationCommitmentQuestion(label: string): boolean {
-  return LOCATION_COMMITMENT_STEM.test(label) && LOCATION_COMMITMENT_VOCAB.test(label);
+  return LOCATION_COMMITMENT_VOCAB.test(label)
+    && (LOCATION_COMMITMENT_STEM.test(label) || LOCATION_DECISION_VOCAB.test(label));
 }
 
 const ROUTINE_APPLICANT_CONSENT_QUESTION =
@@ -522,6 +514,58 @@ const ROUTINE_APPLICANT_CONSENT_QUESTION =
 
 function isRoutineApplicantConsentQuestion(label: string): boolean {
   return ROUTINE_APPLICANT_CONSENT_QUESTION.test(label);
+}
+
+const LEGAL_POLICY_ATTESTATION_QUESTION =
+  /\b(?:terms(?:\s+of\s+(?:use|service))?|privacy\s+(?:policy|notice)|consent|attest|certif(?:y|ication)|declar(?:e|ation))\b|\b(?:agree|accept|acknowledg\w*|confirm|understand|represent)\b[\s\S]{0,160}\b(?:terms|privacy|policy|notice|accurate|truthful|true|complete|correct|processing|retention)\b/i;
+
+/**
+ * Questions whose answer is a fresh application decision, not durable profile data. This gate is
+ * intentionally evaluated against label, selector identity, and option/group context before any
+ * control-specific resolver. It therefore cannot be bypassed by rendering the same question as a
+ * text input, select, radio group, checkbox, or custom combobox.
+ */
+export function isPerApplicationDecisionQuestion(context: string): boolean {
+  return isRoutineApplicantConsentQuestion(context)
+    || PROVIDER_CONSENT_QUESTION.test(context)
+    || LEGAL_POLICY_ATTESTATION_QUESTION.test(context)
+    || WORK_ELIGIBILITY_QUESTION.test(context)
+    || isLocationCommitmentQuestion(context)
+    || SALARY_QUESTION.test(context)
+    || START_DATE_QUESTION.test(context)
+    || TERM_QUESTION.test(context);
+}
+
+export function applicationDecisionSkipReason(context: string): string {
+  return `application decision left for you: "${context.slice(0, 60).trim()}"`;
+}
+
+function strictIsoDate(value: string | undefined): { year: number; month: number; day: number } | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value ?? '');
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
+    ? { year, month, day }
+    : null;
+}
+
+/** Resolve only an explicit numeric age threshold from a validated DOB and exact UTC date. */
+export function ageOfMajorityAnswer(label: string, dateOfBirth: string | undefined, now = new Date()): Desired {
+  const normalized = label.toLowerCase();
+  if (/\bunder\b|younger than|below|less than|experience|\bmonths?\b|tenure/.test(normalized)) return null;
+  const thresholdMatch = /at least\s*(\d{1,2})\s*(?:years?\s*(?:of age)?)?|\b(\d{1,2})\s*\+\s*(?:years?\s*(?:of age)?)?|\b(\d{1,2})\s+years?\s+(?:of\s+age\s+)?or\s+older\b/.exec(normalized);
+  const threshold = Number(thresholdMatch?.[1] ?? thresholdMatch?.[2] ?? thresholdMatch?.[3]);
+  if (!Number.isInteger(threshold) || threshold < 16 || threshold > 25) return null;
+  const dob = strictIsoDate(dateOfBirth);
+  if (!dob || Number.isNaN(now.getTime())) return null;
+  const cutoffYear = now.getUTCFullYear() - threshold;
+  const oldEnough = dob.year < cutoffYear
+    || (dob.year === cutoffYear && (dob.month < now.getUTCMonth() + 1
+      || (dob.month === now.getUTCMonth() + 1 && dob.day <= now.getUTCDate())));
+  return { mode: oldEnough ? 'yes' : 'no' };
 }
 
 export function linkQuestion(label: string, ap: ApplicationProfile): LinkQuestion | null {
@@ -1047,23 +1091,9 @@ export function desiredAnswer(label: string, ap: ApplicationProfile, eeo: Record
   const l = label.toLowerCase();
   if (NEVER_FILL_PATTERNS.some((re) => re.test(l))) return null;
 
-  if (isRoutineApplicantConsentQuestion(label)) return { mode: 'yes' };
-  if (isLocationCommitmentQuestion(label)) return { mode: 'yes' };
-
-  const workEligibility = workEligibilityAnswer(label, ap);
-  if (workEligibility) return workEligibility;
-  // Affirmative age-of-majority only. Two classes of false Yes are excluded:
-  //   - negated phrasings ("are you UNDER 18?", "younger than 18 years"), which would answer Yes
-  //     to being a minor;
-  //   - the number 18 used for TENURE rather than age. "Do you have 18+ months of experience?" and
-  //     "at least 18 years of experience" both satisfied the alternatives above, so Litos
-  //     claimed experience the student never stated - the same class of false declaration the
-  //     always-ask work-eligibility rule exists to prevent.
-  if (
-    /(at least|over|older than)\s*(18|eighteen)|age of majority|18\s*\+|\b18\s+years?\b/.test(l) &&
-    !/\bunder\b|younger than|below|less than|experience|\bmonths?\b|tenure/.test(l)
-  )
-    return { mode: 'yes' };
+  if (isPerApplicationDecisionQuestion(label)) return null;
+  const ageAnswer = ageOfMajorityAnswer(label, ap.date_of_birth);
+  if (ageAnswer) return ageAnswer;
 
   // EEO / demographics: real answer if the student provided one, else decline.
   // \bgender\b (not /gender/) so "do you identify as transgender?" - a distinct yes/no
@@ -1411,15 +1441,10 @@ function policyForbidsConsentWrite(
   policy: GenericProviderPolicy | undefined,
   label: string,
 ): boolean {
-  return policy?.forbidConsentWrites === true
-    && (isRoutineApplicantConsentQuestion(label)
-      || PROVIDER_CONSENT_QUESTION.test(label)
-      || (policy.forbidHumanDecisionWrites === true && (
-        PROVIDER_HUMAN_DECISION_QUESTION.test(label)
-        || SALARY_QUESTION.test(label)
-        || START_DATE_QUESTION.test(label)
-        || TERM_QUESTION.test(label)
-      )));
+  return (policy?.forbidConsentWrites === true
+      && (isRoutineApplicantConsentQuestion(label) || PROVIDER_CONSENT_QUESTION.test(label)))
+    || (policy?.forbidHumanDecisionWrites === true
+      && (PROVIDER_HUMAN_DECISION_QUESTION.test(label) || isPerApplicationDecisionQuestion(label)));
 }
 
 export function providerPolicyForbidsControl(
@@ -1434,7 +1459,7 @@ export function providerPolicyForbidsControl(
       return true;
     }
   })) return true;
-  if (!policy.forbidConsentWrites) return false;
+  if (!policy.forbidConsentWrites && !policy.forbidHumanDecisionWrites) return false;
   const name = control.getAttribute('name') ?? '';
   const supportedShape = control instanceof HTMLSelectElement
     || (control instanceof HTMLInputElement && /^(?:checkbox|radio)$/i.test(control.type));
@@ -1473,6 +1498,7 @@ export async function fillGenericApplication(params: GenericFillParams): Promise
   const short = (s: string) => s.slice(0, 50).trim();
   const blockedConsentControls = new Set<Element>();
   const recordedConsentLabels = new Set<string>();
+  const recordedApplicationDecisions = new Set<string>();
   const recordConsentBlock = (label: string) => {
     const policyReason = params.providerPolicy?.reviewReason;
     if (policyReason) {
@@ -1500,6 +1526,26 @@ export async function fillGenericApplication(params: GenericFillParams): Promise
     }
   }
 
+  // Global preflight includes already-populated, checked, and hidden controls. A checked privacy
+  // box may be a tenant default rather than the applicant's action, and a prefilled salary or
+  // availability value is still a current application decision. Preserve the DOM state, but hold
+  // every programmatic completion path for explicit review. A direct user click remains untouched.
+  for (const control of document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>('input, textarea, select')) {
+    if (blockedConsentControls.has(control)) continue;
+    const context = providerControlContext(control);
+    if (!isPerApplicationDecisionQuestion(context)) continue;
+    blockedConsentControls.add(control);
+    const key = (
+      control.closest('fieldset, [role="group"], [role="radiogroup"]')?.textContent
+      || questionLabel(control)
+      || controlIdentity(control)
+    ).replace(/\s+/g, ' ').trim();
+    if (recordedApplicationDecisions.has(key)) continue;
+    recordedApplicationDecisions.add(key);
+    fields_skipped++;
+    skipped_reasons.push(applicationDecisionSkipReason(key || context));
+  }
+
   // Page text for the salary rule's JD sources (a stated range, or a currency, adjacent to
   // salary wording), read lazily once per fill: the generic adapter runs on a company's own
   // careers page, where the JD and the form share the document.
@@ -1519,8 +1565,18 @@ export async function fillGenericApplication(params: GenericFillParams): Promise
     const type = (el as HTMLInputElement).type;
     const isTextarea = el instanceof HTMLTextAreaElement;
 
-    if (blockedConsentControls.has(el) || policyForbidsConsentWrite(params.providerPolicy, `${id} ${questionLabel(el)}`)) {
+    const decisionContext = `${id} ${questionLabel(el)}`.trim();
+    if (CHAIN_CITY.test(id) && isLocationCommitmentQuestion(decisionContext)) {
+      noteR039Candidate('veto', id);
+    }
+    if (blockedConsentControls.has(el)) continue;
+    if (policyForbidsConsentWrite(params.providerPolicy, decisionContext)) {
       recordConsentBlock(questionLabel(el) || id);
+      continue;
+    }
+    if (isPerApplicationDecisionQuestion(decisionContext)) {
+      fields_skipped++;
+      skipped_reasons.push(applicationDecisionSkipReason(decisionContext));
       continue;
     }
 
@@ -1704,13 +1760,20 @@ export async function fillGenericApplication(params: GenericFillParams): Promise
     if (select.closest('[id*="litos"]') || select.disabled || !isVisible(select)) continue;
     if (select.selectedIndex > 0 && select.value && !/select|choose|^$/i.test(select.options[select.selectedIndex]?.text ?? '')) continue; // already answered
     const label = questionLabel(select);
-    if (blockedConsentControls.has(select) || policyForbidsConsentWrite(params.providerPolicy, `${controlIdentity(select)} ${label}`)) {
+    const selectContext = providerControlContext(select);
+    if (blockedConsentControls.has(select)) continue;
+    if (policyForbidsConsentWrite(params.providerPolicy, selectContext)) {
       recordConsentBlock(label || controlIdentity(select));
       continue;
     }
     const options = [...select.options]
       .filter((o) => o.value && !/^(select|choose|please|--)/i.test(o.text.trim()))
       .map((o) => ({ text: o.text, value: o.value }));
+    if (isPerApplicationDecisionQuestion(selectContext)) {
+      fields_skipped++;
+      skipped_reasons.push(applicationDecisionSkipReason(selectContext));
+      continue;
+    }
     // Language questions first (declared-list authority): the Enpal-style "German level" /
     // "English level" selects land here. languageAnswerPlan re-checks the refusal guards
     // internally, so running it ahead of desiredAnswer cannot answer a work-eligibility or EEO
@@ -1761,15 +1824,21 @@ export async function fillGenericApplication(params: GenericFillParams): Promise
   for (const group of radioGroups.values()) {
     if (group.some((r) => r.checked)) continue; // already answered
     const options = group.map((r) => ({
-      text: (document.querySelector(`label[for="${CSS.escape(r.id)}"]`)?.textContent ??
+      text: (explicitLabelFor(r.id)?.textContent ??
         r.closest('label')?.textContent ?? r.getAttribute('aria-label') ?? r.value ?? '').trim(),
       el: r,
     }));
     // Derive the question stem AFTER the options, so it can subtract them from the container.
     const label = groupQuestionText(group, options.map((o) => o.text));
-    const policyLabel = `${label} ${group.map((item) => controlIdentity(item)).join(' ')}`;
-    if (group.some((item) => blockedConsentControls.has(item)) || policyForbidsConsentWrite(params.providerPolicy, policyLabel)) {
+    const policyLabel = `${label} ${group.map((item) => controlIdentity(item)).join(' ')} ${options.map((option) => option.text).join(' ')}`;
+    if (group.some((item) => blockedConsentControls.has(item))) continue;
+    if (policyForbidsConsentWrite(params.providerPolicy, policyLabel)) {
       recordConsentBlock(label || policyLabel);
+      continue;
+    }
+    if (isPerApplicationDecisionQuestion(policyLabel)) {
+      fields_skipped++;
+      skipped_reasons.push(applicationDecisionSkipReason(policyLabel));
       continue;
     }
     // Language questions first (declared-list authority): ZURU's "comfortable communicating in
@@ -1825,13 +1894,20 @@ export async function fillGenericApplication(params: GenericFillParams): Promise
     const policyLabel = group
       .map((cb) => `${controlIdentity(cb)} ${questionLabel(cb)}`)
       .join(' ');
-    if (group.some((item) => blockedConsentControls.has(item)) || policyForbidsConsentWrite(params.providerPolicy, policyLabel)) {
+    if (group.some((item) => blockedConsentControls.has(item))) continue;
+    if (policyForbidsConsentWrite(params.providerPolicy, policyLabel)) {
       recordConsentBlock(policyLabel);
+      continue;
+    }
+    const groupContext = `${policyLabel} ${group.map((cb) => cb.value).join(' ')} ${group[0]?.closest('fieldset, [role="group"]')?.textContent ?? ''}`;
+    if (isPerApplicationDecisionQuestion(groupContext)) {
+      fields_skipped++;
+      skipped_reasons.push(applicationDecisionSkipReason(groupContext));
       continue;
     }
     if (group.length > 1) {
       const options = group.map((cb) => ({
-        text: (document.querySelector(`label[for="${CSS.escape(cb.id)}"]`)?.textContent ??
+        text: (explicitLabelFor(cb.id)?.textContent ??
           cb.closest('label')?.textContent ?? cb.getAttribute('aria-label') ?? cb.value ?? '').trim(),
         el: cb,
       }));

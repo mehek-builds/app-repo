@@ -61,6 +61,7 @@ import {
   GENERIC_LINK_ASK,
   isDraftableQuestion,
   isOpenEndedQuestion,
+  isPerApplicationDecisionQuestion,
   isRefusedQuestion,
   languageAnswerPlan,
   languageSkipReason,
@@ -71,6 +72,7 @@ import {
   matchOption,
   noteLinkFillCandidate,
   unreadableQuestionSkipReason,
+  applicationDecisionSkipReason,
   WORK_ELIGIBILITY_QUESTION,
   workEligibilitySkipReason,
   type Desired,
@@ -512,6 +514,11 @@ export async function fillGreenhouseApplication(params: GreenhouseFillParams): P
     if (WORK_ELIGIBILITY_QUESTION.test(label)) {
       fields_skipped++;
       skipped_reasons.push(workEligibilitySkipReason(label));
+      continue;
+    }
+    if (isPerApplicationDecisionQuestion(label)) {
+      fields_skipped++;
+      skipped_reasons.push(applicationDecisionSkipReason(label));
       continue;
     }
 

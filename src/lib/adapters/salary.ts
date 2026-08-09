@@ -1,6 +1,6 @@
 import type { ApplicationProfile } from '../types';
 
-// Salary questions (R-031 + R-011), per Mehek's standing rule and her 2026-07-17 addition.
+// Salary ranges are parsed for job metadata only. An applicant's expectation is a fresh decision.
 //
 // ── The rule, in order of authority ──────────────────────────────────────────
 // 1. A posting that STATES a salary range gets its MEDIAN, written the way the posting wrote the
@@ -436,65 +436,9 @@ function storedFigureFor(value: string, numeric: boolean): string {
  * is how R-031 shipped a figure across currencies in the first place.
  */
 export function resolveSalary(ctx: SalaryQuestionContext, stored: StoredSalary): SalaryResolution {
-  const numeric = ctx.field === 'numeric';
-
-  // 1a. The question's own label states the range.
-  const labelRange = statedRangeInLabel(ctx.label);
-  if (labelRange) {
-    return { action: 'fill', source: 'label-range', value: numeric ? labelRange.fillNumeric : labelRange.fillText };
-  }
-
-  // 1b. Ashby's structured compensation payload states it.
-  if (ctx.posting) {
-    const median = (ctx.posting.minValue + ctx.posting.maxValue) / 2;
-    return {
-      action: 'fill',
-      source: 'posting-compensation',
-      value: numeric ? String(median) : `${ctx.posting.currencyCode} ${groupDigits(median, 'comma')}`,
-    };
-  }
-
-  // 1c. The JD text states exactly one range next to salary wording.
-  if (ctx.jdText) {
-    const jdRange = statedRangeInJd(ctx.jdText);
-    if (jdRange) {
-      return { action: 'fill', source: 'jd-range', value: numeric ? jdRange.fillNumeric : jdRange.fillText };
-    }
-  }
-
-  // 2. No stated range: the stored answer, gated.
-  const value = stored.value?.trim();
-  if (!value) {
-    return { action: 'flag', reason: salarySkipReason(ctx.label, 'no salary answer in your profile') };
-  }
-
-  if (isProseSalary(value)) {
-    if (numeric) {
-      return {
-        action: 'flag',
-        reason: salarySkipReason(ctx.label, 'this field takes a number and your stored answer is a sentence'),
-      };
-    }
-    return { action: 'fill', source: 'stored-prose', value };
-  }
-
-  // A bare figure: only with the posting's currency detected AND matching the stored one.
-  const postingCurrency = detectCurrency(ctx.label) ?? (ctx.jdText ? salaryAdjacentCurrencyInJd(ctx.jdText) : null);
-  const storedCurrency = normalizeStoredCurrency(stored.currency);
-  if (!postingCurrency) {
-    return {
-      action: 'flag',
-      reason: salarySkipReason(ctx.label, "couldn't confirm the posting's currency for your stored figure"),
-    };
-  }
-  if (!storedCurrency || storedCurrency !== postingCurrency) {
-    return {
-      action: 'flag',
-      reason: salarySkipReason(
-        ctx.label,
-        `the posting pays in ${postingCurrency} and your stored figure is ${storedCurrency ?? 'in no stated currency'}, never converted`,
-      ),
-    };
-  }
-  return { action: 'fill', source: 'stored-figure', value: storedFigureFor(value, numeric) };
+  void stored;
+  return {
+    action: 'flag',
+    reason: salarySkipReason(ctx.label, 'salary and compensation expectations require your current answer'),
+  };
 }

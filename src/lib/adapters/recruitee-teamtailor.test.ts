@@ -3,6 +3,7 @@ import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { ATS_SPECS, atsCanAutoSubmit, clickDashboardSubmitIfAllowed, fillAtsApplication, isAtsApplicationPage, specForCurrentPage } from './ats-2026-07';
 import { providerPolicyForbidsControl, type GenericProviderPolicy } from './generic';
 import { skippedReasonsNeedReview } from '../autosubmit-gate';
+import { contentInitRoute } from '../content-init-routing';
 import type { ApplicationProfile, Profile } from '../types';
 
 function at(raw: string): void {
@@ -47,6 +48,33 @@ describe('Recruitee adapter captured from rebuy and Optiweb', () => {
     at(url);
     expect(specForCurrentPage()?.id).toBe('recruitee');
     expect(isAtsApplicationPage()).toBe(true);
+  });
+
+  it('keeps the WhiteCoat detail route inactive and pins its exact form as manual-submit', () => {
+    const detail = 'https://whitecoatglobal1.recruitee.com/o/software-engineer-intern';
+    at(detail);
+    expect(isAtsApplicationPage()).toBe(false);
+    expect(contentInitRoute(new URL(detail))).toBe('ignore');
+    expect(atsCanAutoSubmit('recruitee')).toBe(false);
+    const form = `${detail}/c/new`;
+    at(form);
+    expect(isAtsApplicationPage()).toBe(true);
+    expect(contentInitRoute(new URL(form))).toBe('ats');
+    expect(atsCanAutoSubmit('recruitee')).toBe(false);
+  });
+
+  it.each([
+    'https://other.recruitee.com/o/software-engineer-intern/c/new',
+    'https://whitecoatglobal1.recruitee.com/o/other-role/c/new',
+    'https://whitecoatglobal1.recruitee.com/o/software-engineer-intern/apply',
+    'https://whitecoatglobal1.recruitee.com/o/software-engineer-intern%2Fc%2Fnew',
+    'https://whitecoatglobal1.recruitee.com/o/software-engineer-intern/c/new?source=test',
+    'https://whitecoatglobal1.recruitee.com/o/software_engineer_intern',
+    'https://api.eu.recruitee.com/o/software-engineer-intern',
+    'https://www.recruitee.com/o/software-engineer-intern',
+  ])('rejects a Recruitee lookalike route %s', (url) => {
+    at(url);
+    expect(isAtsApplicationPage()).toBe(false);
   });
 
   it('fills only captured identity fields and leaves agreement controls untouched', async () => {
@@ -139,6 +167,30 @@ describe('Teamtailor adapter captured from Teamtailor and AICOM', () => {
     at(url);
     expect(specForCurrentPage()?.id).toBe('teamtailor');
     expect(isAtsApplicationPage()).toBe(true);
+  });
+
+  it('routes only the verified application child of the live Flanks detail page', () => {
+    const detail = 'https://flanks.teamtailor.com/jobs/7847431-software-engineering-intern-web-scraping-data-acquisition';
+    at(detail);
+    expect(specForCurrentPage()?.id).toBe('teamtailor');
+    expect(isAtsApplicationPage()).toBe(false);
+    expect(contentInitRoute(new URL(detail))).toBe('ignore');
+    at(`${detail}/applications/new`);
+    expect(isAtsApplicationPage()).toBe(true);
+    expect(contentInitRoute(new URL(`${detail}/applications/new`))).toBe('ats');
+  });
+
+  it.each([
+    'https://other.teamtailor.com/jobs/7847431-software-engineering-intern-web-scraping-data-acquisition/applications/new',
+    'https://flanks.teamtailor.com/jobs/7847432-software-engineering-intern-web-scraping-data-acquisition/applications/new',
+    'https://flanks.teamtailor.com/jobs/7847431-other-role/applications/new',
+    'https://flanks.teamtailor.com/jobs/software-engineering-intern/applications/new',
+    'https://flanks.teamtailor.com/jobs/7847431-software-engineering-intern/apply',
+    'https://flanks.teamtailor.com/jobs/7847431-software-engineering-intern-web-scraping-data-acquisition%2Fapplications%2Fnew',
+    'https://app.teamtailor.com/jobs/7847431-software-engineering-intern/applications/new',
+  ])('rejects a Teamtailor lookalike route %s', (url) => {
+    at(url);
+    expect(isAtsApplicationPage()).toBe(false);
   });
 
   it('fills identity but never checks applicant or future-job consent', async () => {

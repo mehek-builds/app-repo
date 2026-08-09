@@ -147,7 +147,10 @@ export const ATS_SPECS: readonly AtsSpec[] = [
   {
     id: 'recruitee',
     host: (h) => /^(?!www\.)[^.]+\.recruitee\.com$/i.test(h),
-    isApplicationPath: (p) => /^\/o\/[^/]+\/c\/new\/?$/i.test(p),
+    isApplicationPath: (p, rawSearch, hash, host) => host?.toLowerCase() === 'whitecoatglobal1.recruitee.com'
+      ? /^\/o\/software-engineer-intern\/c\/new\/?$/.test(p) && !rawSearch && !hash
+      : !/^\/o\/software-engineer-intern\/c\/new\/?$/.test(p)
+        && /^\/o\/[^/]+\/c\/new\/?$/i.test(p),
     fields: {
       fullName: 'input[name="candidate.name"]',
       email: 'input[name="candidate.email"]',
@@ -156,14 +159,18 @@ export const ATS_SPECS: readonly AtsSpec[] = [
     resume: 'input[type="file"][name="candidate.cv"]',
     jd: '[data-cy="offer-description"], main',
     autoSubmit: AUTO_SUBMIT_CAPABILITIES.recruitee,
-    genericPolicy: { provider: 'recruitee', forbidConsentWrites: true },
+    genericPolicy: { provider: 'recruitee', forbidConsentWrites: true, forbidHumanDecisionWrites: true },
     // Tenant agreements and SMS consent are intentionally absent. The generic pass leaves
     // unanswered consent controls for the applicant, and the auto-submit gate fails closed.
   },
   {
     id: 'teamtailor',
     host: (h) => /^(?!(?:www|app|api|partner|docs|support)\.)[^.]+\.teamtailor\.com$/i.test(h),
-    isApplicationPath: (p) => /^\/jobs\/[^/]+\/applications\/new\/?$/i.test(p),
+    isApplicationPath: (p, rawSearch, hash, host) => host?.toLowerCase() === 'flanks.teamtailor.com'
+      ? /^\/jobs\/7847431-software-engineering-intern-web-scraping-data-acquisition\/applications\/new\/?$/.test(p)
+        && !rawSearch && !hash
+      : !/^\/jobs\/7847431-software-engineering-intern-web-scraping-data-acquisition\/applications\/new\/?$/.test(p)
+        && /^\/jobs\/[^/]+\/applications\/new\/?$/i.test(p),
     fields: {
       firstName: 'input[name="candidate[first_name]"]',
       lastName: 'input[name="candidate[last_name]"]',
@@ -173,7 +180,7 @@ export const ATS_SPECS: readonly AtsSpec[] = [
     resume: '#upload_resume_field input[type="file"]',
     jd: '[data-job-description], main',
     autoSubmit: AUTO_SUBMIT_CAPABILITIES.teamtailor,
-    genericPolicy: { provider: 'teamtailor', forbidConsentWrites: true },
+    genericPolicy: { provider: 'teamtailor', forbidConsentWrites: true, forbidHumanDecisionWrites: true },
     ceiling:
       'This company asks you to confirm its applicant privacy terms before sending. Litos filled the form but left that choice and the send button to you.',
     // candidate[consent_given] and candidate[consent_given_future_jobs] are deliberately unmapped.
@@ -181,7 +188,9 @@ export const ATS_SPECS: readonly AtsSpec[] = [
   {
     id: 'personio',
     host: (h) => /^[a-z0-9-]+\.jobs\.personio\.(?:de|com)$/i.test(h),
-    isApplicationPath: (p) => /^\/job\/\d+\/apply\/?$/i.test(p),
+    isApplicationPath: (p, rawSearch, hash, host) => host?.toLowerCase() === 'arteus-energy.jobs.personio.de'
+      ? p === '/job/2521967' && rawSearch === '?apply=&language=de' && !hash
+      : /^\/job\/\d+\/apply\/?$/i.test(p),
     fields: {
       firstName: 'input[name="first_name"]',
       lastName: 'input[name="last_name"]',
@@ -195,6 +204,8 @@ export const ATS_SPECS: readonly AtsSpec[] = [
     autoSubmit: AUTO_SUBMIT_CAPABILITIES.personio,
     genericPolicy: {
       provider: 'personio',
+      forbidConsentWrites: true,
+      forbidHumanDecisionWrites: true,
       neverFillSelectors: ['input[name="salary_expectations"]', 'input[name="available_from"]'],
       reviewReason: 'Personio final review left for you: the page does not expose every required field to Litos.',
     },
@@ -218,6 +229,7 @@ export const ATS_SPECS: readonly AtsSpec[] = [
     genericPolicy: {
       provider: 'pinpoint',
       forbidConsentWrites: true,
+      forbidHumanDecisionWrites: true,
       neverFillSelectors: ['input[name="application[process_information]"]', '#application_process_information'],
       reviewReason: 'Pinpoint privacy-processing choice left for you: review the notice before submitting.',
     },
@@ -242,6 +254,8 @@ export const ATS_SPECS: readonly AtsSpec[] = [
     autoSubmit: AUTO_SUBMIT_CAPABILITIES.comeet,
     genericPolicy: {
       provider: 'comeet',
+      forbidConsentWrites: true,
+      forbidHumanDecisionWrites: true,
       neverFillSelectors: [
         'textarea[name="g-recaptcha-response"]',
         'input[name="g-recaptcha-response"]',
@@ -342,6 +356,10 @@ export function isAtsApplicationPage(): boolean {
 }
 
 export function atsCanAutoSubmit(atsName: string): boolean {
+  if (atsName === 'recruitee'
+    && typeof window !== 'undefined'
+    && window.location.hostname.toLowerCase() === 'whitecoatglobal1.recruitee.com'
+    && /^\/o\/software-engineer-intern(?:\/c\/new)?\/?$/.test(window.location.pathname)) return false;
   const capability = browserApplicationCapability(atsName);
   if (capability) return capability.programmaticSubmit;
   return AUTO_SUBMIT_CAPABILITIES[atsName as keyof typeof AUTO_SUBMIT_CAPABILITIES] === 'conditional';
@@ -611,7 +629,7 @@ const GATED_PORTALS: ReadonlyArray<{
   },
   {
     id: 'avature',
-    host: (h) => h === 'maximus.avature.net' || h === 'sandboxxerox.avature.net',
+    host: (h) => h === 'maximus.avature.net' || h === 'sandboxxerox.avature.net' || h === 'jobs.ea.com',
     path: (p) => /^\/(?:[a-z]{2}_[a-z]{2}\/)?careers\/(?:JobDetail(?:\/[^/]+\/\d+)?|Job-Application|Login)\/?$/i.test(p),
     notice:
       'This company routes the application through an Avature login or tenant-specific resume intake. Litos leaves that account and every later choice to you.',
@@ -645,11 +663,13 @@ export function gatedPortalNotice(
     if (!exactDell && !exactAldar) return null;
   }
   if (portal.id === 'ultipro') {
-    const opportunityId = new URLSearchParams(search).get('opportunityId');
-    const identity = `${pathname}?opportunityId=${opportunityId ?? ''}`;
+    const opportunityIds = new URLSearchParams(search).getAll('opportunityId');
+    if (opportunityIds.length !== 1) return null;
+    const identity = `${pathname}?opportunityId=${opportunityIds[0]}`;
     const windquest = identity === '/WIN1014WINDQ/JobBoard/08eb8299-5b26-4208-adb7-897aa42c6959/OpportunityDetail?opportunityId=f6cd56f9-5b2f-4b53-9e86-2553b54524f9';
     const little = identity === '/LIT1004LDAC/JobBoard/30702fd2-636e-4886-b1ce-4fc3b07e37ec/OpportunityDetail?opportunityId=4fc30c2a-e2b3-42e0-bcaf-7805f741c04a';
-    if (!windquest && !little) return null;
+    const covantage = identity === '/cov1003covcu/JobBoard/24b0bccd-d0f2-4641-a5f2-6ca809c72521/OpportunityDetail?opportunityId=954bed4e-7b77-4abd-ac78-add89ee3c71e';
+    if (!windquest && !little && !covantage) return null;
   }
   if (portal.id === 'avature') {
     const exactDetail = hostname === 'sandboxxerox.avature.net'
@@ -659,7 +679,10 @@ export function gatedPortalNotice(
       && new URLSearchParams(search).get('jobId') === '44460';
     const exactIntake = hostname === 'maximus.avature.net'
       && /^\/careers\/Job-Application\/?$/i.test(pathname);
-    if (!exactDetail && !exactLogin && !exactIntake) return null;
+    const exactEaInternship = hostname === 'jobs.ea.com'
+      && new URLSearchParams(search).getAll('jobId').length === 0
+      && /^\/en_US\/careers\/JobDetail\/Software-Engineer-Intern\/214956\/?$/.test(pathname);
+    if (!exactDetail && !exactLogin && !exactIntake && !exactEaInternship) return null;
   }
   if (portal.id !== 'sap_successfactors') return portal.notice;
   const query = new URLSearchParams(search);

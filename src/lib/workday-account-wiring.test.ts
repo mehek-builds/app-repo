@@ -49,8 +49,8 @@ describe('Workday account flow wiring', () => {
   });
 
   it('revalidates the exact Workday final control in dashboard and countdown paths', () => {
-    expect(content).toMatch(/findProgrammaticFinalSubmitButton\('workday'\) !== finalSubmitBtn/);
-    expect(content).toMatch(/safeAfterReservation[\s\S]{0,420}workdayProgrammaticFinalSubmitAllowed\(target\)/);
+    expect(content).toMatch(/findProgrammaticFinalSubmitButton\(fillResult\.ats_name\) !== finalSubmitBtn/);
+    expect(content).toMatch(/safeAfterReservation[\s\S]{0,700}workdayProgrammaticFinalSubmitAllowed\(target\)/);
     expect(content.match(/workdayProgrammaticFinalSubmitAllowed\(target\)/g)?.length).toBeGreaterThanOrEqual(3);
   });
 });
