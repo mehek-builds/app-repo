@@ -62,6 +62,7 @@ import {
   WORKDAY_ACCOUNT_PROMPT_TITLE,
   workdayAccountCompletion,
 } from '../lib/workday-account-copy';
+import { bullhornEmployerName, contentInitRoute } from '../lib/content-init-routing';
 
 export default defineContentScript({
   matches: [
@@ -89,6 +90,15 @@ export default defineContentScript({
     // Public application routes captured on two unrelated tenants per family on 2026-08-09.
     'https://*.recruitee.com/o/*',
     'https://*.teamtailor.com/jobs/*',
+    'https://*.zohorecruit.com/jobs/Careers/*',
+    'https://*.zohorecruit.eu/jobs/Careers/*',
+    'https://*.zohorecruit.in/jobs/Careers/*',
+    'https://www.serverlogic.com/wp-content/plugins/bullhorn-oscp/*',
+    'https://www.staffingsolutionsenterprises.com/wp-content/plugins/bullhorn-oscp/*',
+    // SuccessFactors has many product surfaces. The runtime predicate accepts only career<number>
+    // hosts, and only recognition is enabled because the application itself is account-walled.
+    'https://*.successfactors.com/*',
+    'https://*.successfactors.eu/*',
     // The four below have no adapter and never will until their gates change. They are matched so
     // Litos can RECOGNISE the page and say plainly why it cannot fill it, which is worth more to a
     // job seeker than a card that never appears. See gatedPortalNotice.
@@ -376,7 +386,9 @@ export default defineContentScript({
           : h === 'www.comeet.co'
             ? new URLSearchParams(window.location.search).get('company-name') ?? referrerParts[1]
             : h.split('.')[0];
-        const company = tenant ? tenant.replace(/[-_]+/g, ' ').trim() : undefined;
+        const company = bullhornEmployerName(h)
+          ?? document.querySelector<HTMLMetaElement>('meta[property="og:site_name"]')?.content?.trim()
+          ?? (tenant ? tenant.replace(/[-_]+/g, ' ').trim() : undefined);
         if (title && company) return { title, company };
       }
 
@@ -2101,24 +2113,12 @@ export default defineContentScript({
 
     // ─── Entry point ────────────────────────────────────────────────────────
 
-    const KNOWN_ATS_HOSTS = [
-      'linkedin.com', 'greenhouse.io', 'lever.co', 'myworkdayjobs.com',
-      'workday.com', 'ashbyhq.com', 'indeed.com', 'joinhandshake.com',
-      // 2026-07-29. These must be listed here as well as in `matches`, or init() sends them to
-      // genericInit(), which returns early on any known ATS host and would leave them with no card
-      // at all. The four gated platforms are included for the same reason: their notice is shown on
-      // the ATS path.
-      'ats.rippling.com', 'breezy.hr', 'bamboohr.com',
-      'jobs.jobvite.com', 'icims.com', 'oraclecloud.com', 'recruiting.ultipro.com',
-      'jobs.personio.de', 'jobs.personio.com', 'pinpointhq.com', 'comeet.co',
-    ];
-
     // Company-hosted application forms (vercel.com/careers, lifeatspotify.com, ...): this
     // only ever runs when the student explicitly injected the script from the popup, since
     // no manifest match covers these domains. Re-clicking the popup button re-enters here
     // via the __litosGenericInit guard at the top of main().
     function genericInit() {
-      if (KNOWN_ATS_HOSTS.some((k) => window.location.hostname.includes(k))) return;
+      if (contentInitRoute(window.location) !== 'generic') return;
       document.getElementById('litos-resume-card')?.remove();
       if (!isLikelyApplicationForm()) {
         const note = document.createElement('div');
@@ -2164,11 +2164,14 @@ export default defineContentScript({
 
     function init() {
       const h = window.location.hostname;
+      const route = contentInitRoute(window.location);
 
       // Checked before every other branch. These hosts are in KNOWN_ATS_HOSTS so they do not fall
       // through to genericInit, but they have no adapter, so without this they would reach
       // getJobDetails(), return null and go silent.
-      const gated = gatedPortalNotice(h);
+      const gated = route === 'gated'
+        ? gatedPortalNotice(h, window.location.pathname, window.location.search)
+        : null;
       if (gated) {
         injectGatedPortalNotice(gated);
         const job = getJobDetails();
@@ -2183,7 +2186,9 @@ export default defineContentScript({
         return;
       }
 
-      if (!KNOWN_ATS_HOSTS.some((k) => h.includes(k))) {
+      if (route === 'ignore') return;
+
+      if (route === 'generic') {
         genericInit();
         return;
       }

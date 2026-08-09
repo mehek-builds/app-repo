@@ -62,7 +62,7 @@ export const NEVER_FILL_LABEL_PATTERNS = [/social security/i, /ssn\b/i, /driver'
 // `honey-pot` / `honey-pot-0`, WITH the hyphen, which the un-hyphenated form missed entirely.
 // `\bhp[-_]\w` catches Breezy's `hp_7f2b`, whose suffix is randomised per render so only the prefix
 // is matchable. Both read live 2026-07-29.
-const HONEYPOT_IDENTITY = /beecatcher|honey-?pot|bot-?trap|\bhp[-_]\w|\bhp[-_]?field\b/i;
+const HONEYPOT_IDENTITY = /beecatcher|honey-?pot|bot-?trap|\bhp[-_]\w|\bhp[-_]?field\b|\bnickname_/i;
 const HONEYPOT_COPY = /for robots only|do not enter if you'?re human|leave this (field |input )?(blank|empty)/i;
 
 // A control concealed by an ANCESTOR collapsed to nothing, rather than by its own style.

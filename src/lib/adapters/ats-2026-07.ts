@@ -1,6 +1,7 @@
 import type { AutofillResult } from '../types';
-import { fillField, splitName } from './shared/dom';
+import { fillField, isHoneypotField, splitName } from './shared/dom';
 import { fillGenericApplication, type GenericFillParams, type GenericProviderPolicy } from './generic';
+import { browserApplicationCapability } from './browser-application-capabilities';
 
 // Adapters for the ATS platforms captured on 2026-07-29 (vault:
 // litos-ats-dom-capture-2026-07-29.md). Every selector here came off a real rendered form; none was
@@ -22,9 +23,9 @@ import { fillGenericApplication, type GenericFillParams, type GenericProviderPol
 type FieldKey = 'fullName' | 'firstName' | 'lastName' | 'email' | 'phone' | 'city' | 'linkedin' | 'portfolio';
 
 interface AtsSpec {
-  readonly id: 'rippling' | 'breezy' | 'bamboohr' | 'recruitee' | 'teamtailor' | 'personio' | 'pinpoint' | 'comeet';
+  readonly id: 'rippling' | 'breezy' | 'bamboohr' | 'recruitee' | 'teamtailor' | 'personio' | 'pinpoint' | 'comeet' | 'zoho_recruit' | 'bullhorn';
   readonly host: (hostname: string) => boolean;
-  readonly isApplicationPath: (pathname: string, rawSearch: string) => boolean;
+  readonly isApplicationPath: (pathname: string, rawSearch: string, hash: string) => boolean;
   /** Selectors for the fields the profile can answer factually. Absent keys are simply not filled. */
   readonly fields: Partial<Record<FieldKey, string>>;
   readonly resume?: string;
@@ -64,6 +65,42 @@ const AUTO_SUBMIT_CAPABILITIES = {
 } as const satisfies Record<string, 'conditional' | 'never'>;
 
 export const ATS_SPECS: readonly AtsSpec[] = [
+  {
+    id: 'zoho_recruit',
+    host: (h) => /^[^.]+\.zohorecruit\.(?:com|eu|in)$/i.test(h),
+    isApplicationPath: (p) => /^\/jobs\/Careers\/\d+\/[^/]+\/?$/i.test(p),
+    fields: {
+      firstName: 'input[name="First_Name"], input[name="firstName"]',
+      lastName: 'input[name="Last_Name"], input[name="lastName"]',
+      email: 'input[name="Email"], input[name="email"]',
+      phone: 'input[name="Phone"], input[name="phone"]',
+    },
+    resume: 'input[type="file"][name*="Resume" i], input[type="file"][data-zcqa*="resume" i]',
+    jd: '#spandesc, career-website-detail, main',
+    autoSubmit: 'never',
+    genericPolicy: { provider: 'zoho_recruit', forbidConsentWrites: true, forbidHumanDecisionWrites: true },
+    ceiling:
+      'Litos filled the public Zoho Recruit form but left every privacy, retention, EEO, attestation, CAPTCHA and send control to you.',
+  },
+  {
+    id: 'bullhorn',
+    // OSCP is self-hosted and customizable. Only the exact tenants inspected live are claimed.
+    host: (h) => h === 'www.serverlogic.com' || h === 'www.staffingsolutionsenterprises.com',
+    isApplicationPath: (p, _search, hash) => /^\/wp-content\/plugins\/bullhorn-oscp\/?$/i.test(p)
+      && /^#\/jobs\/\d+(?:\/apply)?\/?$/i.test(hash),
+    fields: {
+      firstName: 'input[formcontrolname="firstName"], input[name="firstName"]',
+      lastName: 'input[formcontrolname="lastName"], input[name="lastName"]',
+      email: 'input[formcontrolname="email"], input[name="email"]',
+      phone: 'input[formcontrolname="phone"], input[name="phone"]',
+    },
+    resume: 'input[type="file"][formcontrolname="resume"], input[type="file"][name="resume"]',
+    jd: 'novo-activity-table, app-job, main',
+    autoSubmit: 'never',
+    genericPolicy: { provider: 'bullhorn', forbidConsentWrites: true, forbidHumanDecisionWrites: true },
+    ceiling:
+      'Litos filled the Bullhorn form but left every legal choice and the send button to you because each company can customize this portal.',
+  },
   {
     id: 'recruitee',
     host: (h) => /^(?!www\.)[^.]+\.recruitee\.com$/i.test(h),
@@ -246,17 +283,22 @@ export const ATS_SPECS: readonly AtsSpec[] = [
   },
 ];
 
+export function specForLocation(location: Pick<Location, 'hostname' | 'pathname' | 'search' | 'hash'>): AtsSpec | null {
+  return ATS_SPECS.find((candidate) => candidate.host(location.hostname)) ?? null;
+}
+
 export function specForCurrentPage(): AtsSpec | null {
-  const host = window.location.hostname;
-  return ATS_SPECS.find((spec) => spec.host(host)) ?? null;
+  return specForLocation(window.location);
 }
 
 export function isAtsApplicationPage(): boolean {
   const spec = specForCurrentPage();
-  return spec ? spec.isApplicationPath(window.location.pathname, window.location.search) : false;
+  return spec ? spec.isApplicationPath(window.location.pathname, window.location.search, window.location.hash) : false;
 }
 
 export function atsCanAutoSubmit(atsName: string): boolean {
+  const capability = browserApplicationCapability(atsName);
+  if (capability) return capability.programmaticSubmit;
   return AUTO_SUBMIT_CAPABILITIES[atsName as keyof typeof AUTO_SUBMIT_CAPABILITIES] === 'conditional';
 }
 
@@ -273,6 +315,15 @@ export function clickAtsSubmitIfAllowed(
 
 export function clickDashboardSubmitIfAllowed(atsName: string, submitButton: Pick<HTMLElement, 'click'>): boolean {
   return clickAtsSubmitIfAllowed(atsName, submitButton);
+}
+
+function visibleSafeFixedInput(selector: string): HTMLInputElement | null {
+  return [...document.querySelectorAll<HTMLInputElement>(selector)].find((candidate) => {
+    if (candidate.closest('[id*="litos"]') || isHoneypotField(candidate)) return false;
+    const rect = candidate.getBoundingClientRect();
+    const style = getComputedStyle(candidate);
+    return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+  }) ?? null;
 }
 
 export function extractAtsJdText(): string {
@@ -337,7 +388,9 @@ export async function fillAtsApplication(params: GenericFillParams): Promise<Aut
   for (const [key, selector] of Object.entries(spec.fields) as Array<[FieldKey, string]>) {
     const value = values[key];
     if (!value) continue;
-    const el = document.querySelector<HTMLInputElement>(selector);
+    const el = spec.id === 'zoho_recruit' || spec.id === 'bullhorn'
+      ? visibleSafeFixedInput(selector)
+      : document.querySelector<HTMLInputElement>(selector);
     // Never overwrite: the student may have typed something, or the platform may have prefilled it
     // from a previous application, and either is better information than ours.
     if (!el || el.value) continue;
@@ -372,7 +425,7 @@ export async function fillAtsApplication(params: GenericFillParams): Promise<Aut
 // application field exists, so there is no selector worth writing and an adapter would be a
 // fill that silently does nothing. All four read live 2026-07-29.
 
-type GatedPortal = 'jobvite' | 'icims' | 'oraclecloud' | 'ultipro';
+type GatedPortal = 'jobvite' | 'icims' | 'oraclecloud' | 'ultipro' | 'sap_successfactors';
 
 const GATED_PORTALS: ReadonlyArray<{ id: GatedPortal; host: (h: string) => boolean; notice: string }> = [
   {
@@ -402,6 +455,12 @@ const GATED_PORTALS: ReadonlyArray<{ id: GatedPortal; host: (h: string) => boole
     notice:
       'Litos can find this job but cannot read this company’s application form yet. Everything you need is ready to paste in, so apply on the page itself.',
   },
+  {
+    id: 'sap_successfactors',
+    host: (h) => /^career\d+\.successfactors\.(?:com|eu)$/i.test(h),
+    notice:
+      'This company asks you to sign in or create a SuccessFactors account before the application form opens. Litos leaves that account and every later legal choice to you.',
+  },
 ];
 
 /**
@@ -413,6 +472,16 @@ const GATED_PORTALS: ReadonlyArray<{ id: GatedPortal; host: (h: string) => boole
  * the notice is only ever shown on a page the student opened herself, and it says nothing worse than
  * "this one needs you", so the wider match costs nothing and covers tenants on other paths.
  */
-export function gatedPortalNotice(hostname = window.location.hostname): string | null {
-  return GATED_PORTALS.find((portal) => portal.host(hostname))?.notice ?? null;
+export function gatedPortalNotice(
+  hostname = window.location.hostname,
+  pathname = window.location.pathname,
+  search = window.location.search,
+): string | null {
+  const portal = GATED_PORTALS.find((candidate) => candidate.host(hostname));
+  if (portal?.id !== 'sap_successfactors') return portal?.notice ?? null;
+  if (!/^\/(?:sfcareer\/jobreqcareer|career|portalcareer)\/?$/i.test(pathname)) return null;
+  const query = new URLSearchParams(search);
+  const jobId = query.get('jobId') ?? query.get('career_job_req_id') ?? query.get('job_application');
+  const company = query.get('company');
+  return /^\d+$/.test(jobId ?? '') && /^[A-Za-z0-9_-]+$/.test(company ?? '') ? portal.notice : null;
 }

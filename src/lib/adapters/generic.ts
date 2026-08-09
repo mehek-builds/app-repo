@@ -1386,21 +1386,40 @@ export interface GenericFillParams {
 }
 
 export interface GenericProviderPolicy {
-  provider: 'recruitee' | 'teamtailor' | 'personio' | 'pinpoint' | 'comeet';
+  provider: 'recruitee' | 'teamtailor' | 'personio' | 'pinpoint' | 'comeet' | 'zoho_recruit' | 'bullhorn';
   forbidConsentWrites?: true;
   neverFillSelectors?: readonly string[];
   reviewReason?: string;
+  forbidHumanDecisionWrites?: true;
 }
 
 const PROVIDER_CONSENT_QUESTION =
   /\b(?:agree|consent|acknowledg\w*|confirm|accept)\b[\s\S]{0,220}\b(?:privacy|personal\s+(?:details|data|information)|process(?:ing)?|store|retain|future\s+(?:jobs?|positions?|vacancies|opportunities))\b|\b(?:keep|store|retain|use|process)\b[\s\S]{0,160}\b(?:my|your)\s+(?:personal\s+)?(?:details|data|information)\b|\b(?:future|other)\s+(?:jobs?|positions?|vacancies|opportunities)\b[\s\S]{0,160}\b(?:contact|keep|store|retain|process|information|data)\b|\bcontact\b[\s\S]{0,160}\b(?:future|other)\s+(?:jobs?|positions?|vacancies|opportunities)\b/i;
+
+const PROVIDER_HUMAN_DECISION_QUESTION =
+  /\b(?:sensitive|race|ethnicity|gender|sex|age|religion|religious|marital|pregnan(?:cy|t)|national[\s_-]+origin|genetic[\s_-]+(?:data|information)|notice[\s_-]*period|disab(?:ility|led)|veteran|eeo|equal employment|attest|certif(?:y|ication)|captcha)\b/i;
+
+function providerControlContext(control: Element): string {
+  const optionText = control instanceof HTMLSelectElement
+    ? [...control.options].map((option) => option.textContent ?? '').join(' ')
+    : '';
+  const groupText = control.closest('fieldset, [role="group"], [role="radiogroup"]')?.textContent ?? '';
+  return `${controlIdentity(control)} ${questionLabel(control)} ${optionText} ${groupText}`;
+}
 
 function policyForbidsConsentWrite(
   policy: GenericProviderPolicy | undefined,
   label: string,
 ): boolean {
   return policy?.forbidConsentWrites === true
-    && (isRoutineApplicantConsentQuestion(label) || PROVIDER_CONSENT_QUESTION.test(label));
+    && (isRoutineApplicantConsentQuestion(label)
+      || PROVIDER_CONSENT_QUESTION.test(label)
+      || (policy.forbidHumanDecisionWrites === true && (
+        PROVIDER_HUMAN_DECISION_QUESTION.test(label)
+        || SALARY_QUESTION.test(label)
+        || START_DATE_QUESTION.test(label)
+        || TERM_QUESTION.test(label)
+      )));
 }
 
 export function providerPolicyForbidsControl(
@@ -1423,7 +1442,7 @@ export function providerPolicyForbidsControl(
     if (policy.provider === 'recruitee' && /^candidate\.agreements\..+/i.test(name)) return true;
     if (policy.provider === 'teamtailor' && /^candidate\[consent_given[^\]]*\]$/i.test(name)) return true;
   }
-  return policyForbidsConsentWrite(policy, `${controlIdentity(control)} ${questionLabel(control)}`);
+  return policyForbidsConsentWrite(policy, providerControlContext(control));
 }
 
 function providerConsentSkipReason(label: string): string {
