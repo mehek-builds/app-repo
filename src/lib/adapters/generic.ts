@@ -286,6 +286,26 @@ export function eeoAnswer(pref: string | undefined): Desired {
 // as a work-eligibility question: skipped, flagged "left for you", and holding auto-submit.
 export const WORK_ELIGIBILITY_QUESTION =
   /authori[sz](?:ed|ation)\s+to\s+work|legally\s+authori[sz]ed|right\s+to\s+work|work\s+authori[sz]|(?:requir\w*|need\w*|visa|immigration|without|employment)\s+(?:\w+\s+){0,3}sponsor|sponsor\w*\s+(?:\w+\s+){0,3}(?:requir\w*|need\w*)/i;
+
+/* Prior government employment is an employment-history declaration, not an EEO question and not
+ * evidence that exists in the extension's ApplicationProfile. The backend can inspect its typed
+ * experience bank; this client cannot, so it must hold the control for review instead of guessing
+ * from a resume parse or letting the word "military" select an EEO decline option. Keep the scope
+ * and exclusions aligned with the backend predicate: history only, never citizenship, clearance,
+ * export control, sponsorship, political exposure, authorization, or somebody else's service. */
+const GOVERNMENT_EMPLOYER_SCOPE =
+  /\bgovernment(?:al)?\b|\bpublic[-\s]sector\b|\bcivil\s+service\b|\bcongressional\s+staffer\b|\b(?:state|federal)\s+(?:or\s+\w+\s+)?agenc(?:y|ies)\b/i;
+const GOVERNMENT_EMPLOYMENT_PREDICATE =
+  /\bemploy(?:ed|ee|er|ment)\b|\bwork(?:ed|ing|s)?\b|\bserved?\b|\bstaffer\b|\bheld\s+a\s+(?:position|role|job|post)\b/i;
+const NOT_APPLICANT_GOVERNMENT_EMPLOYMENT =
+  /\b(?:friends?|relatives?|family|spouse|parents?)\b|\bentrusted\s+with\b|\bpolitically\s+exposed\b|\bexport[-\s]control\w*\b|\bexport\s+regulations?\b|\bclearance\b|\bcomplies\s+with\b|\bauthori[sz]\w*\b|\beligib\w*\b|\bsponsor\w*\b|\bcitizen\w*\b/i;
+
+export function isGovernmentEmploymentQuestion(label: string): boolean {
+  const value = label ?? '';
+  return GOVERNMENT_EMPLOYER_SCOPE.test(value)
+    && GOVERNMENT_EMPLOYMENT_PREDICATE.test(value)
+    && !NOT_APPLICANT_GOVERNMENT_EMPLOYMENT.test(value);
+}
 const WORK_AUTHORIZATION_QUESTION =
   /authori[sz](?:ed|ation)\s+to\s+work|legally\s+authori[sz]ed|right\s+to\s+work|work\s+authori[sz]/i;
 const SPONSORSHIP_QUESTION =
@@ -568,6 +588,7 @@ export function isPerApplicationDecisionQuestion(context: string): boolean {
     || PROVIDER_CONSENT_QUESTION.test(context)
     || LEGAL_POLICY_ATTESTATION_QUESTION.test(context)
     || WORK_ELIGIBILITY_QUESTION.test(context)
+    || isGovernmentEmploymentQuestion(context)
     || isLocationCommitmentQuestion(context)
     || SALARY_QUESTION.test(context)
     || START_DATE_QUESTION.test(context)
