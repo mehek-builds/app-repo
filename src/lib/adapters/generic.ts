@@ -1237,6 +1237,18 @@ export function unreadableQuestionSkipReason(): string {
 }
 
 // ─── Open-ended question shape (R-033) ──────────────────────────────────────
+// The essay-ish verbs and asks, hoisted out of isOpenEndedQuestion so the expression has exactly
+// one definition: R-119's fact guard needs these VERBS without that function's length arm, and a
+// second copy would drift the way the classifier comments warn about.
+// Stems (describ\w+, explain\w*) rather than \b-bounded whole words, because "explaining" /
+// "describing" are how the live Gemini label was phrased and a boundary after "explain" misses
+// them. "include a brief note on the type of problems you most enjoy working on" is the live
+// Cresta SWE Intern label (2026-07-17): no verb from the list, no question mark, and a required
+// 255-char input left undrafted. "brief note" and "you (most) enjoy" are prose asks the way
+// "describe" is - a field label names a field, it does not invite a note about enjoyment.
+const PROSE_ASK =
+  /\b(why\b|describ\w+|explain\w*|tell (?:us|me)\b|share\b|elaborat\w+|discuss\b|sentences?\b|paragraphs?\b|in your own words|what interest\w*|what excit\w*|what motivat\w*|what makes\b|how (?:did|do|would|have) you|brief note\b|note on\b|you (?:most )?enjoy\b)/;
+
 // The essay drafter's reach used to be textarea-shaped, but Greenhouse lets an author render a
 // free-text question as a single-line input[type=text] - Gemini asked for "3-5 sentences" in a
 // 255-char input, and the question was silently never drafted. Widening the drafter to every
@@ -1247,20 +1259,107 @@ export function unreadableQuestionSkipReason(): string {
 export function isOpenEndedQuestion(label: string): boolean {
   const l = clean(label ?? '').toLowerCase();
   if (!l) return false;
-  // Essay-ish verbs and asks. Stems (describ\w+, explain\w*) rather than \b-bounded whole words,
-  // because "explaining"/"describing" are how the live Gemini label was phrased and a boundary
-  // after "explain" misses them.
-  // "include a brief note on the type of problems you most enjoy working on" is the live Cresta
-  // SWE Intern label (2026-07-17): no verb from the list below, no question mark, and a required
-  // 255-char input left undrafted. "brief note" and "you (most) enjoy" are prose asks the way
-  // "describe" is - a field label names a field, it does not invite a note about enjoyment.
-  if (
-    /\b(why\b|describ\w+|explain\w*|tell (?:us|me)\b|share\b|elaborat\w+|discuss\b|sentences?\b|paragraphs?\b|in your own words|what interest\w*|what excit\w*|what motivat\w*|what makes\b|how (?:did|do|would|have) you|brief note\b|note on\b|you (?:most )?enjoy\b)/.test(l)
-  )
-    return true;
+  if (PROSE_ASK.test(l)) return true;
   // A long interrogative label is a question being asked, not a field being named. Short
-  // interrogatives without the verbs above ("Preferred name?") stay out on purpose.
+  // interrogatives without the verbs in PROSE_ASK ("Preferred name?") stay out on purpose.
   return l.includes('?') && l.length >= 40;
+}
+
+// ─── A fact about the student is never AI-drafted (R-119) ───────────────────
+// R-118 stopped the select/radio path inventing a referral source. The textarea path was still
+// open: the identity-first chain leaves `value` undefined for these labels, the profile lookup
+// after it is gated on `!isTextarea`, and the essay drafter sits at the bottom of the loop with
+// no field-identity check of its own. A referral question rendered as a <textarea> therefore
+// skipped `case 'referral_source_default'` entirely and had a model write a paragraph asserting
+// how she found the posting - the same invention R-118 removed, in her voice and at more length.
+// Measured on this adapter before the fix: date of birth, citizenship, country, state, city,
+// school, degree, graduation date, major, GPA, phone and profile links drafted the same way.
+//
+// The nouns below are the fact keys, and the map is the single list (a second `Set` of the same
+// keys would drift the way the classifier comments warn about). Only questions the PROFILE owns
+// appear here; anything classifyField does not recognise is still an essay and still drafts.
+const PROFILE_FACT_NOUNS: Partial<Record<ProfileKey, string>> = {
+  referral_source_default: 'referral source',
+  citizenship: 'citizenship',
+  address_country: 'country',
+  address_state: 'state',
+  address_city: 'city',
+  date_of_birth: 'date of birth',
+  availability_term: 'availability',
+  availability_date: 'start date',
+  desired_salary: 'salary',
+  school: 'school',
+  degree: 'degree',
+  graduation_date: 'graduation date',
+  major: 'major',
+  gpa: 'GPA',
+  gpa_scale: 'GPA scale',
+  phone: 'phone number',
+  linkedin_url: 'LinkedIn profile',
+  github_url: 'GitHub profile',
+  portfolio_url: 'portfolio link',
+};
+
+// The keys whose matcher CANNOT plausibly be the incidental subject of an essay prompt, so the
+// refusal is unconditional and no phrasing buys the drafter back. Everything else in
+// PROFILE_FACT_NOUNS yields to a prose-shaped prompt (see below), because its matcher demonstrably
+// appears inside real essays: \b(school|...)\b in "tell us about a project you worked on at
+// school", \bmajor\b in "what was the major challenge you overcame in your last role?", \bdegree\b
+// in "describe your degree and how it prepared you for this role", `nationalit` in "tell us about
+// a time you worked with people of different nationalities", `phone|mobile` in "describe your
+// mobile app experience". Refusing those would blank a legitimate essay.
+const ALWAYS_REFUSED_FACT_KEYS: ReadonlySet<ProfileKey> = new Set<ProfileKey>([
+  // "How did you hear about us?" - the canonical wording, and the one R-118 was written against -
+  // trips isOpenEndedQuestion's `how (did|do|would|have) you` arm, so the prose escape below would
+  // hand exactly the label this fix exists for straight back to the drafter. However it is
+  // phrased, it asks for a FACT about this application, and no phrasing turns that into an essay.
+  // The cost is measured and accepted: REFERRAL_QUESTION's `source of` arm also matches "what is
+  // the source of your motivation to build things?", a real essay that now goes blank-and-flagged
+  // instead of drafted. That failure costs her one paragraph of typing; the other direction puts
+  // a false statement about how she found the job on a real application.
+  'referral_source_default',
+  // No essay prompt asks for a birth date, a GPA, a GPA scale or a graduation year as prose, and
+  // all four matchers are field-name-shaped ("date of birth", "\bgpa\b", "class of"). These also
+  // need the unconditional arm rather than the escape because a merely LONG fact question
+  // ("what is your expected graduation date?" once the control's id is appended) crosses
+  // isOpenEndedQuestion's 40-character interrogative threshold and would escape on length alone.
+  'date_of_birth',
+  'graduation_date',
+  'gpa',
+  'gpa_scale',
+]);
+
+/**
+ * Which stored fact is this textarea asking for, if drafting it would be an invention?
+ * Returns the ProfileKey to refuse on, or null to let the drafter have it.
+ */
+export function factQuestionRefusingDraft(question: string): ProfileKey | null {
+  const key = classifyField(question);
+  if (!key || !(key in PROFILE_FACT_NOUNS)) return null;
+  if (ALWAYS_REFUSED_FACT_KEYS.has(key)) return key;
+  // A prose-shaped prompt keeps the drafter; only a field-shaped one is refused.
+  //
+  // PROSE_ASK, not isOpenEndedQuestion: the latter also returns true for ANY interrogative of 40+
+  // characters, and `question` here is questionLabel()'s output, which appends the control's own
+  // id or name to the visible label. That made the length arm a function of how long an `id`
+  // attribute happens to be - "what is your country of citizenship?" was refused on a control
+  // called `q` (37 chars) and drafted on one called `citizenship` (48). A safety guard must not
+  // depend on that, so only the verbs count here.
+  //
+  // The residue is known and is the safe direction: an essay prompt that contains a field word
+  // but none of the verbs is refused rather than drafted. "What was the major challenge you
+  // overcame in your last role?" is the shape - \bmajor\b matches, no verb does - and it now goes
+  // blank-and-flagged. That costs the student a paragraph of typing; drafting a fact she never
+  // recorded puts a false statement on a real application. When in doubt, HOLD.
+  return PROSE_ASK.test(clean(question).toLowerCase()) ? null : key;
+}
+
+// "left for" is the load-bearing phrase, the same one R-010 and R-118 lean on: it is what
+// autosubmit-gate's REVIEW_FLAG matches, so a refused fact question HOLDS the auto-submit
+// countdown instead of sailing through blank.
+export function factQuestionSkipReason(key: ProfileKey, label: string): string {
+  const noun = PROFILE_FACT_NOUNS[key] ?? 'profile';
+  return `${noun} question left for you (Litos does not draft facts about you): "${label.slice(0, 60)}"`;
 }
 
 /**
@@ -1991,6 +2090,18 @@ export async function fillGenericApplication(params: GenericFillParams): Promise
       if (languageQuestion(question)) {
         fields_skipped++;
         skipped_reasons.push(languageSkipReason(question, 'needs your own answer, not a draft'));
+        continue;
+      }
+      // Neither does a question the PROFILE owns (R-119). The referral source is the one this
+      // guard was written for - the select path stopped inventing a channel in R-118 and this
+      // path was still drafting one - but the same hole was open for date of birth, citizenship,
+      // location, school, degree, graduation date, major, GPA, phone and links. See
+      // factQuestionRefusingDraft for why referral refuses unconditionally while the rest yield
+      // to a genuinely prose-shaped prompt.
+      const factKey = factQuestionRefusingDraft(question);
+      if (factKey) {
+        fields_skipped++;
+        skipped_reasons.push(factQuestionSkipReason(factKey, question));
         continue;
       }
       if (draftAnswer) {
