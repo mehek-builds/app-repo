@@ -891,7 +891,14 @@ export function locationComboQueries(field: LocationQuestion['field'], ap: Appli
 // below encodes:
 //   - asked language IS declared: a clean Yes, or the fluent-tier level. NEVER "Native": fluent
 //     is what she declared, native is a STRONGER claim she did not make (the same line eeoAnswer
-//     draws - a near-miss option is a different statement, not a formatting variant).
+//     draws - a near-miss option is a different statement, not a formatting variant). The LEVEL
+//     side of this arm is review-flagged, because the declared list stores NAMES ONLY
+//     (ApplicationProfile.languages is string[], with no proficiency column): listing "French"
+//     says she speaks it, it does not say C1. Filling the fluent tier off a bare name is a claim
+//     one notch stronger than the stored fact, so it holds the countdown and she confirms the
+//     tier - the same treatment the not-declared level arm already gets. A flagged fill rather
+//     than a skip on purpose: these selects are usually required, an empty one blocks the submit
+//     anyway, and correcting one dropdown is cheaper for her than filling it from scratch.
 //   - asked language is NOT declared: an honest No is fillable, but only review-flagged. The
 //     declared list is authoritative for what she CAN claim, weaker as proof of what she cannot
 //     (she may simply not have listed one), so every No is confirmed by the student before
@@ -1080,6 +1087,12 @@ export function languageNoReviewReason(language: string, label: string): string 
 export function languageLevelReviewReason(language: string, label: string): string {
   return `picked the lowest ${language} level (not in your declared languages), review before submitting: "${label.slice(0, 60)}"`;
 }
+// The DECLARED level arm's flag. The profile stores language names with no proficiency column, so
+// the fluent tier is inferred from a bare name, not read from a stored level - the student
+// confirms the tier before it is submitted. Same "review before submitting" contract.
+export function languageDeclaredLevelReviewReason(language: string, label: string): string {
+  return `picked a fluent ${language} level (your profile stores no proficiency level), review before submitting: "${label.slice(0, 60)}"`;
+}
 
 // What an adapter should DO with a language question: fill this Desired (optionally pushing a
 // review reason alongside), or flag it. null when the label is not a language question at all.
@@ -1123,7 +1136,14 @@ export function languageAnswerPlan(label: string, ap: ApplicationProfile): Langu
   }
   switch (languageMembership(q.languages[0], declared)) {
     case 'declared':
-      return { kind: 'fill', desired: { mode: 'oneof', values: [...FLUENT_LEVEL_OPTIONS] } };
+      // Flagged, not clean. The yes/no arm above CAN be clean ("do you speak French?" is answered
+      // outright by the declared list), but a LEVEL is a second fact the profile does not store,
+      // so this fill is one notch stronger than what she declared and must be confirmed.
+      return {
+        kind: 'fill',
+        desired: { mode: 'oneof', values: [...FLUENT_LEVEL_OPTIONS] },
+        reviewReason: languageDeclaredLevelReviewReason(q.languages[0], label),
+      };
     case 'not-declared':
       return {
         kind: 'fill',
