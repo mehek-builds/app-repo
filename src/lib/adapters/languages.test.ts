@@ -117,7 +117,6 @@ describe('languageAnswerPlan: declared-list semantics', () => {
   it('declared-language level question: the fluent tier, NEVER Native', () => {
     const plan = languageAnswerPlan('English level', ap({ languages: declared }));
     if (plan?.kind !== 'fill') throw new Error('expected a fill plan');
-    expect(plan.reviewReason).toBeUndefined();
     expect(matchOption(opts('Basic', 'Conversational', 'Fluent', 'Native'), plan.desired)?.text).toBe('Fluent');
     // CEFR-only selects: C1 (fluent-tier, the weaker of the two honest claims) over C2.
     expect(matchOption(opts('A1', 'A2', 'B1', 'B2', 'C1', 'C2'), plan.desired)?.text).toBe('C1');
@@ -128,6 +127,37 @@ describe('languageAnswerPlan: declared-list semantics', () => {
         plan.desired,
       )?.text,
     ).toBe('Full professional proficiency');
+  });
+
+  // The asymmetry this pins used to run BACKWARDS. The not-declared level arm (a guessed "none")
+  // was review-flagged, while the declared arm silently committed the fluent/C1 tier - the arm
+  // making the STRONGER claim was the unflagged one. ApplicationProfile.languages is string[]:
+  // names only, no proficiency column. So "English" on the list says she speaks English and
+  // nothing at all about her level, and the fluent tier is inferred, not stored. Every level fill
+  // therefore holds the countdown until she confirms it.
+  it('declared-language level question is REVIEW-FLAGGED: a fluent tier is inferred, never stored', () => {
+    for (const label of ['English level', 'How would you describe your english language skills?']) {
+      const plan = languageAnswerPlan(label, ap({ languages: declared }));
+      if (plan?.kind !== 'fill') throw new Error('expected a fill plan');
+      // The wording contract, not a paraphrase: this exact phrase is what REVIEW_FLAG matches.
+      expect(plan.reviewReason).toMatch(/review before submitting/);
+      // The language name in the REASON, not merely echoed back inside the quoted label (both
+      // labels here contain "English", so a bare /english/ would pass on the echo alone).
+      expect(plan.reviewReason).toMatch(/fluent english level/i);
+      // The hold itself. Reword the builder out of REVIEW_FLAG and this fails HERE, rather than
+      // on a live form that auto-submits a fluency claim the student never made.
+      expect(skippedReasonsNeedReview([plan.reviewReason!])).toBe(true);
+    }
+    // Both level arms now flag - the strong claim no less than the weak one.
+    const undeclared = languageAnswerPlan('German level', ap({ languages: declared }));
+    if (undeclared?.kind !== 'fill') throw new Error('expected a fill plan');
+    expect(skippedReasonsNeedReview([undeclared.reviewReason!])).toBe(true);
+    // The yes/no arm is untouched: "do you speak French?" IS answered outright by the declared
+    // list, so it stays a clean Yes with no flag.
+    const yesno = languageAnswerPlan('Are you fluent in French?', ap({ languages: declared }));
+    if (yesno?.kind !== 'fill') throw new Error('expected a fill plan');
+    expect(yesno.desired).toEqual({ mode: 'yes' });
+    expect(yesno.reviewReason).toBeUndefined();
   });
 
   it('declared-language level question with ONLY Native-or-basic options: no match, adapter flags', () => {
