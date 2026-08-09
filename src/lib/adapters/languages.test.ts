@@ -141,7 +141,9 @@ describe('languageAnswerPlan: declared-list semantics', () => {
       if (plan?.kind !== 'fill') throw new Error('expected a fill plan');
       // The wording contract, not a paraphrase: this exact phrase is what REVIEW_FLAG matches.
       expect(plan.reviewReason).toMatch(/review before submitting/);
-      expect(plan.reviewReason).toMatch(/english/i);
+      // The language name in the REASON, not merely echoed back inside the quoted label (both
+      // labels here contain "English", so a bare /english/ would pass on the echo alone).
+      expect(plan.reviewReason).toMatch(/fluent english level/i);
       // The hold itself. Reword the builder out of REVIEW_FLAG and this fails HERE, rather than
       // on a live form that auto-submits a fluency claim the student never made.
       expect(skippedReasonsNeedReview([plan.reviewReason!])).toBe(true);
