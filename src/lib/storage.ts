@@ -8,6 +8,25 @@ const PROFILE_KEY = 'litos_profile';
 const AUTO_SUBMIT_KEY = 'litos_auto_submit_enabled';
 const PORTAL_SALT_KEY = 'litos_portal_salt';
 const PORTAL_ACCOUNTS_KEY = 'litos_portal_accounts';
+const PENDING_PORTAL_ACCOUNTS_KEY = 'litos_pending_portal_accounts';
+
+let authEpoch = 0;
+let authSessionActive = true;
+let portalAccountMutation: Promise<void> = Promise.resolve();
+
+export function currentAuthEpoch(): number {
+  return authEpoch;
+}
+
+export function authEpochIsCurrent(expectedEpoch: number): boolean {
+  return authSessionActive && Number.isSafeInteger(expectedEpoch) && expectedEpoch === authEpoch;
+}
+
+function serializePortalAccountMutation<T>(operation: () => Promise<T>): Promise<T> {
+  const result = portalAccountMutation.then(operation, operation);
+  portalAccountMutation = result.then(() => undefined, () => undefined);
+  return result;
+}
 
 const TOKEN_ALIASES = ['rolequick_token', 'volley_token'] as const;
 const PROFILE_ALIASES = ['rolequick_profile', 'volley_profile'] as const;
@@ -92,6 +111,8 @@ export async function getToken(): Promise<string | null> {
 export async function setToken(token: string): Promise<void> {
   await chromeStorageSet(TOKEN_KEY, token);
   if ((await getToken()) !== token) throw new Error('Your sign-in could not be saved. Please try again.');
+  authEpoch += 1;
+  authSessionActive = true;
 }
 
 export async function clearToken(): Promise<void> {
@@ -110,9 +131,29 @@ export async function setProfile(profile: Profile): Promise<void> {
 
 export async function clearAll(): Promise<void> {
   // Logout clears the token and profile (both new and legacy names). The auto-submit
-  // preference is intentionally left in place, matching the original logout behavior. Rotate
-  // the anonymous analytics id as well so two accounts on one Chrome profile are never linked.
-  await chromeStorageRemove([TOKEN_KEY, ...TOKEN_ALIASES, PROFILE_KEY, ...PROFILE_ALIASES, ANALYTICS_ID_KEY]);
+  // preference and device salt stay in place, matching the original logout behavior. Account
+  // authorizations are user-scoped and must be removed so the next Litos user on this Chrome
+  // profile cannot inherit another person's employer account. Rotate the anonymous analytics id
+  // as well so two accounts on one Chrome profile are never linked.
+  authEpoch += 1;
+  authSessionActive = false;
+  await serializePortalAccountMutation(async () => {
+    await chromeStorageRemove([
+      TOKEN_KEY,
+      ...TOKEN_ALIASES,
+      PROFILE_KEY,
+      ...PROFILE_ALIASES,
+      ANALYTICS_ID_KEY,
+      PORTAL_ACCOUNTS_KEY,
+      PENDING_PORTAL_ACCOUNTS_KEY,
+    ]);
+    const session = chrome.storage.session;
+    if (session) {
+      const stored = await session.get(null);
+      const packetKeys = Object.keys(stored).filter((key) => key.startsWith('litos_packet_applicant_identity:'));
+      if (packetKeys.length) await session.remove(packetKeys);
+    }
+  });
 }
 
 // Off by default: fill-and-stop (highlight Submit, student clicks) unless the student has
@@ -161,20 +202,123 @@ export async function getPortalSalt(): Promise<string> {
 // and the salt still matches. No record (account made by hand, or on another device) means no fill,
 // which is why a wrong password can never be submitted on the student's behalf.
 export interface PortalAccountRecord {
+  userId: string;
   host: string;
+  email: string;
+  applicationId: string;
   saltFingerprint: string;
   createdAt: number;
+}
+
+export interface PendingPortalAccountRecord {
+  userId: string;
+  host: string;
+  email: string;
+  saltFingerprint: string;
+  applicationId: string;
+  requestedAt: number;
+}
+
+export function portalAccountStorageKey(userId: string, host: string, applicationId: string, email: string): string {
+  return `${userId.toLowerCase()}\n${host.trim().toLowerCase().replace(/^www\./, '')}\n${applicationId.toLowerCase()}\n${email.trim().toLowerCase()}`;
 }
 
 export async function getPortalAccounts(): Promise<Record<string, PortalAccountRecord>> {
   return (await chromeStorageGetCompat<Record<string, PortalAccountRecord>>(PORTAL_ACCOUNTS_KEY, [])) ?? {};
 }
 
+export async function getPortalAccount(userId: string, host: string, applicationId: string, email: string): Promise<PortalAccountRecord | null> {
+  return (await getPortalAccounts())[portalAccountStorageKey(userId, host, applicationId, email)] ?? null;
+}
+
 export async function recordPortalAccount(record: PortalAccountRecord): Promise<void> {
-  const accounts = await getPortalAccounts();
-  // First write wins: re-provisioning an existing host would rewrite the fingerprint and mask the
-  // very salt drift this record exists to catch.
-  if (accounts[record.host]) return;
-  accounts[record.host] = record;
-  await chromeStorageSet(PORTAL_ACCOUNTS_KEY, accounts);
+  await serializePortalAccountMutation(async () => {
+    const accounts = await getPortalAccounts();
+    const key = portalAccountStorageKey(record.userId, record.host, record.applicationId, record.email);
+    if (accounts[key]) return;
+    accounts[key] = { ...record, host: record.host.toLowerCase(), email: record.email.toLowerCase() };
+    await chromeStorageSet(PORTAL_ACCOUNTS_KEY, accounts);
+  });
+}
+
+export async function getPendingPortalAccounts(): Promise<Record<string, PendingPortalAccountRecord>> {
+  return (await chromeStorageGetCompat<Record<string, PendingPortalAccountRecord>>(PENDING_PORTAL_ACCOUNTS_KEY, [])) ?? {};
+}
+
+export async function getPendingPortalAccount(userId: string, host: string, applicationId: string, email: string): Promise<PendingPortalAccountRecord | null> {
+  return (await getPendingPortalAccounts())[portalAccountStorageKey(userId, host, applicationId, email)] ?? null;
+}
+
+export async function recordPendingPortalAccount(record: PendingPortalAccountRecord, expectedEpoch = currentAuthEpoch()): Promise<boolean> {
+  return serializePortalAccountMutation(async () => {
+    if (!authEpochIsCurrent(expectedEpoch)) return false;
+    const key = portalAccountStorageKey(record.userId, record.host, record.applicationId, record.email);
+    const active = await getPortalAccounts();
+    if (active[key]) return false;
+    const pending = await getPendingPortalAccounts();
+    if (pending[key]) return false;
+    pending[key] = { ...record, host: record.host.toLowerCase(), email: record.email.toLowerCase() };
+    await chromeStorageSet(PENDING_PORTAL_ACCOUNTS_KEY, pending);
+    if (!authEpochIsCurrent(expectedEpoch)) {
+      const current = await getPendingPortalAccounts();
+      delete current[key];
+      await chromeStorageSet(PENDING_PORTAL_ACCOUNTS_KEY, current);
+      return false;
+    }
+    return true;
+  });
+}
+
+export async function pendingPortalAccountClaimIsCurrent(
+  expectedEpoch: number,
+  userId: string,
+  host: string,
+  applicationId: string,
+  email: string,
+): Promise<boolean> {
+  return serializePortalAccountMutation(async () => {
+    if (!authEpochIsCurrent(expectedEpoch)) return false;
+    return Boolean((await getPendingPortalAccounts())[portalAccountStorageKey(userId, host, applicationId, email)]);
+  });
+}
+
+export async function activatePendingPortalAccount(
+  userId: string,
+  host: string,
+  email: string,
+  applicationId: string,
+  createdAt = Date.now(),
+): Promise<boolean> {
+  return serializePortalAccountMutation(async () => {
+    const key = portalAccountStorageKey(userId, host, applicationId, email);
+    const pending = await getPendingPortalAccounts();
+    const claim = pending[key];
+    if (!claim || claim.applicationId !== applicationId) return false;
+    const active = await getPortalAccounts();
+    if (!active[key]) {
+      active[key] = {
+        userId: claim.userId,
+        host: claim.host,
+        email: claim.email,
+        applicationId: claim.applicationId,
+        saltFingerprint: claim.saltFingerprint,
+        createdAt,
+      };
+      await chromeStorageSet(PORTAL_ACCOUNTS_KEY, active);
+    }
+    delete pending[key];
+    await chromeStorageSet(PENDING_PORTAL_ACCOUNTS_KEY, pending);
+    return true;
+  });
+}
+
+export async function abandonPendingPortalAccount(userId: string, host: string, email: string, applicationId: string): Promise<boolean> {
+  return serializePortalAccountMutation(async () => {
+    const key = portalAccountStorageKey(userId, host, applicationId, email);
+    const pending = await getPendingPortalAccounts();
+    if (pending[key]?.applicationId !== applicationId) return false;
+    delete pending[key];
+    await chromeStorageSet(PENDING_PORTAL_ACCOUNTS_KEY, pending);
+    return true;
+  });
 }

@@ -154,12 +154,9 @@ export function isWorkdayApplicationPage(): boolean {
   return hasApplicationFormMarkers();
 }
 
-// 2026-07-03: Litos never creates the Workday account itself (backend-driven third-party
-// account creation was scoped, researched, and explicitly decided against - see project memory
-// for the CFAA/agency-law reasoning). This only pre-fills the signup form's own fields so the
-// student reviews and clicks "Create Account" themselves, same fill-and-stop trust model as
-// every other adapter - it's the speed-up that's actually in scope, not a way around the
-// account-creation boundary.
+// Account creation is handled locally by content.ts after the applicant's explicit card click.
+// This predicate identifies account pages only. It does not authorize a click or decide whether
+// tenant-specific CAPTCHA, legal consent, or attestation controls make automation unsafe.
 export function isWorkdayAccountCreationPage(): boolean {
   const h = window.location.hostname;
   if (!h.includes('myworkdayjobs.com') && !h.includes('workday.com')) return false;
@@ -274,6 +271,32 @@ function isNeverFillField(el: Element): boolean {
   return NEVER_FILL_LABEL_PATTERNS.some((re) => re.test(labelTextFor(el)));
 }
 
+const WORKDAY_PROTECTED_CLASS_QUESTION = /gender(?:\s+identity)?|\bsex\b|hispanic|latino|race|ethnic|veteran|military|disab|sexual\s+orientation|transgender|religion|marital\s+status|national\s+origin|genetic\s+information|pregnan|indigenous|aboriginal|demographic\s+age|age\s+(?:range|group|bracket)|what\s+is\s+your\s+age|select\s+your\s+age/i;
+
+export function isWorkdayProtectedClassQuestion(label: string): boolean {
+  return WORKDAY_PROTECTED_CLASS_QUESTION.test(label);
+}
+
+export function explicitWorkdayEeoAnswer(label: string, eeo: Record<string, string>): Desired {
+  const l = label.toLowerCase();
+  let value: string | undefined;
+  if (/gender\s+identity|transgender/.test(l)) value = eeo.gender_identity ?? eeo.transgender_status;
+  else if (/sexual\s+orientation/.test(l)) value = eeo.sexual_orientation;
+  else if (/\bgender\b|\bsex\b/.test(l)) value = eeo.gender ?? eeo.sex;
+  else if (/hispanic|latino/.test(l)) value = eeo.hispanic_ethnicity ?? eeo.hispanic ?? eeo.ethnicity;
+  else if (/race|ethnic/.test(l)) value = eeo.race ?? eeo.ethnicity;
+  else if (/veteran|military|protected\s+veteran/.test(l)) value = eeo.veteran_status ?? eeo.veteran;
+  else if (/disab/.test(l)) value = eeo.disability_status ?? eeo.disability;
+  else if (/demographic\s+age|age\s+(?:range|group|bracket)|what\s+is\s+your\s+age|select\s+your\s+age/.test(l)) value = eeo.age ?? eeo.age_group;
+  else if (/religion/.test(l)) value = eeo.religion;
+  else if (/marital\s+status/.test(l)) value = eeo.marital_status;
+  else if (/national\s+origin/.test(l)) value = eeo.national_origin;
+  else if (/genetic\s+information/.test(l)) value = eeo.genetic_information;
+  else if (/pregnan/.test(l)) value = eeo.pregnancy_status;
+  else if (/indigenous|aboriginal/.test(l)) value = eeo.indigenous_status;
+  return value?.trim() ? { mode: 'value', value: value.trim(), exact: true } : null;
+}
+
 // Has this block already been answered? The grade branch needs it for the same reason the location
 // branch does: an earlier pass or a pre-filled form must not be overwritten.
 function blockAlreadyAnsweredForGrade(block: Element): boolean {
@@ -345,16 +368,21 @@ export async function fillWorkdayApplication(params: WorkdayFillParams): Promise
     fields_filled++;
   }
 
-  if (resumeBlob && resumeFileName) {
-    if (await fillResumeFile(resumeBlob, resumeFileName)) {
-      fields_filled++;
+  const resumeControlPresent = Boolean(document.querySelector(
+    '[data-automation-id="file-upload-drop-zone"], [data-automation-id*="resumeUpload" i], input[type="file"]',
+  ));
+  if (resumeControlPresent) {
+    if (resumeBlob && resumeFileName) {
+      if (await fillResumeFile(resumeBlob, resumeFileName)) {
+        fields_filled++;
+      } else {
+        fields_skipped++;
+        skipped_reasons.push('resume: no file input found in this frame');
+      }
     } else {
       fields_skipped++;
-      skipped_reasons.push('resume: no file input found in this frame');
+      skipped_reasons.push('resume: no generated resume file available');
     }
-  } else {
-    fields_skipped++;
-    skipped_reasons.push('resume: no generated resume file available');
   }
 
   // Documents this form requires that Litos cannot produce (R-010). Reported at fill time, in
@@ -442,16 +470,16 @@ export async function fillWorkdayApplication(params: WorkdayFillParams): Promise
       skipped_reasons.push(locationSkipReason(loc.field, label, 'no-option'));
       continue;
     }
-    const isEeo = /gender|race|ethnicity|veteran|disability/i.test(label);
+    const isEeo = isWorkdayProtectedClassQuestion(label);
     if (isEeo) {
-      // Real answer when the student stored one (eeo prefs), else decline. Works whether the
-      // control is a native select, native radios, or a Workday prompt / react-select combobox.
-      const desired = desiredAnswer(label, applicationProfile, eeo);
+      // Workday can carry these controls into a later attestation page. Only an explicit stored
+      // answer may be written here. A blank preference is not inferred as a decline choice.
+      const desired = explicitWorkdayEeoAnswer(label, eeo);
       if (await answerChoiceBlock(block, desired)) {
         fields_filled++;
       } else {
         fields_skipped++;
-        skipped_reasons.push('EEO field: no matching option found, left blank');
+        skipped_reasons.push('EEO field left for you: no explicit reviewed answer matched');
       }
       continue;
     }
@@ -597,8 +625,7 @@ export interface WorkdayAccountCreationResult extends AutofillResult {
 // This function does NOT decide whether a password is safe to type. content.ts owns that gate and
 // passes `password` only on a genuine create-account stage, or on a sign-in form for an account
 // Litos itself provisioned under the current salt. Everywhere else it passes nothing and this
-// degrades to the original email-only behavior. Still fill-and-stop, NOT auto-submit: Litos never
-// clicks Create Account and never touches email verification - the student completes both by hand.
+// degrades to email-only behavior. The caller separately gates exact account actions and OTP.
 export async function fillWorkdayAccountCreation(params: WorkdayAccountCreationParams): Promise<WorkdayAccountCreationResult> {
   const { email, password, passwordWithheldReason } = params;
   let fields_filled = 0;
