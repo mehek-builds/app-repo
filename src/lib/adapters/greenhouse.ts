@@ -57,6 +57,8 @@ import { isDraftTargetAvailable, runDraftQueue } from './shared/drafts';
 import {
   classifyField,
   desiredAnswer,
+  factQuestionRefusingDraft,
+  factQuestionSkipReason,
   fitToBudget,
   GENERIC_LINK_ASK,
   isDraftableQuestion,
@@ -660,12 +662,26 @@ export async function fillGreenhouseApplication(params: GreenhouseFillParams): P
     // leave blank WITH a reason. A textarea keeps its budget when the author set one.
     const textarea = block.querySelector<HTMLTextAreaElement>('textarea');
     if (textarea && !textarea.value) {
+      // R-119: the `known` branch above only fires when desiredAnswer RESOLVES something, and on
+      // an unset profile field it returns null - "no date of birth stored" and "not a date of
+      // birth question" collapse into the same answer, which is the exact collapse classifyField
+      // exists to undo. So a fact question the student never filled in fell past it to here and
+      // was drafted. Measured on this adapter: date of birth, school, degree, graduation date,
+      // citizenship and phone all came back as invented prose. Referral was already safe (its
+      // desiredAnswer is catch-all and never null), as were location (locationQuestion) and
+      // GPA/major (gradeQuestion) - this guard closes the rest of the same class. The
+      // input[type=text] path below already carried its own `classifyField(label) === null`
+      // condition, which is why R-033's drafter never had this hole; only the textarea did.
+      const factKey = factQuestionRefusingDraft(label);
       if (!isDraftableQuestion(label)) {
         // An unreadable label must never reach the drafter: the backend requires a non-empty
         // question (z.string().min(1)), so "" is a guaranteed 400, a null draft, and a REQUIRED
         // essay left blank with nobody told. Flag it so auto-submit holds (R-006).
         fields_skipped++;
         skipped_reasons.push(unreadableQuestionSkipReason());
+      } else if (factKey) {
+        fields_skipped++;
+        skipped_reasons.push(factQuestionSkipReason(factKey, label));
       } else if (draftAnswer) {
         pendingDrafts.push({
           el: textarea,
