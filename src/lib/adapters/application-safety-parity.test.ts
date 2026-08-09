@@ -1,6 +1,10 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it } from 'vitest';
-import { fillGenericApplication, isPerApplicationDecisionQuestion } from './generic';
+import {
+  fillGenericApplication,
+  isGovernmentEmploymentQuestion,
+  isPerApplicationDecisionQuestion,
+} from './generic';
 import { ATS_SPECS } from './ats-2026-07';
 import { fillAshbyApplication } from './ashby';
 import { fillGreenhouseApplication } from './greenhouse';
@@ -50,8 +54,61 @@ describe('application decision safety parity', () => {
     'What hourly rate do you expect?',
     'Are you legally authorized to work in Germany?',
     'Will you need sponsorship to work in the UAE?',
+    'Prior US Government Employment?',
+    'Have you worked in the public sector?',
   ])('classifies label and option context as human-only: %s', (context) => {
     expect(isPerApplicationDecisionQuestion(context)).toBe(true);
+  });
+
+  it('holds government employment without widening into adjacent legal declarations', () => {
+    const governmentHistory = [
+      'Prior US Government Employment?',
+      'Have you ever been employed by a government agency?',
+      'Do you currently, or have you in the last 10 years, worked for the US government (e.g. congressional staffer, member of military, state, or federal agencies)?',
+    ];
+    for (const label of governmentHistory) {
+      expect(isGovernmentEmploymentQuestion(label), label).toBe(true);
+      expect(isPerApplicationDecisionQuestion(label), label).toBe(true);
+    }
+
+    for (const label of [
+      'Are you legally authorized to work for the federal government?',
+      'Are you eligible to hold a US security clearance?',
+      'Will you require sponsorship to work for a government contractor?',
+      'Are you a US citizen?',
+      'Are you or a family member a politically exposed person?',
+      'Do export control regulations apply to you?',
+    ]) {
+      expect(isGovernmentEmploymentQuestion(label), label).toBe(false);
+    }
+  });
+
+  it('never fills or drafts the government-employment declaration', async () => {
+    document.body.innerHTML = `
+      <fieldset><legend>Prior US Government Employment?</legend>
+        <label for="gov-y">Yes</label><input id="gov-y" name="government_employment" type="radio" value="yes">
+        <label for="gov-n">No</label><input id="gov-n" name="government_employment" type="radio" value="no">
+      </fieldset>
+      <label for="gov-detail">Do you currently, or have you in the last 10 years, worked for the US government (e.g. congressional staffer, member of military, state, or federal agencies)?</label>
+      <textarea id="gov-detail" name="government_history"></textarea>
+    `;
+    makeVisible();
+    const drafted: string[] = [];
+
+    const result = await fillGenericApplication({
+      fullName: 'Mehek Mandal',
+      profile: {} as Profile,
+      applicationProfile: {} as ApplicationProfile,
+      draftAnswer: async (question: string) => {
+        drafted.push(question);
+        return 'No';
+      },
+    });
+
+    expect([...document.querySelectorAll<HTMLInputElement>('input[type="radio"]')].every((input) => !input.checked)).toBe(true);
+    expect((document.querySelector('#gov-detail') as HTMLTextAreaElement).value).toBe('');
+    expect(drafted).toEqual([]);
+    expect(result.skipped_reasons.filter((reason) => /application decision left for you/.test(reason))).toHaveLength(2);
   });
 
   it('blocks every synthetic control path while preserving factual email fill', async () => {
