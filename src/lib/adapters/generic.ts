@@ -180,6 +180,9 @@ function groupQuestionText(group: HTMLInputElement[], optionTexts: string[]): st
 // Drive a combobox / react-select control to the desired answer: open it, read its rendered
 // options, and click the match. Returns 'filled' on a confident selection, 'skipped' otherwise
 // (menu never opened, or no option matched - better to leave it for the student than guess).
+// Both skips go through closeOpenCombobox, which RETRACTS the typeahead query openCombobox typed
+// to open the menu: a skip that left that text in the box reported "dropdown left for you" about a
+// field the student sees as full, and submitted the query as the answer on a plain combobox.
 async function fillComboboxFor(trigger: HTMLElement, desired: Desired): Promise<'filled' | 'skipped'> {
   if (!desired) return 'skipped';
   const typeahead =
@@ -1460,11 +1463,9 @@ export function desiredAnswer(label: string, ap: ApplicationProfile, eeo: Record
     // recorded, and claimed the same one on postings found through a job board or a referral. The
     // backend's corpus sweep deleted this exact constant on its side; this is the extension half.
     //
-    // Unset now claims NOTHING: no values at all, just `catchall`, which accepts a pure "Other"
-    // option and nothing else. The first version of this fix passed the literal string 'other' as
-    // a value, and review measured what that actually selects - "Other referral" and "Other job
-    // board", through matchOption's word-boundary widening. Both name a channel. See CATCHALL_RE:
-    // the catch-all needed its own matching rule, not a value in a list.
+    // Unset now claims NOTHING: null leaves even a pure "Other" option unanswered. A catch-all is
+    // available only after a stored source fails to match, because only then do we know that
+    // "Other" truthfully means the student's recorded channel is not listed.
     // When the form offers no qualifying option matchOption returns null, and the caller's own
     // reason ("dropdown left for you" / "radio question left for you" / "unrecognized field left
     // blank") holds the auto-submit countdown: "left for" is what autosubmit-gate's REVIEW_FLAG
@@ -1475,17 +1476,19 @@ export function desiredAnswer(label: string, ap: ApplicationProfile, eeo: Record
       // shape the old `.filter(Boolean)` handled), and so is a lone zero-width space, which trim
       // leaves standing and which adapters then type into a combobox as a typeahead query.
       const stored = clean(ap.referral_source_default ?? '');
-      if (!stored) return { mode: 'oneof', values: [], catchall: true };
+      if (!stored) return null;
       // A stored value does not license the whole list either. The synonyms are spellings of ONE
       // channel (see COMPANY_SITE_SYNONYMS), so they may stand in for a stored "Company website"
       // and for nothing else: a student who stored "LinkedIn" and meets a form with no LinkedIn
       // option was, until now, answered "Company website" - the same invented fact as the unset
       // branch, just harder to see because a value WAS stored.
+      // Exact matching prevents a bare stored "Website" or "Careers" from widening into the
+      // employer's own site. Explicit company-site synonyms remain available as exact alternatives.
       // Every stored answer keeps the catch-all behind it, which stays true by construction: it
-      // says the channel is not on this list, which is exactly what happened.
+      // says the recorded channel is not on this list, which is exactly what happened.
       return namesTheCompanySite(stored)
-        ? { mode: 'oneof', values: [stored, ...COMPANY_SITE_SYNONYMS], catchall: true }
-        : { mode: 'oneof', values: [stored], catchall: true };
+        ? { mode: 'oneof', values: [stored, ...COMPANY_SITE_SYNONYMS], exact: true, catchall: true }
+        : { mode: 'oneof', values: [stored], exact: true, catchall: true };
     }
 
     // Salary answers route through the R-031 rule rather than the bare stored value: a range
@@ -1547,7 +1550,7 @@ const DECLINE_RE = /decline|prefer not|don'?t wish|do not wish|wish not|rather n
 // The dash and ellipsis characters are written as escapes: an ATS may render the qualifier with
 // an en dash, em dash, or a single-character ellipsis, and all three read as ordinary punctuation
 // in an option label.
-const CATCHALL_RE = /^others?\s*(?:$|[\[\(:,\u2013\u2014-]|\.{3}|\u2026)/i;
+const CATCHALL_RE = /^others?\s*(?::$|\.{3}$|\u2026$|\(\s*please specify\s*\)$|[,\u2013\u2014-]\s*please specify\s*$|$)/i;
 
 // Common nationality adjective -> country name, so a citizenship stored as "Indian" can still
 // answer a country dropdown that lists "India". Keys/values are lowercased to match `norm()`.

@@ -676,15 +676,29 @@ function pause(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// A mouse event that survives a DOM implementation which refuses `view`. jsdom - where these
+// drivers' unit tests run - rejects the test environment's window object as a Window and THROWS on
+// construction, which used to kill the whole drive on its first mousedown and is why nothing here
+// could be tested end to end. `view` is optional and nothing in these widgets reads it
+// (pressSequence below already omits it for exactly this reason), so drop it and carry on. A real
+// browser accepts the first form and never reaches the fallback.
+function mouseEvent(type: string, init: MouseEventInit): MouseEvent {
+  try {
+    return new MouseEvent(type, init);
+  } catch {
+    return new MouseEvent(type, { ...init, view: undefined });
+  }
+}
+
 // react-select and most listbox widgets open (and select) on a real pointer/mouse sequence,
 // not a bare `.click()` - dispatch the full sequence so the framework's handlers fire.
 function realPointerSequence(el: HTMLElement): void {
   const base = { bubbles: true, cancelable: true, view: window } as const;
   try { el.dispatchEvent(new PointerEvent('pointerdown', base)); } catch { /* older engines */ }
-  el.dispatchEvent(new MouseEvent('mousedown', base));
+  el.dispatchEvent(mouseEvent('mousedown', base));
   try { el.dispatchEvent(new PointerEvent('pointerup', base)); } catch { /* older engines */ }
-  el.dispatchEvent(new MouseEvent('mouseup', base));
-  el.dispatchEvent(new MouseEvent('click', base));
+  el.dispatchEvent(mouseEvent('mouseup', base));
+  el.dispatchEvent(mouseEvent('click', base));
 }
 
 // Is this element (or its ancestry) a combobox-style widget rather than a plain text field?
@@ -747,6 +761,35 @@ function readRenderedOptions(scope?: Element | null): ComboOption[] {
   return out;
 }
 
+// What openCombobox TYPED into a widget, into which input, and what that input held BEFORE. Step 4
+// below seeds a typeahead query so a lookup-only menu renders at all; that text is Litos's, not the
+// student's, and it is only legitimate while the menu is being driven. Recording it is what lets
+// the abandon path put the field back the way it found it (see closeOpenCombobox) while never
+// touching text we did not write.
+//
+// `previous` is not decoration. Step 4 writes over whatever was in the box, and on most paths that
+// is empty (generic.ts skips any input that already has a value), but NOT all: ashby.ts's
+// known-answer branch drives a block without a blockAlreadyAnswered guard, so a resumed application
+// whose country already reads "India" can be probed with "India" and come back with no options.
+// Restoring `previous` instead of blanking is what keeps that student's committed answer, and the
+// equality guard alone cannot see the difference (her value and our query are the same string).
+//
+// Keyed by input rather than a single slot so two overlapping drives cannot strand each other's
+// text: whatever a previous drive typed and never settled is retracted by the next abandon instead
+// of being silently dropped. A pick clears the whole map, since a commit means the widget owns its
+// box and no later abandon may write to it.
+const pendingQueries = new Map<HTMLInputElement, { text: string; previous: string }>();
+
+// Put back every box we typed into and never committed. Only ever restores an input whose value is
+// still EXACTLY the text we wrote: a widget that transformed the query, or a box the student has
+// since edited, owns its own content and is left alone.
+function retractPendingQueries(): void {
+  for (const [input, { text, previous }] of pendingQueries) {
+    if (input.isConnected && input.value === text) setNativeValue(input, previous);
+  }
+  pendingQueries.clear();
+}
+
 // Open a combobox and return its options. react-select (the widget Greenhouse, Ashby, and
 // Workday build their city / country / yes-no / EEO fields on) does NOT open from a bare
 // mousedown on the outer *__control div - verified live on job-boards.greenhouse.io, where the
@@ -799,7 +842,10 @@ export async function openCombobox(
 
   // 4) typeahead-only widgets stay empty until a query is typed; seed it and wait the full budget.
   if (opts.length === 0 && typeahead && input) {
-    setNativeValue(input, typeahead.slice(0, 24));
+    const query = typeahead.slice(0, 24);
+    const previous = input.value;
+    setNativeValue(input, query);
+    pendingQueries.set(input, { text: query, previous });
     opts = await waitForOptions(timeoutMs);
   }
   return opts;
@@ -807,13 +853,37 @@ export async function openCombobox(
 
 // Click an option the framework's way, then let the menu close.
 export async function pickComboOption(option: ComboOption): Promise<void> {
+  // A committed selection is the widget's text now, not ours: react-select empties its own search
+  // input, Ashby settles it to the option's label - and where the option text EQUALS the query we
+  // typed, the equality guard could not tell the two apart. Forget the queries so no later abandon
+  // reaches back and blanks a field that was legitimately filled.
+  pendingQueries.clear();
   option.el.scrollIntoView({ block: 'nearest' });
   realPointerSequence(option.el);
   await pause(60);
 }
 
-// Close any open menu (e.g. no confident match) so a lingering portal doesn't cover the form.
+// Give up on a combobox: retract anything WE typed into it, then dismiss the menu so a lingering
+// portal doesn't cover the form. Every caller reaches here on an abandon path - the menu never
+// opened, or no option matched - so this is the one place that has to leave the control the way it
+// was found.
+//
+// The retraction is not cosmetic. openCombobox's step 4 types a typeahead query to make a
+// lookup-only menu render, and a query that never selects an option commits NOTHING - the same lie
+// R-002 documents on the location picker, where the box visibly reads "Dubai" while the form holds
+// an empty value. Leaving it there is worse than the blank field it replaced, three ways: the fill
+// card says "dropdown left for you" about a field the student sees as already full; on a plain
+// input[role=combobox] backed by a real form field, that leftover text is what SUBMITS; and
+// harvest, which reads a control's current value on her next trusted keystroke, would bank Litos's
+// own query as something she typed (harvest.ts's first guarantee, which the isTrusted check alone
+// cannot uphold once our text is sitting in the box she edits).
+//
+// Only ever touches the exact text openCombobox recorded, in the exact input it wrote it to, and
+// only while that text is still there. It RESTORES what the box held before rather than blanking
+// it, so a value that was already there when we arrived survives being probed; a widget that
+// transformed the query, or a search box we never typed into, is not written to at all.
 export function closeOpenCombobox(): void {
+  retractPendingQueries();
   document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   (document.activeElement as HTMLElement | null)?.blur?.();
 }
