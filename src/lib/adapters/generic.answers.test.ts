@@ -271,6 +271,94 @@ describe('desiredAnswer: age-of-majority phrasing (fix #15)', () => {
   });
 });
 
+/* The extension and the backend are two readers of the same form, and the 18+ attestation is the
+ * one question where disagreeing is a false legal declaration rather than a blank field. These
+ * pin the extension's copy to the backend's (volley-backend src/lib/questionDiscovery.ts,
+ * ageAttestationAnswer): each case below is one the two answered DIFFERENTLY before this change. */
+describe('ageOfMajorityAnswer: parity with the backend attestation rule', () => {
+  const NOW = new Date('2026-08-09T23:59:59Z');
+  const ADULT_DOB = '2005-09-25'; // 20 on NOW
+  const MINOR_DOB = '2012-01-01'; // 14 on NOW
+
+  it('inverts the minor framing instead of going silent on it', () => {
+    // Previously every "under"/"younger than" phrasing was dropped on the floor, so the backend
+    // answered No and the extension left the same radio blank.
+    expect(ageOfMajorityAnswer('are you under 18 years of age?', ADULT_DOB, NOW)).toEqual({ mode: 'no' });
+    expect(ageOfMajorityAnswer('are you younger than 18?', ADULT_DOB, NOW)).toEqual({ mode: 'no' });
+    expect(ageOfMajorityAnswer('are you under 18 years of age?', MINOR_DOB, NOW)).toEqual({ mode: 'yes' });
+    expect(ageOfMajorityAnswer('are you 18 years of age or older?', MINOR_DOB, NOW)).toEqual({ mode: 'no' });
+  });
+
+  it('recognises the phrasings the extension pattern used to miss entirely', () => {
+    for (const label of [
+      'are you 18 or older?',
+      'are you over 18?',
+      'are you older than 18?',
+      'i confirm i am eighteen years of age',
+      'at the time of application, are you 18+ years of age?',
+    ]) {
+      expect(ageOfMajorityAnswer(label, ADULT_DOB, NOW), label).toEqual({ mode: 'yes' });
+    }
+  });
+
+  it('reads the free-text date shape /profile/harvest stores', () => {
+    // AutofillSetupScreen writes ISO, but a harvested date arrives as the form wrote it. Before
+    // this only strict ISO was read, so a harvested profile was refused while the backend answered.
+    for (const stored of ['25 Sep 2005', '25 September, 2005', 'Sep 25, 2005', 'September 25 2005']) {
+      expect(ageOfMajorityAnswer('are you at least 18 years of age?', stored, NOW), stored)
+        .toEqual({ mode: 'yes' });
+    }
+  });
+
+  it('treats an unreadable stored value exactly like an absent one', () => {
+    for (const stored of [
+      '2008-02-30',        // the ISO parser rolls this over to 1 March 2008 rather than erroring
+      'sometime in 2005',  // `new Date` invents 1 January 2005 out of this
+      '2005',
+      'Sep 2005',
+      '09/08/2005',        // 8 September or 9 August: picking one is a guess
+      '2044-01-01',        // not yet born
+      '1880-01-01',        // older than anyone alive
+    ]) {
+      expect(ageOfMajorityAnswer('are you at least 18 years of age?', stored, NOW), stored).toBeNull();
+    }
+  });
+
+  it('answers only the 18 threshold, the one the backend answers', () => {
+    // The old rule accepted any threshold from 16 to 25 and answered "no" here while the backend
+    // refused the label outright.
+    expect(ageOfMajorityAnswer('are you at least 21 years of age?', ADULT_DOB, NOW)).toBeNull();
+    expect(ageOfMajorityAnswer('are you at least 16 years of age?', ADULT_DOB, NOW)).toBeNull();
+  });
+
+  it('never reads 18 as a duration, however the duration is counted', () => {
+    for (const label of [
+      'do you have 18+ months of experience?',
+      'have you completed at least 18 credits?',
+      'have you completed at least 18 units of coursework?',
+      'can you work at least 18 hours per week?',
+      'have you had 18 years of continuous employment?',
+    ]) {
+      expect(ageOfMajorityAnswer(label, ADULT_DOB, NOW), label).toBeNull();
+    }
+  });
+
+  it('leaves a demographic age bucket to the EEO rule even when it lists an 18+ option', () => {
+    // Adapters pass whole-container text as the label, so the option list lands here. Answering
+    // "Yes" to a self-identification bucket is not an attestation, it is a wrong answer.
+    expect(ageOfMajorityAnswer('what is your age? 18+ 25-34 35-44', ADULT_DOB, NOW)).toBeNull();
+    expect(ageOfMajorityAnswer('age range 18+ 25-34', ADULT_DOB, NOW)).toBeNull();
+    expect(desiredAnswer('what is your age? 18+ 25-34 35-44', ap({ date_of_birth: ADULT_DOB }), {}))
+      .toEqual({ mode: 'decline' });
+  });
+
+  it('answers the attestation from the profile through desiredAnswer', () => {
+    expect(desiredAnswer('are you 18 years or older?', ap({ date_of_birth: ADULT_DOB }), {}))
+      .toEqual({ mode: 'yes' });
+    expect(desiredAnswer('are you 18 years or older?', ap(), {})).toBeNull();
+  });
+});
+
 describe('matchOption: broadened decline wordings (fix #10)', () => {
   it('matches "Choose not to disclose" as a decline option', () => {
     expect(matchOption(opts('Male', 'Female', 'Choose not to disclose'), { mode: 'decline' })?.text)
