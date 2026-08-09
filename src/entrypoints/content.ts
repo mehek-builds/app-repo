@@ -254,7 +254,16 @@ export default defineContentScript({
         if (!event.isTrusted) return;
         event.preventDefault();
         event.stopImmediatePropagation();
-        if (reserving || hasEmptyRequiredFields()) return;
+        if (reserving) return;
+        // This click was already swallowed by the preventDefault above, so a bare return here is a
+        // dead Submit button: nothing sends, the page's own validation never runs, and the student
+        // gets no reason. Say which state she is in. Reachable whenever a required control is
+        // genuinely empty, which the combobox abandon path (closeOpenCombobox) now makes honest
+        // rather than hiding behind Litos's own uncommitted typeahead text.
+        if (hasEmptyRequiredFields()) {
+          if (statusEl) statusEl.textContent = 'Something required is still blank. Fill it in, then click Submit again.';
+          return;
+        }
         reserving = true;
         pendingRecoveryGate.beginLocal(applicationId);
         const baselineTexts = new Set(visibleSubmissionOutcomeTexts());

@@ -199,6 +199,76 @@ describe('closeOpenCombobox: retracting the query openCombobox typed', () => {
 
     expect(input.value).toBe('India');
   });
+
+  it('restores what the box held before, rather than blanking it', async () => {
+    // Step 4 types OVER whatever is in the field. On a resumed application that field can already
+    // hold her committed answer (ashby.ts's known-answer branch drives a block with no
+    // already-answered guard), so retracting to "" would delete it while the card only claims the
+    // dropdown was skipped. The probe must be undoable, not destructive.
+    const { input } = combobox({ labelText: 'Country', optionsFor: () => [], preset: 'Germany' });
+
+    await openCombobox(input, 'India', 150);
+    expect(input.value).toBe('India'); // the probe overwrote her value
+
+    closeOpenCombobox();
+
+    expect(input.value).toBe('Germany');
+  });
+
+  it('restores a pre-existing value that is identical to the query', async () => {
+    // The sharp case the equality guard cannot see: her stored answer and our typeahead are the
+    // same string, so "is this text mine?" has no answer. Restoring the prior value is what makes
+    // it safe either way - the box ends holding "India" because it started holding "India".
+    const { input } = combobox({ labelText: 'Country', optionsFor: () => [], preset: 'India' });
+
+    await openCombobox(input, 'India', 150);
+    closeOpenCombobox();
+
+    expect(input.value).toBe('India');
+  });
+
+  it('settles both widgets when two drives overlap', async () => {
+    // Overlap is reachable: the 90s inactivity timeout rejects the fill promise while the adapter
+    // loop keeps running, so a second fill can start on top of the first. Neither box may be left
+    // holding Litos's uncommitted query, and neither student value may be lost.
+    const a = combobox({ labelText: 'Country', optionsFor: () => [], preset: 'Germany' });
+    const b = combobox({ labelText: 'State', optionsFor: () => [] });
+
+    const driveA = openCombobox(a.input, 'India', 150);
+    const driveB = openCombobox(b.input, 'Dubai', 150);
+    await Promise.all([driveA, driveB]);
+    closeOpenCombobox();
+
+    expect(a.input.value).toBe('Germany');
+    expect(b.input.value).toBe('');
+  });
+});
+
+describe('realPointerSequence: the view fallback is a fallback, not the path', () => {
+  it('passes view when the DOM implementation accepts it', async () => {
+    // jsdom refuses `view`, so every other test in this file exercises only the catch branch. Stub
+    // a permissive MouseEvent to prove the primary construction is the one a real browser gets,
+    // and that `view` survives to the widget's handlers.
+    const seen: Array<Window | null | undefined> = [];
+    const RealMouseEvent = globalThis.MouseEvent;
+    class PermissiveMouseEvent extends RealMouseEvent {
+      constructor(type: string, init: MouseEventInit = {}) {
+        super(type, { ...init, view: undefined });
+        seen.push(init.view);
+      }
+    }
+    (globalThis as unknown as { MouseEvent: typeof MouseEvent }).MouseEvent =
+      PermissiveMouseEvent as unknown as typeof MouseEvent;
+    try {
+      const { input } = combobox({ labelText: 'Country', optionsFor: () => [] });
+      await openCombobox(input, 'India', 150);
+    } finally {
+      (globalThis as unknown as { MouseEvent: typeof MouseEvent }).MouseEvent = RealMouseEvent;
+    }
+
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.every((v) => v === window)).toBe(true);
+  });
 });
 
 describe('fillGenericApplication: an abandoned dropdown is left empty, not filled-looking', () => {
