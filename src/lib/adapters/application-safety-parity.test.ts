@@ -126,3 +126,62 @@ describe('application decision safety parity', () => {
     expect(result.skipped_reasons.some((reason) => /application decision left for you/.test(reason))).toBe(true);
   });
 });
+
+/* The 18+ attestation reaches an employer's form in the applicant's own browser, so "we could not
+ * answer it" has to arrive as a stated reason on the fill card, not as an empty required field she
+ * discovers at submit. The wording carries "left for", which is what autosubmit-gate's REVIEW_FLAG
+ * matches, so the countdown HOLDS while it waits. */
+describe('the 18+ attestation on a live form', () => {
+  const form = `
+    <fieldset><legend>Are you 18 years of age or older?</legend>
+      <label for="age-y">Yes</label><input id="age-y" name="age_attest" type="radio" value="yes">
+      <label for="age-n">No</label><input id="age-n" name="age_attest" type="radio" value="no">
+    </fieldset>
+    <label for="age-cb">I am 18 years of age or older</label>
+    <input id="age-cb" name="age_checkbox" type="checkbox">
+  `;
+
+  const fill = (applicationProfile: ApplicationProfile) => fillGenericApplication({
+    fullName: 'Mehek Mandal',
+    profile: {} as Profile,
+    applicationProfile,
+    draftAnswer: async () => 'must not be used',
+  });
+
+  it('flags it with a stated reason when no date of birth is saved', async () => {
+    document.body.innerHTML = form;
+    makeVisible();
+    const result = await fill({} as ApplicationProfile);
+
+    expect([...document.querySelectorAll<HTMLInputElement>('input')].every((i) => !i.checked)).toBe(true);
+    const flagged = result.skipped_reasons.filter((r) => /date of birth is not saved/.test(r));
+    expect(flagged).toHaveLength(2);
+    // The bare checkbox carries no certify/consent wording, so before this it left NO reason at all.
+    expect(flagged.every((r) => /left for/.test(r))).toBe(true);
+  });
+
+  it('answers it from the stored date of birth', async () => {
+    document.body.innerHTML = form;
+    makeVisible();
+    const result = await fill({ date_of_birth: '2005-09-25' } as ApplicationProfile);
+
+    expect((document.querySelector('#age-y') as HTMLInputElement).checked).toBe(true);
+    expect((document.querySelector('#age-n') as HTMLInputElement).checked).toBe(false);
+    expect((document.querySelector('#age-cb') as HTMLInputElement).checked).toBe(true);
+    expect(result.skipped_reasons.some((r) => /date of birth is not saved/.test(r))).toBe(false);
+  });
+
+  it('never turns "18 months of experience" into an age attestation', async () => {
+    document.body.innerHTML = `
+      <fieldset><legend>Do you have 18+ months of relevant experience?</legend>
+        <label for="exp-y">Yes</label><input id="exp-y" name="exp" type="radio" value="yes">
+        <label for="exp-n">No</label><input id="exp-n" name="exp" type="radio" value="no">
+      </fieldset>
+    `;
+    makeVisible();
+    const result = await fill({ date_of_birth: '2005-09-25' } as ApplicationProfile);
+
+    expect([...document.querySelectorAll<HTMLInputElement>('input')].every((i) => !i.checked)).toBe(true);
+    expect(result.skipped_reasons.some((r) => /date of birth is not saved/.test(r))).toBe(false);
+  });
+});

@@ -540,32 +540,160 @@ export function applicationDecisionSkipReason(context: string): string {
   return `application decision left for you: "${context.slice(0, 60).trim()}"`;
 }
 
-function strictIsoDate(value: string | undefined): { year: number; month: number; day: number } | null {
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value ?? '');
-  if (!match) return null;
-  const year = Number(match[1]);
-  const month = Number(match[2]);
-  const day = Number(match[3]);
+/* THE 18+ ATTESTATION, both framings.
+ *
+ * Kept deliberately in step with the backend's copy (volley-backend
+ * src/lib/questionDiscovery.ts, AGE_ATTESTATION_QUESTION). Two readers of the same form that
+ * disagree about whether a question is even an age question is the defect this pair keeps
+ * re-learning, so the alternatives here are the backend's, verbatim: "18+", "eighteen",
+ * "at least 18", "18 years of age", "age of 18", "18 (years) or older", "over/older than 18",
+ * "under 18", "younger than 18".
+ *
+ * Still 18-specific and still requiring an age word beside the number. The previous extension rule
+ * accepted ANY threshold from 16 to 25, which answered "are you at least 21 years of age?" from a
+ * date of birth while the backend refused the same label. Narrowed rather than widened: the corpus
+ * carries exactly one age attestation and it is an 18.
+ */
+export const AGE_ATTESTATION_QUESTION =
+  /(?:\b18\+\s*(?:years?)?|\beighteen\b|\bat\s+least\s+18\b|\b18\s+years?\s+of\s+age\b|\bage\s+of\s+18\b|\b18\s+(?:years?\s+)?or\s+older\b|\b(?:over|older\s+than)\s+(?:the\s+age\s+of\s+)?18\b|\bunder\s+18\b|\byounger\s+than\s+18\b)/i;
+
+/* The MINOR framing of that same attestation, which takes the OPPOSITE answer.
+ *
+ * "Yes" to "are you 18 or older" and "Yes" to "are you under 18" are contradictory statements
+ * about one person, so the inversion is recognised explicitly rather than assumed away. Before
+ * this the extension simply refused every "under" phrasing, which was safe but silent: the field
+ * came back blank with no stated reason while the backend answered it No.
+ */
+const BELOW_AGE_18_QUESTION =
+  /\b(?:under|below|younger\s+than|less\s+than)\s+(?:the\s+age\s+of\s+)?(?:18|eighteen)\b|\bare\s+you\s+a\s+minor\b/i;
+
+/* THE NUMBER 18 USED FOR SOMETHING THAT IS NOT AN AGE.
+ *
+ * This exclusion is not hypothetical here and it is the reason the backend's copy carries it too:
+ * "do you have 18+ months of experience?" satisfies the age alternatives above, and this extension
+ * once answered it Yes, claiming experience the student never stated. Widened past the original
+ * experience/months/tenure to the backend's full set so the two cannot drift apart again.
+ */
+const AGE_18_USED_AS_A_DURATION =
+  /\bexperience\b|\bmonths?\b|\btenure\b|\bcredits?\b|\bunits?\b|\bhours?\b|\bemployment\b/i;
+
+/**
+ * The applicant's calendar date of birth, or null when the stored text is not a date we can read.
+ *
+ * ONLY application_profile.date_of_birth is ever passed in. Not a graduation year, not the resume,
+ * not a parsed profile: every one of those would yield a number, and every one of them would be a
+ * guess handed to an employer as an attestation. An unparseable value is treated exactly like an
+ * absent one.
+ *
+ * NOTHING here goes through `new Date(raw)`, and that is deliberate rather than fussy. The
+ * platform parser is lenient in both directions that matter to an attestation:
+ *   - it ROLLS OVER an impossible ISO day. `new Date('2008-02-30T00:00:00Z')` is 1 March 2008.
+ *   - it INVENTS a date out of prose. `new Date('sometime in 2005')` is 1 January 2005, and that
+ *     silently becomes an age, and the age becomes a Yes on a legal declaration.
+ * So the two shapes Litos actually stores are matched explicitly and everything else is refused:
+ * the ISO date AutofillSetupScreen writes, and the day/month-name/year text /profile/harvest can
+ * lift off a form ("25 Sep 2005"). Ambiguous all-numeric forms like "09/08/2005" are refused on
+ * purpose - 8 September and 9 August are different birthdays, and picking one is a guess.
+ */
+const MONTH_NAMES = [
+  'january', 'february', 'march', 'april', 'may', 'june',
+  'july', 'august', 'september', 'october', 'november', 'december',
+];
+
+function monthNumberFromName(name: string): number | null {
+  const n = name.toLowerCase();
+  const index = MONTH_NAMES.findIndex((month) => month === n || (n.length >= 3 && month.startsWith(n)));
+  return index === -1 ? null : index + 1;
+}
+
+function validCalendarDate(year: number, month: number, day: number): { year: number; month: number; day: number } | null {
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) return null;
   const date = new Date(Date.UTC(year, month - 1, day));
   return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
     ? { year, month, day }
     : null;
 }
 
-/** Resolve only an explicit numeric age threshold from a validated DOB and exact UTC date. */
-export function ageOfMajorityAnswer(label: string, dateOfBirth: string | undefined, now = new Date()): Desired {
-  const normalized = label.toLowerCase();
-  if (/\bunder\b|younger than|below|less than|experience|\bmonths?\b|tenure/.test(normalized)) return null;
-  const thresholdMatch = /at least\s*(\d{1,2})\s*(?:years?\s*(?:of age)?)?|\b(\d{1,2})\s*\+\s*(?:years?\s*(?:of age)?)?|\b(\d{1,2})\s+years?\s+(?:of\s+age\s+)?or\s+older\b/.exec(normalized);
-  const threshold = Number(thresholdMatch?.[1] ?? thresholdMatch?.[2] ?? thresholdMatch?.[3]);
-  if (!Number.isInteger(threshold) || threshold < 16 || threshold > 25) return null;
-  const dob = strictIsoDate(dateOfBirth);
+function storedBirthDate(value: string | undefined): { year: number; month: number; day: number } | null {
+  const raw = value?.trim();
+  if (!raw) return null;
+  const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+  if (iso) return validCalendarDate(Number(iso[1]), Number(iso[2]), Number(iso[3]));
+  // "25 Sep 2005", "25 September, 2005"
+  const dayFirst = /^(\d{1,2})(?:st|nd|rd|th)?[\s.,-]+([a-z]{3,9})\.?[\s.,-]+(\d{4})$/i.exec(raw);
+  if (dayFirst) {
+    const month = monthNumberFromName(dayFirst[2]);
+    return month === null ? null : validCalendarDate(Number(dayFirst[3]), month, Number(dayFirst[1]));
+  }
+  // "Sep 25, 2005", "September 25 2005"
+  const monthFirst = /^([a-z]{3,9})\.?[\s.,-]+(\d{1,2})(?:st|nd|rd|th)?[\s.,-]+(\d{4})$/i.exec(raw);
+  if (monthFirst) {
+    const month = monthNumberFromName(monthFirst[1]);
+    return month === null ? null : validCalendarDate(Number(monthFirst[3]), month, Number(monthFirst[2]));
+  }
+  return null;
+}
+
+/** Completed years between a stored date of birth and `now`, or null when it cannot be read. */
+function ageInCompletedYears(dateOfBirth: string | undefined, now: Date): number | null {
+  const dob = storedBirthDate(dateOfBirth);
   if (!dob || Number.isNaN(now.getTime())) return null;
-  const cutoffYear = now.getUTCFullYear() - threshold;
-  const oldEnough = dob.year < cutoffYear
-    || (dob.year === cutoffYear && (dob.month < now.getUTCMonth() + 1
-      || (dob.month === now.getUTCMonth() + 1 && dob.day <= now.getUTCDate())));
-  return { mode: oldEnough ? 'yes' : 'no' };
+  let age = now.getUTCFullYear() - dob.year;
+  const monthDelta = now.getUTCMonth() + 1 - dob.month;
+  if (monthDelta < 0 || (monthDelta === 0 && now.getUTCDate() < dob.day)) age -= 1;
+  // A birth date in the future, or before anyone alive, is corrupt rather than informative.
+  return age < 0 || age > 130 ? null : age;
+}
+
+/**
+ * Is this label the 18+ attestation at all, once tenure and demographics are taken out?
+ *
+ * Split out from the answer so the fill loops can tell the applicant WHY a recognised attestation
+ * was left alone, instead of letting it fall through as an unexplained blank.
+ */
+function isAgeAttestationQuestion(label: string): boolean {
+  if (!AGE_ATTESTATION_QUESTION.test(label)) return false;
+  // "18 months of experience" is not an age. Falls through to whatever handled it before, which is
+  // nothing.
+  if (AGE_18_USED_AS_A_DURATION.test(label)) return false;
+  // "What is your age?", "age range", "how old are you" are EEO self-identification, answered from
+  // the applicant's own stored preference by the branch below (decline when she stored nothing).
+  // Adapters pass whole-container text as the label, so a demographic bucket list carrying an
+  // "18+" option reaches here; without this guard it would be attested Yes instead of declined.
+  if (EEO_QUESTION.test(label)) return false;
+  return true;
+}
+
+/**
+ * "At the time of application, are you 18+ years of age?" answered from the stored date of birth.
+ *
+ * An age computed from a date the applicant herself gave Litos is a FACT, not a declaration Litos
+ * is inventing on her behalf. Returns null for every label that is not an age attestation AND for
+ * a profile with no readable date of birth - in the second case the caller must flag it with
+ * ageAttestationSkipReason rather than leave it silently blank.
+ */
+export function ageOfMajorityAnswer(label: string, dateOfBirth: string | undefined, now = new Date()): Desired {
+  if (!isAgeAttestationQuestion(label)) return null;
+  const age = ageInCompletedYears(dateOfBirth, now);
+  if (age === null) return null;
+  const isAdult = age >= 18;
+  return { mode: (BELOW_AGE_18_QUESTION.test(label) ? !isAdult : isAdult) ? 'yes' : 'no' };
+}
+
+/**
+ * A recognised 18+ attestation that NOTHING on file can answer: date_of_birth is absent or
+ * unreadable. Every fill loop asks this and pushes ageAttestationSkipReason, so the question stops
+ * the run the way a work-eligibility question does instead of coming back as an empty required
+ * field the applicant has to find herself.
+ */
+export function unsupportedAgeAttestation(context: string, ap: ApplicationProfile, now = new Date()): boolean {
+  return isAgeAttestationQuestion(context) && ageInCompletedYears(ap.date_of_birth, now) === null;
+}
+
+// "left for" is load-bearing, same as the work-eligibility and link builders: autosubmit-gate's
+// REVIEW_FLAG matches it, so an unanswered age attestation HOLDS the countdown.
+export function ageAttestationSkipReason(context: string): string {
+  return `age question left for you, because your date of birth is not saved: "${context.slice(0, 60).trim()}"`;
 }
 
 export function linkQuestion(label: string, ap: ApplicationProfile): LinkQuestion | null {
@@ -1579,6 +1707,11 @@ export async function fillGenericApplication(params: GenericFillParams): Promise
       skipped_reasons.push(applicationDecisionSkipReason(decisionContext));
       continue;
     }
+    if (unsupportedAgeAttestation(decisionContext, ap)) {
+      fields_skipped++;
+      skipped_reasons.push(ageAttestationSkipReason(decisionContext));
+      continue;
+    }
 
     if (NEVER_FILL_PATTERNS.some((re) => re.test(id))) {
       fields_skipped++;
@@ -1774,6 +1907,11 @@ export async function fillGenericApplication(params: GenericFillParams): Promise
       skipped_reasons.push(applicationDecisionSkipReason(selectContext));
       continue;
     }
+    if (unsupportedAgeAttestation(selectContext, ap)) {
+      fields_skipped++;
+      skipped_reasons.push(ageAttestationSkipReason(selectContext));
+      continue;
+    }
     // Language questions first (declared-list authority): the Enpal-style "German level" /
     // "English level" selects land here. languageAnswerPlan re-checks the refusal guards
     // internally, so running it ahead of desiredAnswer cannot answer a work-eligibility or EEO
@@ -1841,6 +1979,11 @@ export async function fillGenericApplication(params: GenericFillParams): Promise
       skipped_reasons.push(applicationDecisionSkipReason(policyLabel));
       continue;
     }
+    if (unsupportedAgeAttestation(policyLabel, ap)) {
+      fields_skipped++;
+      skipped_reasons.push(ageAttestationSkipReason(label || policyLabel));
+      continue;
+    }
     // Language questions first (declared-list authority): ZURU's "comfortable communicating in
     // Spanish?" is a radio Yes/No. Refusal guards are re-checked inside languageAnswerPlan, so
     // this ordering cannot answer a work-eligibility or EEO label. Always terminates the group.
@@ -1903,6 +2046,14 @@ export async function fillGenericApplication(params: GenericFillParams): Promise
     if (isPerApplicationDecisionQuestion(groupContext)) {
       fields_skipped++;
       skipped_reasons.push(applicationDecisionSkipReason(groupContext));
+      continue;
+    }
+    // A single "I am 18 years of age or older" checkbox does NOT match the isAgreement wording
+    // below (no certify/consent/terms token), so before this it fell out of the loop unticked and
+    // unreported: an unanswered required declaration with nothing on the fill card about it.
+    if (unsupportedAgeAttestation(groupContext, ap)) {
+      fields_skipped++;
+      skipped_reasons.push(ageAttestationSkipReason(policyLabel || groupContext));
       continue;
     }
     if (group.length > 1) {
