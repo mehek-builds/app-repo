@@ -1,4 +1,4 @@
-export type BrowserApplicationFamily = 'zoho_recruit' | 'bullhorn' | 'sap_successfactors';
+export type BrowserApplicationFamily = 'zoho_recruit' | 'bullhorn' | 'sap_successfactors' | 'oracle_taleo' | 'adp_recruiting' | 'jazzhr';
 
 export type BrowserApplicationCapability = {
   family: BrowserApplicationFamily;
@@ -39,6 +39,23 @@ export const BROWSER_APPLICATION_CAPABILITIES: Readonly<Record<BrowserApplicatio
     ...DEFAULT_DENY,
     family: 'sap_successfactors',
     researchedHosts: ['career2.successfactors.eu', 'career8.successfactors.com'],
+  },
+  oracle_taleo: {
+    ...DEFAULT_DENY,
+    family: 'oracle_taleo',
+    researchedHosts: ['fa007.taleo.net', 'aa270.taleo.net'],
+  },
+  adp_recruiting: {
+    ...DEFAULT_DENY,
+    family: 'adp_recruiting',
+    researchedHosts: ['myjobs.adp.com'],
+  },
+  jazzhr: {
+    ...DEFAULT_DENY,
+    family: 'jazzhr',
+    researchedHosts: ['utilidata.applytojob.com', 'foundationai.applytojob.com'],
+    fill: true,
+    uploadResume: true,
   },
 };
 
