@@ -1259,10 +1259,10 @@ export default defineBackground(() => {
           const result = await chrome.tabs.sendMessage(tabId, {
             type: 'SUBMIT_FROM_DASHBOARD',
             payload: { applicationId, questions },
-          }, { frameId }) as { ok?: boolean; error?: string; finalUrl?: string; confirmationText?: string };
+          }, { frameId }) as { ok?: boolean; clicked?: boolean; error?: string; finalUrl?: string; confirmationText?: string };
           await postExtensionOutcome(
             pending,
-            result?.ok ? 'confirmed' : 'unknown',
+            result?.ok ? 'confirmed' : result?.clicked ? 'unknown' : 'cancelled',
             result?.finalUrl ?? sender.url ?? 'https://trylitos.com',
             result?.confirmationText ?? result?.error,
           );

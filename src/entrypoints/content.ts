@@ -7,7 +7,7 @@ import {
   isWorkdayStartScreen, findApplyManuallyButton,
 } from '../lib/adapters/workday';
 import { isLinkedInApplicationPage, extractLinkedInJdText, fillLinkedInApplication } from '../lib/adapters/linkedin';
-import { isLikelyApplicationForm, extractGenericJdText, getGenericJobDetails, fillGenericApplication, drainR030CandidateLabels } from '../lib/adapters/generic';
+import { isLikelyApplicationForm, extractGenericJdText, getGenericJobDetails, fillGenericApplication, drainR030CandidateLabels, isPerApplicationDecisionQuestion } from '../lib/adapters/generic';
 import { atsCanAutoSubmit, clickAtsSubmitIfAllowed, clickDashboardSubmitIfAllowed, isAtsApplicationPage, extractAtsJdText, fillAtsApplication, gatedPortalNotice, specForCurrentPage } from '../lib/adapters/ats-2026-07';
 import { PendingSubmissionRecoveryGate } from '../lib/submission-recovery';
 import { COLOR, DISMISS_MS, FONT, OVERLAY, RADIUS, SHADOW, markSvg } from '../styles/tokens';
@@ -143,6 +143,7 @@ export default defineContentScript({
     'https://foundationai.applytojob.com/apply/jobs/details/*',
     'https://maximus.avature.net/careers/*',
     'https://sandboxxerox.avature.net/*/careers/*',
+    'https://jobs.ea.com/en_US/careers/JobDetail/Software-Engineer-Intern/214956',
     'https://*.jobs.personio.de/job/*',
     'https://*.jobs.personio.com/job/*',
     'https://*.pinpointhq.com/postings/*',
@@ -267,14 +268,22 @@ export default defineContentScript({
             if (statusEl) statusEl.textContent = response?.error ?? 'Litos could not safely track this submission. Try again.';
             return;
           }
-          const clicked = atsName === 'workday'
+          const challengeNow = captchaWaiting || detectChallenge().waiting;
+          const replaySafe = submitButton.isConnected
+            && isElementVisible(submitButton)
+            && !document.hidden
+            && document.hasFocus()
+            && !challengeNow
+            && !hasEmptyRequiredFields()
+            && findProgrammaticFinalSubmitButton(atsName) === submitButton;
+          const clicked = replaySafe && atsName === 'workday'
             ? replayWorkdayFinalSubmitIfAllowed({
               expectedControl: submitButton,
               tabVisible: !document.hidden,
               tabFocused: document.hasFocus(),
               requiredFieldsClear: !hasEmptyRequiredFields(),
             })
-            : (() => { submitButton.click(); return true; })();
+            : replaySafe && (() => { submitButton.click(); return true; })();
           if (!clicked) {
             const cancelReservation = (attempt = 0) => chrome.runtime.sendMessage({
                 type: 'EXTENSION_SUBMISSION_OUTCOME',
@@ -282,7 +291,7 @@ export default defineContentScript({
                   applicationId,
                   outcome: 'cancelled',
                   finalUrl: window.location.href,
-                  confirmationText: 'Workday changed after the reservation. Nothing was sent.',
+                  confirmationText: 'The application changed after the reservation. Nothing was sent.',
                 },
               }, (cancelResponse: { ok?: boolean } | undefined) => {
                 if (!cancelResponse?.ok && attempt < 4) {
@@ -292,7 +301,7 @@ export default defineContentScript({
                 pendingRecoveryGate.endLocal(applicationId);
               });
             cancelReservation();
-            if (statusEl) statusEl.textContent = 'Workday changed before submission. Review the final page and click Submit again.';
+            if (statusEl) statusEl.textContent = 'The application changed before submission. Review the final page and click Submit again.';
             return;
           }
           submitButton.removeEventListener('click', onClick, true);
@@ -339,7 +348,7 @@ export default defineContentScript({
 
     let cardInjected = false;
     let approved = false; // true once user taps "Yes" on either card
-    let submitFromDashboard: ((questions: Array<{ id: string; question: string; answer: string }>) => Promise<{ ok: boolean; error?: string; finalUrl?: string; confirmationText?: string }>) | null = null;
+    let submitFromDashboard: ((questions: Array<{ id: string; question: string; answer: string }>) => Promise<{ ok: boolean; clicked?: boolean; error?: string; finalUrl?: string; confirmationText?: string }>) | null = null;
 
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       if (message?.type !== 'SUBMIT_FROM_DASHBOARD') return false;
@@ -629,6 +638,31 @@ export default defineContentScript({
         }
       }
       return false;
+    }
+
+    // Programmatic submission must be denied if a current-application decision exists anywhere in
+    // the live form, including a hidden or tenant-prechecked control. The fill result is only a
+    // snapshot, so every countdown and dashboard entrance re-reads the DOM immediately before its
+    // click. A trusted direct click is intentionally handled separately by the attended replay.
+    function hasApplicationDecisionControls(): boolean {
+      return [...document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>('input, textarea, select')]
+        .some((control) => {
+          if (control.closest('[id*="litos"]')) return false;
+          const explicitLabel = control.id
+            ? [...document.querySelectorAll<HTMLLabelElement>('label[for]')].find((label) => label.htmlFor === control.id)?.textContent ?? ''
+            : '';
+          const context = [
+            control.id,
+            control.getAttribute('name') ?? '',
+            control.getAttribute('aria-label') ?? '',
+            control.labels?.[0]?.textContent ?? explicitLabel,
+            control.closest('fieldset, [role="group"], [role="radiogroup"]')?.textContent ?? '',
+            control instanceof HTMLSelectElement
+              ? [...control.options].map((option) => option.textContent ?? '').join(' ')
+              : '',
+          ].join(' ');
+          return isPerApplicationDecisionQuestion(context);
+        });
     }
 
     // Field labels in skipped_reasons come from the page DOM, so escape before inserting via
@@ -1625,7 +1659,8 @@ export default defineContentScript({
         // already on the page, so it is accurate by the time this reads it.
         const autoSubmitHeld =
           autoSubmitOn &&
-          (!atsCanAutoSubmit(fillResult.ats_name) || !finalSubmitBtn || resumeMissing || needsReview || hasEmptyRequiredFields() || document.hidden || captchaWaiting);
+          (!atsCanAutoSubmit(fillResult.ats_name) || !finalSubmitBtn || resumeMissing || needsReview
+            || hasEmptyRequiredFields() || hasApplicationDecisionControls() || document.hidden || captchaWaiting);
         reportEvent(false);
 
         if (autoSubmitOn && !autoSubmitHeld && finalSubmitBtn) {
@@ -1665,6 +1700,9 @@ export default defineContentScript({
             target.dispatchEvent(new Event('change', { bubbles: true }));
           }
           if (hasEmptyRequiredFields()) return { ok: false, error: 'Some required boxes are still empty. Fill them in, then send it.' };
+          if (hasApplicationDecisionControls()) {
+            return { ok: false, error: 'This application includes a decision only you can confirm on the company page. Nothing was sent.' };
+          }
           // The dashboard path clicks Submit directly and never enters runAutoSubmitCountdown, so
           // none of that function's guards apply here. Adding captchaWaiting to the auto-submit hold
           // made this URGENT rather than theoretical: a challenge now deterministically routes the
@@ -1672,8 +1710,8 @@ export default defineContentScript({
           if (captchaWaiting || detectChallenge().waiting) {
             return { ok: false, error: 'This company asks you to prove you are human. Solve that check on the page, then send it yourself.' };
           }
-          if (fillResult.ats_name === 'workday' && findProgrammaticFinalSubmitButton('workday') !== finalSubmitBtn) {
-            return { ok: false, error: 'Workday no longer shows the exact reviewed final step, or it added a legal confirmation. Nothing was sent.' };
+          if (findProgrammaticFinalSubmitButton(fillResult.ats_name) !== finalSubmitBtn) {
+            return { ok: false, error: 'The company page no longer shows the exact reviewed final submit control. Nothing was sent.' };
           }
           if (!clickDashboardSubmitIfAllowed(fillResult.ats_name, finalSubmitBtn)) {
             return { ok: false, error: 'This application needs your direct confirmation on the company page. Nothing was sent.' };
@@ -1682,11 +1720,11 @@ export default defineContentScript({
           while (Date.now() - started < 45_000) {
             const text = document.body.innerText;
             const failure = pageSubmissionFailureMessage(text);
-            if (failure) return { ok: false, error: failure, finalUrl: window.location.href };
-            if (pageShowsSubmissionConfirmation(text)) return { ok: true, finalUrl: window.location.href, confirmationText: text.slice(0, 2000) };
+            if (failure) return { ok: false, clicked: true, error: failure, finalUrl: window.location.href };
+            if (pageShowsSubmissionConfirmation(text)) return { ok: true, clicked: true, finalUrl: window.location.href, confirmationText: text.slice(0, 2000) };
             await new Promise((resolve) => setTimeout(resolve, 500));
           }
-          return { ok: false, error: 'The company never confirmed it. Open the tab and check whether it went through.' };
+          return { ok: false, clicked: true, error: 'The company never confirmed it. Open the tab and check whether it went through.' };
         };
 
         chrome.runtime.sendMessage({
@@ -1946,6 +1984,8 @@ export default defineContentScript({
             isElementVisible(target) &&
             tabActive &&
             !challengeNow &&
+            !hasApplicationDecisionControls() &&
+            findProgrammaticFinalSubmitButton(fillResult.ats_name) === target &&
             (fillResult.ats_name !== 'workday' || workdayProgrammaticFinalSubmitAllowed(target)) &&
             !hasEmptyRequiredFields();
           if (!portalStillSafe) {
@@ -1972,6 +2012,8 @@ export default defineContentScript({
             window.clearTimeout(permissionTimer);
             const stillSafe = target.isConnected && isElementVisible(target) && !document.hidden && document.hasFocus()
               && !captchaWaiting && !detectChallenge().waiting && !hasEmptyRequiredFields()
+              && !hasApplicationDecisionControls()
+              && findProgrammaticFinalSubmitButton(fillResult.ats_name) === target
               && (fillResult.ats_name !== 'workday' || workdayProgrammaticFinalSubmitAllowed(target));
             cleanupChrome();
             restoreSubmitButton();
@@ -1986,7 +2028,9 @@ export default defineContentScript({
                   }, (response) => resolve(response ?? { ok: false, error: 'Litos did not respond.' }));
                 });
                 const safeAfterReservation = target.isConnected && isElementVisible(target) && !document.hidden && document.hasFocus()
-                  && !hasEmptyRequiredFields()
+                  && !captchaWaiting && !detectChallenge().waiting && !hasEmptyRequiredFields()
+                  && !hasApplicationDecisionControls()
+                  && findProgrammaticFinalSubmitButton(fillResult.ats_name) === target
                   && (fillResult.ats_name !== 'workday' || workdayProgrammaticFinalSubmitAllowed(target));
                 if (started.ok && safeAfterReservation) {
                   if (statusEl) statusEl.textContent = `${actionLabel}...`;
@@ -2006,7 +2050,12 @@ export default defineContentScript({
                   if (started.ok) {
                     chrome.runtime.sendMessage({
                       type: 'EXTENSION_SUBMISSION_OUTCOME',
-                      payload: { applicationId, outcome: 'unknown', finalUrl: window.location.href },
+                      payload: {
+                        applicationId,
+                        outcome: 'cancelled',
+                        finalUrl: window.location.href,
+                        confirmationText: 'The final safety check failed after reservation. Nothing was clicked.',
+                      },
                     }).catch(() => {});
                   }
                   reportEvent(false);

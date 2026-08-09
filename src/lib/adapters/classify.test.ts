@@ -92,18 +92,15 @@ describe('desiredAnswer value branches (characterization - behaviour predates cl
     expect(desiredAnswer('When did you graduate from High School?', FULL, NO_EEO)).toBeNull();
   });
 
-  it('DOB and availability fill from the profile; salary no longer does bare (R-031)', () => {
+  it('DOB stays factual while salary and availability require a current answer', () => {
     // The characterized salary behaviour - the bare stored figure for any salary label - IS
     // R-031's defect, so this one branch is deliberately superseded rather than preserved: a
     // bare figure now needs the label to name a currency matching desired_salary_currency
     // (adapters/salary.ts owns the rule, salary.test.ts pins it).
     expect(desiredAnswer('desired salary', FULL, NO_EEO)).toBeNull();
-    expect(desiredAnswer('desired salary (aed)', { ...FULL, desired_salary_currency: 'AED' }, NO_EEO)).toEqual({
-      mode: 'value',
-      value: '80000',
-    });
+    expect(desiredAnswer('desired salary (aed)', { ...FULL, desired_salary_currency: 'AED' }, NO_EEO)).toBeNull();
     expect(desiredAnswer('date of birth', FULL, NO_EEO)).toEqual({ mode: 'value', value: '25 Sep 2005' });
-    expect(desiredAnswer('when can you start?', FULL, NO_EEO)).toEqual({ mode: 'value', value: 'June 2027' });
+    expect(desiredAnswer('when can you start?', FULL, NO_EEO)).toBeNull();
   });
 
   it('an empty profile yields null for every value branch', () => {
@@ -227,13 +224,10 @@ describe('classifyField preserves R-014 (term before start date)', () => {
     expect(classifyField('when are you available to start?')).toBe('availability_date');
   });
 
-  it('desiredAnswer routes each to its own field, not the other', () => {
+  it('desiredAnswer leaves both timing decisions to the current application', () => {
     const ap = { availability_date: 'June 2027', availability_term: '14 weeks' } as ApplicationProfile;
-    expect(desiredAnswer('length or term/length of availability (10-14 weeks)', ap, {})).toEqual({
-      mode: 'value',
-      value: '14 weeks',
-    });
-    expect(desiredAnswer('when can you start?', ap, {})).toEqual({ mode: 'value', value: 'June 2027' });
+    expect(desiredAnswer('length or term/length of availability (10-14 weeks)', ap, {})).toBeNull();
+    expect(desiredAnswer('when can you start?', ap, {})).toBeNull();
   });
 });
 
@@ -260,9 +254,9 @@ describe('R-039 location-commitment veto', () => {
     expect(classifyField(FAIRE)).toBeNull();
   });
 
-  it('desiredAnswer answers a routine commitment question as a logistics acknowledgement', () => {
+  it('desiredAnswer leaves a location commitment to the applicant', () => {
     const ap = { address_city: 'Dubai', address_country: 'United Arab Emirates' } as ApplicationProfile;
-    expect(desiredAnswer(GEMINI, ap, {})).toEqual({ mode: 'yes' });
+    expect(desiredAnswer(GEMINI, ap, {})).toBeNull();
   });
 
   it('a commitment question that lands on country vocabulary is vetoed too', () => {

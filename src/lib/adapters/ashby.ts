@@ -50,7 +50,7 @@ import {
 import { gradeQuestion, gradeReviewReason, gradeSkipReason } from './grades';
 // Reuse the generic adapter's pure answer-resolution engine so every adapter maps a question to
 // the same answer and picks the same option. Pure (no DOM), covered by the adapter answer tests.
-import { classifyField, dateSkipReason, desiredAnswer, fillDateField, isDraftableQuestion, languageAnswerPlan, languageSkipReason, linkQuestion, linkSkipReason, locationComboQueries, locationQuestion, locationSkipReason, matchOption, noteLinkFillCandidate, unreadableQuestionSkipReason, WORK_ELIGIBILITY_QUESTION, workEligibilitySkipReason, type Desired } from './generic';
+import { applicationDecisionSkipReason, classifyField, dateSkipReason, desiredAnswer, fillDateField, isDraftableQuestion, isPerApplicationDecisionQuestion, languageAnswerPlan, languageSkipReason, linkQuestion, linkSkipReason, locationComboQueries, locationQuestion, locationSkipReason, matchOption, noteLinkFillCandidate, unreadableQuestionSkipReason, WORK_ELIGIBILITY_QUESTION, workEligibilitySkipReason, type Desired } from './generic';
 // The salary rule (R-031 + R-011) and the Ashby posting-API pieces live in the pure salary
 // module, shared with background.ts (which fetches the compensation payload) and re-exported
 // below so existing importers of parseAshbyPostingRef keep working.
@@ -650,6 +650,11 @@ export async function fillAshbyApplication(params: AshbyFillParams): Promise<Aut
     if (WORK_ELIGIBILITY_QUESTION.test(label)) {
       fields_skipped++;
       skipped_reasons.push(workEligibilitySkipReason(label));
+      continue;
+    }
+    if (isPerApplicationDecisionQuestion(label)) {
+      fields_skipped++;
+      skipped_reasons.push(applicationDecisionSkipReason(label));
       continue;
     }
     const isEeo = /gender|race|ethnicit|veteran|disab|current age|sexual orientation|communities|identify with/i.test(label);

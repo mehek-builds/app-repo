@@ -15,26 +15,26 @@ const ap = (o: Partial<ApplicationProfile> = {}): ApplicationProfile => o as App
 const opts = (...texts: string[]) => texts.map((text) => ({ text }));
 
 describe('desiredAnswer on ATS full-block label text', () => {
-  it('answers work authorization from explicit stored data, even when the label includes option text', () => {
+  it('leaves work authorization human-only even when the label includes option text', () => {
     expect(desiredAnswer('are you legally authorized to work in the us? yes no', ap({ work_authorized: true }), {}))
-      .toEqual({ mode: 'yes' });
+      .toBeNull();
   });
 
-  it('answers combined authorized-without-sponsorship questions only when both stored facts agree', () => {
+  it('does not combine global authorization and sponsorship flags into a declaration', () => {
     expect(
       desiredAnswer(
         'are you legally authorized to work without sponsorship in the location where this role is based? yes no',
         ap({ work_authorized: true, needs_sponsorship: true }),
         {},
       ),
-    ).toEqual({ mode: 'no' });
+    ).toBeNull();
     expect(
       desiredAnswer(
         'are you legally authorized to work without sponsorship in the location where this role is based? yes no',
         ap({ work_authorized: true, needs_sponsorship: false }),
         {},
       ),
-    ).toEqual({ mode: 'yes' });
+    ).toBeNull();
     expect(
       desiredAnswer(
         'are you legally authorized to work without sponsorship in the location where this role is based? yes no',
@@ -44,14 +44,14 @@ describe('desiredAnswer on ATS full-block label text', () => {
     ).toBeNull();
   });
 
-  it('answers sponsorship from explicit stored data', () => {
+  it('leaves sponsorship human-only despite stored legacy data', () => {
     expect(
       desiredAnswer(
         'will you now or in the future require immigration sponsorship? yes no',
         ap({ needs_sponsorship: false }),
         {},
       ),
-    ).toEqual({ mode: 'no' });
+    ).toBeNull();
   });
 
   it('declines EEO wrapped in a survey block, values it when a preference exists', () => {
@@ -61,9 +61,9 @@ describe('desiredAnswer on ATS full-block label text', () => {
       .toEqual({ mode: 'value', value: 'Woman', exact: true });
   });
 
-  it('answers an age-of-majority screening question inside block text', () => {
+  it('does not infer age inside block text without DOB', () => {
     expect(desiredAnswer('please confirm you are at least 18 years of age yes no', ap(), {}))
-      .toEqual({ mode: 'yes' });
+      .toBeNull();
   });
 });
 

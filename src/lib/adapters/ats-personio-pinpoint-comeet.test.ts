@@ -2,6 +2,7 @@
 import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { skippedReasonsNeedReview } from '../autosubmit-gate';
+import { contentInitRoute } from '../content-init-routing';
 import type { ApplicationProfile, Profile } from '../types';
 import {
   ATS_SPECS,
@@ -45,6 +46,7 @@ const params = { fullName: profile.full_name!, email: profile.email!, profile, a
 
 describe('live tenant URL contracts', () => {
   it.each([
+    ['https://arteus-energy.jobs.personio.de/job/2521967?apply=&language=de', 'personio'],
     ['https://matrix42.jobs.personio.com/job/2663722/apply?language=en', 'personio'],
     ['https://chrono24.jobs.personio.de/job/2661227/apply?language=en', 'personio'],
     ['https://propellerindustries.pinpointhq.com/postings/d29a48ed-c460-4ba9-872a-a3b93d025867/applications/new', 'pinpoint'],
@@ -55,6 +57,29 @@ describe('live tenant URL contracts', () => {
     at(url);
     expect(specForCurrentPage()?.id).toBe(family);
     expect(isAtsApplicationPage()).toBe(true);
+    if (family === 'personio') expect(contentInitRoute(new URL(url))).toBe('ats');
+  });
+
+  it.each([
+    'https://arteus-energy.jobs.personio.de/job/2521967',
+    'https://other.jobs.personio.de/job/2521967?apply=&language=de',
+    'https://arteus-energy.jobs.personio.de/job/2521968?apply=&language=de',
+    'https://arteus-energy.jobs.personio.de/job/2521967?apply=1&language=de',
+    'https://arteus-energy.jobs.personio.de/job/2521967?apply=&apply=&language=de',
+    'https://arteus-energy.jobs.personio.de/job/2521967?language=de&apply=',
+    'https://arteus-energy.jobs.personio.de/job/2521967?apply=&language=en',
+    'https://arteus-energy.jobs.personio.de/job/2521967%2Fapply?apply=&language=de',
+    'https://arteus-energy.jobs.personio.de/job/2521967/apply?language=de',
+    'https://arteus-energy.jobs.personio.de/jobs/2521967?apply=',
+    'https://arteus-energy.jobs.personio.de/job/not-a-number?apply=',
+    'https://jobs.personio.de/job/2521967?apply=',
+    'https://arteus-energy.personio.de/job/2521967?apply=',
+  ])('does not claim a Personio posting or lookalike route: %s', (url) => {
+    at(url);
+    expect(isAtsApplicationPage()).toBe(false);
+    if (new URL(url).hostname.endsWith('.jobs.personio.de')) {
+      expect(contentInitRoute(new URL(url))).toBe('ignore');
+    }
   });
 
   it.each([

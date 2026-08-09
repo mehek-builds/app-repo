@@ -178,108 +178,20 @@ describe('parseAshbyPostingRef (moved here from ashby.ts, contract unchanged)', 
   });
 });
 
-describe('resolveSalary: median of the posting range, highest authority', () => {
-  it('a range in the label fills its median regardless of the stored currency or value', () => {
-    const r = resolveSalary(ctx({ label: 'expected salary (usd 90,000 - 110,000)' }), FIGURE_EUR);
-    expect(r).toEqual({ action: 'fill', source: 'label-range', value: 'USD 100,000' });
-  });
-
-  it('numeric controls get the median as a bare number', () => {
-    const r = resolveSalary(ctx({ label: 'expected salary (usd 90,000 - 110,000)', field: 'numeric' }), FIGURE_EUR);
-    expect(r).toEqual({ action: 'fill', source: 'label-range', value: '100000' });
-  });
-
-  it('the Ashby compensation payload fills its median when the label states nothing', () => {
-    const posting = { currencyCode: 'USD', minValue: 90000, maxValue: 110000 };
-    expect(resolveSalary(ctx({ posting }), FIGURE_EUR)).toEqual({
-      action: 'fill',
-      source: 'posting-compensation',
-      value: 'USD 100,000',
-    });
-    expect(resolveSalary(ctx({ posting, field: 'numeric' }), FIGURE_EUR)).toEqual({
-      action: 'fill',
-      source: 'posting-compensation',
-      value: '100000',
-    });
-  });
-
-  it('the label range outranks the compensation payload', () => {
-    const posting = { currencyCode: 'EUR', minValue: 50000, maxValue: 60000 };
-    const r = resolveSalary(ctx({ label: 'salary (usd 90,000 - 110,000)', posting }), FIGURE_EUR);
-    expect(r).toEqual({ action: 'fill', source: 'label-range', value: 'USD 100,000' });
-  });
-
-  it('an unambiguous JD-stated range fills when neither label nor payload state one', () => {
-    const jdText = 'Role details. Compensation: USD 90,000 - 110,000 per year. Benefits.';
-    expect(resolveSalary(ctx({ jdText }), FIGURE_EUR)).toEqual({
-      action: 'fill',
-      source: 'jd-range',
-      value: 'USD 100,000 per year',
-    });
-  });
-});
-
-describe('resolveSalary: the stored fallback behind the currency gate', () => {
-  it('EUR posting + EUR stored figure fills, un-grouped for numeric controls', () => {
-    expect(resolveSalary(ctx({ label: 'desired salary (eur)' }), FIGURE_EUR)).toEqual({
-      action: 'fill',
-      source: 'stored-figure',
-      value: '80000',
-    });
-    expect(
-      resolveSalary(ctx({ label: 'desired salary (eur)', field: 'numeric' }), { value: '80,000', currency: 'EUR' }),
-    ).toEqual({ action: 'fill', source: 'stored-figure', value: '80000' });
-  });
-
-  it('the JD currency can satisfy the gate when the label names none', () => {
-    const jdText = 'What we offer: a competitive salary in EUR, learning budget, relocation.';
-    expect(resolveSalary(ctx({ jdText }), FIGURE_EUR)).toEqual({
-      action: 'fill',
-      source: 'stored-figure',
-      value: '80000',
-    });
-  });
-
-  it('USD posting + EUR stored figure flags and NEVER converts', () => {
-    const r = resolveSalary(ctx({ label: 'desired salary (usd)' }), FIGURE_EUR);
-    expect(r.action).toBe('flag');
-    const reason = (r as { reason: string }).reason;
-    expect(reason).toContain('USD');
-    expect(reason).toContain('EUR');
-    expect(reason).toContain('never converted');
-    expect(reason).toMatch(/left for you/);
-  });
-
-  it('no currency signal anywhere flags a numeric field instead of filling the bare figure', () => {
-    const r = resolveSalary(ctx({ field: 'numeric' }), FIGURE_EUR);
-    expect(r.action).toBe('flag');
-    expect((r as { reason: string }).reason).toMatch(/couldn't confirm the posting's currency/);
-  });
-
-  it('a stored figure with no stored currency flags even when the posting currency resolves', () => {
-    const r = resolveSalary(ctx({ label: 'desired salary (usd)' }), { value: '80000' });
-    expect(r.action).toBe('flag');
-    expect((r as { reason: string }).reason).toMatch(/left for you/);
-  });
-
-  it('a free-text field with no posting range keeps the stored Negotiable sentence', () => {
-    expect(resolveSalary(ctx({}), PROSE)).toEqual({
-      action: 'fill',
-      source: 'stored-prose',
-      value: 'Negotiable, open to your standard intern rate',
-    });
-  });
-
-  it('a stored prose value never enters a numeric field', () => {
-    const r = resolveSalary(ctx({ field: 'numeric' }), PROSE);
-    expect(r.action).toBe('flag');
-    expect((r as { reason: string }).reason).toMatch(/left for you/);
-  });
-
-  it('nothing stored and nothing stated flags rather than falling through silently', () => {
-    const r = resolveSalary(ctx({}), {});
-    expect(r.action).toBe('flag');
-    expect((r as { reason: string }).reason).toMatch(/no salary answer in your profile/);
+describe('resolveSalary: application expectations are always human-only', () => {
+  it.each([
+    ['label range', ctx({ label: 'expected salary (usd 90,000 - 110,000)' }), FIGURE_EUR],
+    ['numeric range', ctx({ label: 'expected salary (usd 90,000 - 110,000)', field: 'numeric' }), FIGURE_EUR],
+    ['structured posting', ctx({ posting: { currencyCode: 'USD', minValue: 90000, maxValue: 110000 } }), FIGURE_EUR],
+    ['JD range', ctx({ jdText: 'Compensation: USD 90,000 - 110,000 per year.' }), FIGURE_EUR],
+    ['stored figure', ctx({ label: 'desired salary (eur)' }), FIGURE_EUR],
+    ['stored prose', ctx({}), PROSE],
+    ['no stored answer', ctx({}), {}],
+  ])('flags %s without calculating or filling', (_name, question, stored) => {
+    const result = resolveSalary(question, stored);
+    expect(result.action).toBe('flag');
+    expect((result as { reason: string }).reason).toMatch(/left for you/);
+    expect((result as { reason: string }).reason).toMatch(/current answer/);
   });
 });
 

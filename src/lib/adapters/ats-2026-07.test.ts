@@ -102,10 +102,12 @@ describe('the platforms with no safe form to fill', () => {
     ['https://fa-etxx-saasfaprod1.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1/job/2850', /code/i],
     ['https://recruiting.ultipro.com/WIN1014WINDQ/JobBoard/08eb8299-5b26-4208-adb7-897aa42c6959/OpportunityDetail?opportunityId=f6cd56f9-5b2f-4b53-9e86-2553b54524f9', /account|consent/i],
     ['https://recruiting.ultipro.com/LIT1004LDAC/JobBoard/30702fd2-636e-4886-b1ce-4fc3b07e37ec/OpportunityDetail?opportunityId=4fc30c2a-e2b3-42e0-bcaf-7805f741c04a', /account|consent/i],
+    ['https://recruiting.ultipro.com/cov1003covcu/JobBoard/24b0bccd-d0f2-4641-a5f2-6ca809c72521/OpportunityDetail?opportunityId=954bed4e-7b77-4abd-ac78-add89ee3c71e', /account|consent/i],
     ['https://enterpriseplatform.dell.com/hcmUI/CandidateExperience/en/sites/careers/job/295586', /code/i],
     ['https://iawmqy.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/careers/job/295586', /code/i],
     ['https://sandboxxerox.avature.net/en_US/careers/JobDetail/2nd-Line-Technical-Analyst/44460', /login|resume intake/i],
     ['https://maximus.avature.net/careers/Job-Application', /login|resume intake/i],
+    ['https://jobs.ea.com/en_US/careers/JobDetail/Software-Engineer-Intern/214956', /login|resume intake/i],
   ])('explains its own gate on %s', (url, expected) => {
     const parsed = new URL(url);
     expect(gatedPortalNotice(parsed.hostname, parsed.pathname, parsed.search)).toMatch(expected);
@@ -166,8 +168,19 @@ describe('exact Bamboo, UKG, and Oracle route boundaries', () => {
     'https://recruiting.ultipro.com/WIN1014WINDQ/JobBoard/login',
     'https://recruiting.ultipro.com/WIN1014WINDQ/JobBoard/08eb8299-5b26-4208-adb7-897aa42c6959/OpportunityDetail',
     'https://recruiting.ultipro.com/ABC1000/JobBoard/11111111-1111-1111-1111-111111111111/OpportunityDetail?opportunityId=22222222-2222-2222-2222-222222222222',
+    'https://recruiting.ultipro.com/cov1003covcu/JobBoard/24b0bccd-d0f2-4641-a5f2-6ca809c72521/OpportunityDetail?opportunityId=f6cd56f9-5b2f-4b53-9e86-2553b54524f9',
+    'https://recruiting.ultipro.com/WIN1014WINDQ/JobBoard/24b0bccd-d0f2-4641-a5f2-6ca809c72521/OpportunityDetail?opportunityId=954bed4e-7b77-4abd-ac78-add89ee3c71e',
+    'https://recruiting.ultipro.com/cov1003covcu/JobBoard/24b0bccd-d0f2-4641-a5f2-6ca809c72521/OpportunityDetail/extra?opportunityId=954bed4e-7b77-4abd-ac78-add89ee3c71e',
+    'https://recruiting.ultipro.com/cov1003covcu/JobBoard/24b0bccd-d0f2-4641-a5f2-6ca809c72521/OpportunityDetail?opportunityId=954bed4e-7b77-4abd-ac78-add89ee3c71e&opportunityId=f6cd56f9-5b2f-4b53-9e86-2553b54524f9',
+    'https://recruiting.ultipro.com/cov1003covcu/JobBoard/24b0bccd-d0f2-4641-a5f2-6ca809c72521/OpportunityDetail?opportunityId=f6cd56f9-5b2f-4b53-9e86-2553b54524f9&opportunityId=954bed4e-7b77-4abd-ac78-add89ee3c71e',
     'https://sandboxxerox.avature.net/en_US/careers/JobDetail/Other/44461',
     'https://arbitrary.avature.net/en_US/careers/JobDetail/2nd-Line-Technical-Analyst/44460',
+    'https://jobs.ea.com/en_US/careers/JobDetail/Software-Engineer-Intern/214957',
+    'https://jobs.ea.com/en_US/careers/JobDetail/Other-Role/214956',
+    'https://jobs.ea.com/en_US/careers/JobDetail/Software-Engineer-Intern/214956/extra',
+    'https://jobs.ea.com/en_US/careers/JobDetail/Software-Engineer-Intern/214956?jobId=214957',
+    'https://jobs.ea.com/en_US/careers/JobDetail/Software-Engineer-Intern/214956?jobId=214956&jobId=214957',
+    'https://sandboxxerox.avature.net/en_US/careers/JobDetail/Software-Engineer-Intern/214956',
   ])('ignores unmatched same-host route %s', (raw) => {
     const parsed = new URL(raw);
     expect(contentInitRoute({ hostname: parsed.hostname, pathname: parsed.pathname, search: parsed.search, hash: parsed.hash })).toBe('ignore');
@@ -180,6 +193,25 @@ describe('exact Bamboo, UKG, and Oracle route boundaries', () => {
   ])('accepts exact Bamboo numeric route %s', (raw) => {
     const parsed = new URL(raw);
     expect(contentInitRoute({ hostname: parsed.hostname, pathname: parsed.pathname, search: parsed.search, hash: parsed.hash })).toBe('ats');
+  });
+
+  it.each([
+    'https://recruiting.ultipro.com/WIN1014WINDQ/JobBoard/08eb8299-5b26-4208-adb7-897aa42c6959/OpportunityDetail?opportunityId=f6cd56f9-5b2f-4b53-9e86-2553b54524f9',
+    'https://recruiting.ultipro.com/LIT1004LDAC/JobBoard/30702fd2-636e-4886-b1ce-4fc3b07e37ec/OpportunityDetail?opportunityId=4fc30c2a-e2b3-42e0-bcaf-7805f741c04a',
+    'https://recruiting.ultipro.com/cov1003covcu/JobBoard/24b0bccd-d0f2-4641-a5f2-6ca809c72521/OpportunityDetail?opportunityId=954bed4e-7b77-4abd-ac78-add89ee3c71e',
+    'https://sandboxxerox.avature.net/en_US/careers/JobDetail/2nd-Line-Technical-Analyst/44460',
+    'https://maximus.avature.net/careers/Job-Application',
+    'https://jobs.ea.com/en_US/careers/JobDetail/Software-Engineer-Intern/214956',
+  ])('keeps exact UKG and Avature identities in attended handoff mode %s', (raw) => {
+    const parsed = new URL(raw);
+    expect(contentInitRoute(parsed)).toBe('gated');
+    expect(gatedPortalNotice(parsed.hostname, parsed.pathname, parsed.search)).toMatch(/account|consent|login|resume intake/i);
+  });
+
+  it('matches only the exact EA internship route in the content script manifest', () => {
+    const content = readFileSync('src/entrypoints/content.ts', 'utf8');
+    expect(content).toContain("'https://jobs.ea.com/en_US/careers/JobDetail/Software-Engineer-Intern/214956'");
+    expect(content).not.toContain("'https://jobs.ea.com/*'");
   });
 });
 

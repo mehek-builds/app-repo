@@ -40,6 +40,7 @@ export const KNOWN_ATS_HOSTS = [
   'utilidata.applytojob.com',
   'foundationai.applytojob.com',
   'avature.net',
+  'jobs.ea.com',
 ] as const;
 
 const EXACT_HOSTS = new Set([
@@ -54,6 +55,7 @@ const EXACT_HOSTS = new Set([
   'utilidata.applytojob.com',
   'foundationai.applytojob.com',
   'enterpriseplatform.dell.com',
+  'jobs.ea.com',
 ]);
 
 function matchesKnownHost(hostname: string, known: string): boolean {
@@ -80,11 +82,14 @@ function isExactRouteOnlyHost(hostname: string): boolean {
     || hostname.endsWith('.oraclecloud.com')
     || hostname === 'enterpriseplatform.dell.com'
     || hostname === 'recruiting.ultipro.com'
+    || hostname === 'jobs.ea.com'
     || /^(?!www\.)[a-z0-9-]+\.avature\.net$/i.test(hostname);
 }
 
 function isVendorProductOrLoginHost(hostname: string, pathname: string): boolean {
-  return hostname === 'accounts.zoho.com'
+  return hostname === 'jobs.personio.de'
+    || hostname === 'jobs.personio.com'
+    || hostname === 'accounts.zoho.com'
     || (hostname === 'www.zoho.com' && /^\/recruit(?:\/|$)/i.test(pathname))
     || /(?:^|\.)bullhornstaffing\.com$/i.test(hostname)
     || /^(?:www\.)?bullhorn\.com$/i.test(hostname);
@@ -103,6 +108,7 @@ const APPLICATION_SCOPED_ADAPTERS = new Set([
   'bamboohr',
   'recruitee',
   'teamtailor',
+  'personio',
   'zoho_recruit',
   'bullhorn',
   'jazzhr',

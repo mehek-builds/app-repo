@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { desiredAnswer, isDraftableQuestion, linkQuestion, locationQuestion, matchOption, eeoAnswer, unreadableQuestionSkipReason, WORK_ELIGIBILITY_QUESTION, type Desired } from './generic';
+import { ageOfMajorityAnswer, desiredAnswer, isDraftableQuestion, linkQuestion, locationQuestion, matchOption, eeoAnswer, unreadableQuestionSkipReason, WORK_ELIGIBILITY_QUESTION, type Desired } from './generic';
 import { firstNonEmptyText } from './shared/dom';
 // desiredAnswer/matchOption/eeoAnswer remain exported from generic; commitChoice (the shared
 // radio/checkbox commit that every adapter now routes through) lives in ./shared/dom.
@@ -14,36 +14,39 @@ const ap = (o: Partial<ApplicationProfile> = {}): ApplicationProfile => o as App
 const opts = (...texts: string[]) => texts.map((text) => ({ text }));
 
 describe('desiredAnswer', () => {
-  it('answers work authorization from explicit stored profile values', () => {
-    expect(desiredAnswer('are you legally authorized to work in the united states?', ap({ work_authorized: true }), {}))
-      .toEqual({ mode: 'yes' });
-    expect(desiredAnswer('legally authorized to work', ap({ work_authorized: false }), {}))
-      .toEqual({ mode: 'no' });
-    expect(desiredAnswer('do you have the right to work in the uk?', ap({ work_authorized: true }), {}))
-      .toEqual({ mode: 'yes' });
+  it('never globalizes work authorization across jurisdictions', () => {
+    for (const label of [
+      'are you legally authorized to work in the united states?',
+      'do you have the right to work in the UK?',
+      'are you authorized to work in Germany?',
+      'are you legally permitted to work in the UAE?',
+    ]) {
+      expect(desiredAnswer(label, ap({ work_authorized: true, needs_sponsorship: false }), {}), label).toBeNull();
+      expect(desiredAnswer(label, ap({ work_authorized: false, needs_sponsorship: true }), {}), label).toBeNull();
+    }
   });
 
-  it('answers sponsorship from explicit stored profile values', () => {
+  it('never answers sponsorship from global profile values', () => {
     expect(desiredAnswer('will you now or in the future require sponsorship?', ap({ needs_sponsorship: true }), {}))
-      .toEqual({ mode: 'yes' });
+      .toBeNull();
     expect(desiredAnswer('do you require visa sponsorship?', ap({ needs_sponsorship: false }), {}))
-      .toEqual({ mode: 'no' });
+      .toBeNull();
   });
 
-  it('answers an age-of-majority question yes', () => {
-    expect(desiredAnswer('are you at least 18 years of age?', ap(), {})).toEqual({ mode: 'yes' });
+  it('requires a valid DOB before answering an explicit age threshold', () => {
+    expect(desiredAnswer('are you at least 18 years of age?', ap(), {})).toBeNull();
   });
 
-  it('answers routine applicant consent and logistics acknowledgements yes', () => {
+  it('leaves privacy consent and location commitments to the current application', () => {
     expect(
       desiredAnswer('Do you consent to Brex processing your personal information for the purpose of assessing your candidacy?', ap(), {}),
-    ).toEqual({ mode: 'yes' });
+    ).toBeNull();
     expect(
       desiredAnswer("Please review and acknowledge Cloudflare's Candidate Privacy Policy.", ap(), {}),
-    ).toEqual({ mode: 'yes' });
+    ).toBeNull();
     expect(
       desiredAnswer('this role will be in-office on a hybrid schedule, can you commit to being in-office three days per week?', ap(), {}),
-    ).toEqual({ mode: 'yes' });
+    ).toBeNull();
   });
 
   it('declines EEO demographics when no preference is stored', () => {
@@ -68,18 +71,14 @@ describe('desiredAnswer', () => {
     expect(desiredAnswer('date of birth', ap({ date_of_birth: '2005-01-01' }), {})).toEqual({ mode: 'value', value: '2005-01-01' });
   });
 
-  it('salary routes through the R-031 currency gate, not the bare stored value', () => {
-    // The old case returned the stored figure verbatim for any salary label - R-031's defect.
-    // Now a bare figure needs the label to name a currency matching the stored one; a label
-    // with no currency resolves nothing and the caller's skip reason holds auto-submit.
+  it('never fills an applicant salary expectation', () => {
     expect(desiredAnswer('desired salary', ap({ desired_salary: '120000' }), {})).toBeNull();
     expect(
       desiredAnswer('desired salary (usd)', ap({ desired_salary: '120000', desired_salary_currency: 'USD' }), {}),
-    ).toEqual({ mode: 'value', value: '120000' });
-    // A range stated in the label beats everything stored: median, in the posting's own format.
+    ).toBeNull();
     expect(
       desiredAnswer('expected salary (usd 90,000 - 110,000)', ap({ desired_salary_currency: 'EUR' }), {}),
-    ).toEqual({ mode: 'value', value: 'USD 100,000' });
+    ).toBeNull();
   });
 
   it('never answers sensitive fields', () => {
@@ -225,7 +224,7 @@ describe('matchOption', () => {
     expect(desiredAnswer('What Is Your Gender?', ap(), {})).toEqual({ mode: 'decline' });
     expect(desiredAnswer('Country Of Citizenship', ap({ citizenship: 'India' }), {}))
       .toEqual({ mode: 'value', value: 'India' });
-    expect(desiredAnswer('Are You At Least 18 Years Of Age?', ap(), {})).toEqual({ mode: 'yes' });
+    expect(desiredAnswer('Are You At Least 18 Years Of Age?', ap(), {})).toBeNull();
   });
 
   it('returns null for a null desired or empty options', () => {
@@ -249,11 +248,11 @@ describe('desiredAnswer: unset eligibility is left blank, never answered "No" (f
   it('leaves sponsorship blank when the field is null', () => {
     expect(desiredAnswer('do you require visa sponsorship?', ap({ needs_sponsorship: null as unknown as boolean }), {})).toBeNull();
   });
-  it('answers eligibility from explicit stored profile booleans', () => {
-    expect(desiredAnswer('legally authorized to work', ap({ work_authorized: true }), {})).toEqual({ mode: 'yes' });
-    expect(desiredAnswer('legally authorized to work', ap({ work_authorized: false }), {})).toEqual({ mode: 'no' });
-    expect(desiredAnswer('do you require visa sponsorship?', ap({ needs_sponsorship: false }), {})).toEqual({ mode: 'no' });
-    expect(desiredAnswer('do you require visa sponsorship?', ap({ needs_sponsorship: true }), {})).toEqual({ mode: 'yes' });
+  it('leaves eligibility blank even when legacy global booleans exist', () => {
+    expect(desiredAnswer('legally authorized to work', ap({ work_authorized: true }), {})).toBeNull();
+    expect(desiredAnswer('legally authorized to work', ap({ work_authorized: false }), {})).toBeNull();
+    expect(desiredAnswer('do you require visa sponsorship?', ap({ needs_sponsorship: false }), {})).toBeNull();
+    expect(desiredAnswer('do you require visa sponsorship?', ap({ needs_sponsorship: true }), {})).toBeNull();
   });
 });
 
@@ -262,13 +261,13 @@ describe('desiredAnswer: age-of-majority phrasing (fix #15)', () => {
     expect(desiredAnswer('are you under 18 years of age?', ap(), {})).toBeNull();
     expect(desiredAnswer('are you younger than 18?', ap(), {})).toBeNull();
   });
-  it('still answers an affirmative age-of-majority question "yes"', () => {
-    expect(desiredAnswer('are you at least 18 years of age?', ap(), {})).toEqual({ mode: 'yes' });
-    expect(desiredAnswer('are you over 18?', ap(), {})).toEqual({ mode: 'yes' });
-    // "18 years or older" carries none of at-least/over/older-than, so it needs the guarded
-    // "18 years" alternative (restored after review); the "under" guard still blocks the negatives.
-    expect(desiredAnswer('are you 18 years or older?', ap(), {})).toEqual({ mode: 'yes' });
-    expect(desiredAnswer('you must be 18 years of age or older to apply', ap(), {})).toEqual({ mode: 'yes' });
+  it('uses exact calendar boundaries only with a valid DOB', () => {
+    const now = new Date('2026-08-09T23:59:59Z');
+    expect(ageOfMajorityAnswer('are you at least 18 years of age?', '2008-08-09', now)).toEqual({ mode: 'yes' });
+    expect(ageOfMajorityAnswer('are you at least 18 years of age?', '2008-08-10', now)).toEqual({ mode: 'no' });
+    expect(ageOfMajorityAnswer('are you at least 18 years of age?', undefined, now)).toBeNull();
+    expect(ageOfMajorityAnswer('are you at least 18 years of age?', '2008-02-30', now)).toBeNull();
+    expect(ageOfMajorityAnswer('have you reached the age of majority?', '2000-01-01', now)).toBeNull();
   });
 });
 
@@ -305,9 +304,9 @@ describe('desiredAnswer: citizenship and residence country are never conflated (
     expect(desiredAnswer('what country are you a citizen of?', ap({ address_country: 'United States' }), {})).toBeNull();
   });
 
-  it('still fills the residence country for location questions and bare "country"', () => {
+  it('fills current residence but not a future intended work location', () => {
     expect(desiredAnswer('which country do you intend to work from?', ap({ address_country: 'United States' }), {}))
-      .toEqual({ mode: 'value', value: 'United States' });
+      .toBeNull();
     expect(desiredAnswer('country of residence', ap({ address_country: 'United States' }), {}))
       .toEqual({ mode: 'value', value: 'United States' });
     expect(desiredAnswer('country', ap({ citizenship: 'India', address_country: 'United States' }), {}))
@@ -388,14 +387,14 @@ describe('WORK_ELIGIBILITY_QUESTION does not swallow a merely "sponsored" label'
       'is sponsorship required for you to work here?',
     ]) {
       expect(WORK_ELIGIBILITY_QUESTION.test(l), l).toBe(true);
-      expect(desiredAnswer(l, ap({ needs_sponsorship: false, work_authorized: true }), {}), l).toEqual({ mode: 'no' });
+      expect(desiredAnswer(l, ap({ needs_sponsorship: false, work_authorized: true }), {}), l).toBeNull();
     }
     for (const l of [
       'are you able to work without sponsorship?',
       'are you authorized to work without requiring sponsorship?',
     ]) {
       expect(WORK_ELIGIBILITY_QUESTION.test(l), l).toBe(true);
-      expect(desiredAnswer(l, ap({ needs_sponsorship: false, work_authorized: true }), {}), l).toEqual({ mode: 'yes' });
+      expect(desiredAnswer(l, ap({ needs_sponsorship: false, work_authorized: true }), {}), l).toBeNull();
     }
   });
 });
@@ -407,11 +406,11 @@ describe('desiredAnswer: "18" used for tenure is not an age-of-majority yes', ()
     expect(desiredAnswer('do you have at least 18 months of relevant experience?', ap(), {})).toBeNull();
   });
 
-  it('still answers a real age-of-majority question yes', () => {
-    expect(desiredAnswer('are you at least 18 years of age?', ap(), {})).toEqual({ mode: 'yes' });
-    expect(desiredAnswer('are you over 18?', ap(), {})).toEqual({ mode: 'yes' });
-    expect(desiredAnswer('are you 18 years or older?', ap(), {})).toEqual({ mode: 'yes' });
-    expect(desiredAnswer('you must be 18 years of age or older to apply', ap(), {})).toEqual({ mode: 'yes' });
+  it('does not infer a real age-of-majority answer without DOB', () => {
+    expect(desiredAnswer('are you at least 18 years of age?', ap(), {})).toBeNull();
+    expect(desiredAnswer('are you over 18?', ap(), {})).toBeNull();
+    expect(desiredAnswer('are you 18 years or older?', ap(), {})).toBeNull();
+    expect(desiredAnswer('you must be 18 years of age or older to apply', ap(), {})).toBeNull();
   });
 });
 
