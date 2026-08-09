@@ -20,8 +20,11 @@ import type { ApplicationProfile, Profile } from '../types';
 // date of birth, school, degree, graduation date, citizenship and phone each came back as an
 // LLM-authored paragraph asserting a fact the student never recorded.
 //
-// Location was already covered by locationQuestion and GPA/major by gradeQuestion, which is the
-// same doctrine arrived at one field at a time; this guard generalises it.
+// This change closes that for the keys a classifier can identify without ambiguity (referral,
+// date of birth, GPA, GPA scale). School, degree, citizenship and phone are NOT closed here and
+// still draft when nothing is stored: their matchers collide with real essay prompts in both
+// directions, and the essay cases below are the measured proof of why a keyword escape hatch
+// could not separate them. See REFUSED_FACT_NOUNS in generic.ts.
 
 const RECT = {
   width: 200, height: 24, top: 0, left: 0, right: 200, bottom: 24, x: 0, y: 0,
@@ -60,15 +63,15 @@ const ADAPTERS: Array<[name: string, wrap: (q: string) => string, fill: Fill]> =
   ['workday', (q) => `<fieldset><legend>${q}</legend><textarea></textarea></fieldset>`, fillWorkdayApplication as unknown as Fill],
 ];
 
-// Every one of these drafted a paragraph on every adapter before the fix.
+// The keys this guard covers. Deliberately narrow: see REFUSED_FACT_NOUNS in generic.ts for why
+// school/degree/major/phone/citizenship/location/zip are excluded (their classifiers collide with
+// real essay prompts in both directions).
 const FACTS = [
   'How did you hear about us?',
   'What is your date of birth?',
-  'What school do you attend?',
-  'What degree are you pursuing?',
-  'What is your expected graduation date?',
-  'What is your country of citizenship?',
-  'What is your phone number?',
+  'Tell us your date of birth',
+  'What is your GPA?',
+  'Please share your GPA',
 ];
 
 // A prompt that merely contains a field word is still an essay. Blanking one is its own failure,
@@ -77,6 +80,8 @@ const ESSAYS = [
   'Why do you want to work here?',
   'Tell us about a project you worked on at school',
   'Describe your degree and how it prepared you for this role',
+  'What mobile applications have you built?',
+  'What did you learn from your experience at school?',
 ];
 
 async function fillOne(wrap: (q: string) => string, fill: Fill, question: string) {
@@ -104,10 +109,19 @@ describe.each(ADAPTERS)('%s: a fact the profile owns is never AI-drafted', (name
 
     expect(drafted, `${name} sent the question to the drafter`).toEqual([]);
     expect(textarea?.value).toBe('');
-    // The reason has to hold the auto-submit countdown, or the field goes blank into a submit.
-    // Read what the adapter emitted rather than restating it: a reworded reason that no longer
-    // matches REVIEW_FLAG would otherwise leave this suite green.
-    expect(skippedReasonsNeedReview(result.skipped_reasons), `${name} emitted no review-holding reason for "${question}": ${JSON.stringify(result.skipped_reasons)}`)
+    // Anchor to THIS question's reason, not to "some reason in the list holds the countdown".
+    // Review caught the looser form: an unrelated review reason from an earlier adapter branch
+    // (a resume warning, a consent flag) satisfied skippedReasonsNeedReview on its own, so the
+    // assertion would have passed even if the fact reason was never emitted.
+    const reason = result.skipped_reasons.find((r) => r.toLowerCase().includes(question.toLowerCase().slice(0, 20)));
+    expect(reason, `${name} emitted no reason naming "${question}": ${JSON.stringify(result.skipped_reasons)}`)
+      .toBeTruthy();
+    // Assert the PROPERTY (this reason holds the countdown), not a specific phrase. Two different
+    // code paths legitimately answer these labels: the new fact guard emits "left for", while a
+    // referral question on these five is caught earlier by the pre-existing `known` branch and
+    // emits "no matching control, left blank". Both satisfy REVIEW_FLAG; pinning the wording would
+    // fail on a correct path.
+    expect(skippedReasonsNeedReview([reason!]), `${name}'s reason does not hold the countdown: ${reason}`)
       .toBe(true);
   });
 

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, beforeEach, beforeAll, vi } from 'vitest';
-import { fillGenericApplication, factQuestionRefusingDraft } from './generic';
+import { fillGenericApplication, factQuestionRefusingDraft, classifyField } from './generic';
 import { skippedReasonsNeedReview } from '../autosubmit-gate';
 import type { ApplicationProfile, Profile } from '../types';
 
@@ -116,16 +116,16 @@ describe('referral source rendered as a textarea', () => {
   });
 });
 
-describe('the same hole on the other keys the profile owns', () => {
-  // Measured on this adapter before the fix: every one of these drafted a paragraph.
+describe('the other keys covered by the same guard', () => {
+  // Deliberately only the keys whose classifier cannot appear inside an essay prompt. See
+  // REFUSED_FACT_NOUNS for why school/degree/major/phone/citizenship/location/zip are NOT here.
   const FACTS: Array<[label: string, id: string]> = [
     ['What is your date of birth?', 'dob'],
+    ['Tell us your date of birth', 'dob2'],
     ['What is your GPA?', 'gpa'],
-    ['What is your expected graduation date?', 'grad'],
-    ['What is your major?', 'major'],
-    ['What school do you attend?', 'school'],
-    ['What is your country of citizenship?', 'citizenship'],
-    ['What is your phone number?', 'phone'],
+    ['Please share your GPA', 'gpa2'],
+    ['Grade point average', 'gpa3'],
+    ['GPA scale', 'gpascale'],
   ];
 
   for (const [label, id] of FACTS) {
@@ -144,17 +144,28 @@ describe('the same hole on the other keys the profile owns', () => {
 
 describe('factQuestionRefusingDraft: the fact-vs-essay split', () => {
   // A prompt that merely CONTAINS a field word is still an essay, and blanking one is its own
-  // failure. These are the live-shaped collisions the escape hatch exists for.
+  // failure. Every entry below is a real-shaped prompt; the guard must hand all of them to the
+  // drafter. Two of these (`what mobile applications have you built?` classifying as `phone`, and
+  // `describe the class of problems you enjoy solving` classifying as `graduation_date`) are the
+  // exact collisions that forced this guard to cover only the four unambiguous keys.
   const ESSAYS = [
     'tell us about a project you worked on at school',
+    'what was the major challenge you overcame in your last role?',
     'describe your degree and how it prepared you for this role',
     'tell us about a time you worked with people of different nationalities',
     'describe your mobile app experience',
+    'what mobile applications have you built?',
+    'what did you learn from your experience at school?',
+    'describe the class of problems you enjoy solving',
     'why do you want to work here?',
     'what interests you about this role?',
     'in your own words, what makes you different from other candidates?',
     'share an example of a project where you had to learn something new quickly',
     'describe the type of problems you most enjoy working on',
+    'tell us about your proudest achievement at university',
+    'describe a time you failed and what you learned',
+    'what would you build with a week of free time?',
+    'tell us anything else you would like us to know',
   ];
 
   it('never refuses a genuine essay prompt', () => {
@@ -165,48 +176,44 @@ describe('factQuestionRefusingDraft: the fact-vs-essay split', () => {
     expect(refused).toEqual([]);
   });
 
-  it('errs toward refusing when a field word appears in a verbless prompt', () => {
-    // The known and accepted cost of keying the escape on VERBS rather than on
-    // isOpenEndedQuestion's 40-character arm: \bmajor\b matches this essay and no verb does, so it
-    // is flagged for the student instead of drafted. Pinned deliberately - the length arm was
-    // rejected because it made the guard depend on how long the control's id attribute is, which
-    // meant the same citizenship question was refused as `q` and drafted as `citizenship`.
-    // Blanking an essay costs a paragraph of typing; drafting a fact she never recorded puts a
-    // false statement on a real application.
-    expect(factQuestionRefusingDraft('what was the major challenge you overcame in your last role?'))
-      .toBe('major');
-  });
-
-  it('does not depend on the length of the control id appended to the label', () => {
-    // questionLabel() concatenates the visible label with the control's id or name, so the same
-    // question arrives at different lengths on different forms. Both must resolve the same way.
-    expect(factQuestionRefusingDraft('what is your country of citizenship? q')).toBe('citizenship');
-    expect(factQuestionRefusingDraft('what is your country of citizenship? citizenship'))
-      .toBe('citizenship');
-  });
-
-  it('refuses the field-shaped phrasings of each owned fact', () => {
+  it('refuses the fact phrasings it does cover, including ones carrying an essay verb', () => {
+    // "please share your gpa" and "tell us your date of birth" are the shape that broke the first
+    // version of this guard: an essay verb sitting on a plainly factual label. There is no verb
+    // escape any more, so they refuse.
     const drafted = [
       'how did you hear about us?',
       'how did you first hear about this position?',
       'referral source',
       'what is your date of birth?',
+      'date of birth',
+      'tell us your date of birth',
+      'dob',
       'what is your gpa?',
-      'expected graduation year',
-      'what is your major?',
-      'what school do you attend?',
-      'what is your citizenship?',
-      'what city do you live in?',
+      'cumulative gpa',
+      'grade point average',
+      'please share your gpa',
+      'gpa scale',
+      'grading scale',
     ].filter((f) => factQuestionRefusingDraft(f) === null);
     expect(drafted).toEqual([]);
   });
 
-  it('refuses a referral question however it is phrased, unlike every other key', () => {
-    // "How did you hear about us?" trips isOpenEndedQuestion's `how (did|do) you` arm, so a
-    // referral key that yielded to prose shape would hand back exactly the label this fix exists
-    // for. This is the assertion that pins the unconditional arm.
-    expect(factQuestionRefusingDraft('how did you hear about us?')).toBe('referral_source_default');
-    expect(factQuestionRefusingDraft('please describe how you first heard about this opening'))
-      .toBe('referral_source_default');
+  it('does not depend on the length of the control id appended to the label', () => {
+    // questionLabel() concatenates the visible label with the control's id or name, so the same
+    // question arrives at different lengths on different forms. An earlier version keyed its
+    // escape on isOpenEndedQuestion, whose 40-character arm made this pair disagree.
+    expect(factQuestionRefusingDraft('what is your date of birth? q')).toBe('date_of_birth');
+    expect(factQuestionRefusingDraft('what is your date of birth? date_of_birth_field'))
+      .toBe('date_of_birth');
+  });
+
+  it('leaves the uncovered profile keys to the drafter, deliberately', () => {
+    // These are facts the profile owns, and on an unset profile they are still drafted - the same
+    // behaviour as before this change, on every adapter. Pinned so the gap is visible and a future
+    // fix has a place to land, rather than being silently believed closed.
+    for (const label of ['what is your phone number?', 'what school do you attend?', 'what is your major?']) {
+      expect(classifyField(label), label).not.toBeNull();
+      expect(factQuestionRefusingDraft(label), label).toBeNull();
+    }
   });
 });
