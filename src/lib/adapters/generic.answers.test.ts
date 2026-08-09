@@ -467,20 +467,17 @@ describe('referral source never invents a channel the profile does not store', (
   const valuesOf = (d: Desired): string[] => (d as { values: string[] }).values;
 
   it('claims nothing at all when no referral source is stored', () => {
-    // No values, just the catch-all flag. The first version of this fix passed the literal string
-    // 'other' as a value; see the catch-all matrix below for what that actually selected.
-    expect(desiredAnswer(REFERRAL_LABEL, ap(), {})).toEqual({ mode: 'oneof', values: [], catchall: true });
+    expect(desiredAnswer(REFERRAL_LABEL, ap(), {})).toBeNull();
   });
 
-  it('names no company-website channel on any unset-profile referral phrasing', () => {
+  it('answers no unset-profile referral phrasing', () => {
     for (const label of [
       'how did you hear about us?',
       'how did you first hear about this role?',
       'referral source',
       'how did you hear about this opportunity? linkedin / indeed / other',
     ]) {
-      const values = valuesOf(desiredAnswer(label, ap(), {}));
-      for (const claim of INVENTED) expect(values, `${label} -> ${claim}`).not.toContain(claim);
+      expect(desiredAnswer(label, ap(), {}), label).toBeNull();
     }
   });
 
@@ -500,9 +497,9 @@ describe('referral source never invents a channel the profile does not store', (
     expect(skippedReasonsNeedReview([`radio question left for you: "${REFERRAL_LABEL}"`])).toBe(true);
   });
 
-  it('still picks "Other" when the form offers one', () => {
+  it('does not select even exact "Other" when the source is unknown', () => {
     const options = opts('LinkedIn', 'Job board', 'Other');
-    expect(matchOption(options, desiredAnswer(REFERRAL_LABEL, ap(), {}))?.text).toBe('Other');
+    expect(matchOption(options, desiredAnswer(REFERRAL_LABEL, ap(), {}))).toBeNull();
   });
 
   it('treats an empty, whitespace, or zero-width stored value as unset rather than as an answer', () => {
@@ -510,7 +507,7 @@ describe('referral source never invents a channel the profile does not store', (
     // typeahead query, so a lone U+200B surviving the guard gets typed into a live form field.
     for (const blank of ['', '   ', '​', ' ​ ﻿ ', ' ']) {
       expect(desiredAnswer(REFERRAL_LABEL, ap({ referral_source_default: blank }), {}), JSON.stringify(blank))
-        .toEqual({ mode: 'oneof', values: [], catchall: true });
+        .toBeNull();
     }
   });
 
@@ -586,7 +583,9 @@ describe('referral source never invents a channel the profile does not store', (
   // \bother\b hits "Other referral" and "Other job board" just as readily as "Other" - and a
   // single hit commits, filled, with no skip reason. Measured on the first version of this fix.
   it('accepts only a catch-all that names no channel', () => {
-    const desired = desiredAnswer(REFERRAL_LABEL, ap(), {});
+    // A catch-all is truthful only when a stored source proves that none of the listed channels is
+    // the student's actual answer. An absent source returns null and never reaches this matcher.
+    const desired = desiredAnswer(REFERRAL_LABEL, ap({ referral_source_default: 'A friend' }), {});
     for (const [options, expected] of [
       [['LinkedIn', 'Other'], 'Other'],
       [['LinkedIn', 'Other (please specify)'], 'Other (please specify)'],

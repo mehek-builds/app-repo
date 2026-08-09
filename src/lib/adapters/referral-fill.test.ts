@@ -92,13 +92,15 @@ describe('referral source: what the adapter emits when it refuses to answer', ()
     expect(skippedReasonsNeedReview(result.skipped_reasons)).toBe(true);
   });
 
-  it('selects a real catch-all and then reports nothing needing review', async () => {
+  it('leaves even a real catch-all blank when the source is absent and holds auto-submit', async () => {
     const select = referralSelect(['LinkedIn', 'Indeed', 'Other (please specify)']);
 
     const result = await run();
 
-    expect(select.value).toBe('Other (please specify)');
-    expect(result.skipped_reasons.some((r) => r.toLowerCase().includes(REFERRAL_LABEL.toLowerCase().slice(0, 20)))).toBe(false);
+    expect(select.value).toBe('');
+    const referralReason = result.skipped_reasons.find((r) => r.toLowerCase().includes(REFERRAL_LABEL.toLowerCase().slice(0, 20)));
+    expect(referralReason).toBeTruthy();
+    expect(skippedReasonsNeedReview([referralReason!])).toBe(true);
   });
 
   it('fills the stored channel when the form lists it', async () => {

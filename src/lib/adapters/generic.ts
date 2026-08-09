@@ -1341,29 +1341,25 @@ export function desiredAnswer(label: string, ap: ApplicationProfile, eeo: Record
     // recorded, and claimed the same one on postings found through a job board or a referral. The
     // backend's corpus sweep deleted this exact constant on its side; this is the extension half.
     //
-    // Unset now claims NOTHING: no values at all, just `catchall`, which accepts a pure "Other"
-    // option and nothing else. The first version of this fix passed the literal string 'other' as
-    // a value, and review measured what that actually selects - "Other referral" and "Other job
-    // board", through matchOption's word-boundary widening. Both name a channel. See CATCHALL_RE:
-    // the catch-all needed its own matching rule, not a value in a list.
-    // When the form offers no qualifying option matchOption returns null, and the caller's own
-    // reason ("dropdown left for you" / "radio question left for you" / "unrecognized field left
-    // blank") holds the auto-submit countdown: "left for" is what autosubmit-gate's REVIEW_FLAG
-    // matches, the same load-bearing phrase as R-010's. A referral question left for the student
-    // costs her one click; an invented source is a false statement on a real application.
+    // Unset returns null. Even a pure "Other" is a factual answer: it says the real channel is not
+    // one of the listed choices, which the absence of a stored source cannot prove. The caller's
+    // own reason ("dropdown left for you" / "radio question left for you" / "unrecognized field
+    // left blank") holds the auto-submit countdown because "left for" is what autosubmit-gate's
+    // REVIEW_FLAG matches. A referral question left for the student costs one click; an invented
+    // source is a false statement on a real application.
     case 'referral_source_default': {
       // clean(), not trim(): an empty string is an unset field wearing a value's clothes (the
       // shape the old `.filter(Boolean)` handled), and so is a lone zero-width space, which trim
       // leaves standing and which adapters then type into a combobox as a typeahead query.
       const stored = clean(ap.referral_source_default ?? '');
-      if (!stored) return { mode: 'oneof', values: [], catchall: true };
+      if (!stored) return null;
       // A stored value does not license the whole list either. The synonyms are spellings of ONE
       // channel (see COMPANY_SITE_SYNONYMS), so they may stand in for a stored "Company website"
       // and for nothing else: a student who stored "LinkedIn" and meets a form with no LinkedIn
       // option was, until now, answered "Company website" - the same invented fact as the unset
       // branch, just harder to see because a value WAS stored.
-      // Every stored answer keeps the catch-all behind it, which stays true by construction: it
-      // says the channel is not on this list, which is exactly what happened.
+      // A stored answer may use a pure catch-all after its real value fails to match: in that case
+      // the profile proves the stored channel is not on the form's list.
       return namesTheCompanySite(stored)
         ? { mode: 'oneof', values: [stored, ...COMPANY_SITE_SYNONYMS], catchall: true }
         : { mode: 'oneof', values: [stored], catchall: true };
