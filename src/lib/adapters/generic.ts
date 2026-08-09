@@ -1263,68 +1263,76 @@ export function isOpenEndedQuestion(label: string): boolean {
   return l.includes('?') && l.length >= 40;
 }
 
-// ─── A fact about the student is never AI-drafted (R-119) ───────────────────
+// ─── A referral question is never AI-drafted (R-119) ────────────────────────
 // R-118 stopped the select/radio path inventing a referral source. The textarea path was still
-// open: the identity-first chain leaves `value` undefined for these labels, the profile lookup
-// after it is gated on `!isTextarea`, and the essay drafter sits at the bottom of the loop with
-// no field-identity check of its own. A referral question rendered as a <textarea> therefore
+// open: the identity-first chain leaves `value` undefined for a referral label, the profile lookup
+// after it is gated on `!isTextarea`, and the essay drafter sits at the bottom of the loop with no
+// field-identity check of its own. "How did you hear about us?" rendered as a <textarea> therefore
 // skipped `case 'referral_source_default'` entirely and had a model write a paragraph asserting
 // how she found the posting - the same invention R-118 removed, in her voice and at more length.
 //
-// SCOPE, and why it is this narrow. classifyField recognises 20 ProfileKeys, and a first pass at
-// this guard refused all of them, using an essay-verb test to hand genuine prose prompts back to
-// the drafter. Review measured that test failing in BOTH directions, which is why it is gone:
-//   - facts still drafted: "please share your phone number" and "tell us your postal code" are
-//     ordinary labels whose verb ("share", "tell us") bought the drafter back, with no skip
-//     reason emitted, so auto-submit did not even hold.
-//   - essays wrongly blanked: "what mobile applications have you built?" classifies as `phone`
-//     (the matcher is /phone|mobile/) and carries no verb, so a real essay went blank.
-// No keyword test separates "your school" (fact) from "a project you worked on at school"
-// (essay) reliably, and a label-length test is worse: `question` here is questionLabel()'s
-// output, which appends the control's own id, so the same citizenship question was refused on a
-// control named `q` and drafted on one named `citizenship`.
+// WHY THIS GUARD COVERS ONE QUESTION AND NOT TWENTY. The first two versions tried to refuse every
+// field classifyField recognises, using a keyword test to hand genuine prose back to the drafter.
+// Both failed in both directions, measured, not guessed:
+//   - v1 escaped on isOpenEndedQuestion's verbs. "Please share your phone number" escaped on
+//     `share\b` and "tell us your postal code" on `tell (us|me)\b` - courtesy wrappers on a plain
+//     field ask - and were drafted with NO skip reason, so auto-submit did not even hold.
+//   - v2 narrowed the escape to verbs carrying a narrative object. "Please share A phone number"
+//     still escaped through the `share an?` arm, and "tell us what your phone number is" through
+//     `tell us what`.
+// Then the underlying question was measured directly: across a 38-prompt corpus of real essay
+// prompts, EVERY ProfileKey is hit by at least one of them - school by six, phone by three,
+// citizenship and degree and gpa by two, and even date_of_birth ("explain why the date of birth on
+// your transcript differs from this application"). There is no subset of keys that can be refused
+// on classification alone without blanking real prose.
 //
-// So the guard covers ONLY the keys whose matcher cannot plausibly appear inside an essay
-// prompt, measured against a corpus of real ones. The rest (school, degree, major, phone,
-// citizenship, location, zip, salary, availability, links) keep today's behaviour on every
-// adapter: they are still drafted when nothing is stored. That is a pre-existing gap this change
-// does not widen, and closing it needs a real intent classifier, not another regex.
-const REFUSED_FACT_NOUNS: Partial<Record<ProfileKey, string>> = {
-  // The reported defect, and unconditional by necessity: "How did you hear about us?" is the
-  // canonical wording and asks for a FACT about this application no matter how it is phrased.
-  // Measured cost, accepted: REFERRAL_QUESTION's `source of` arm also matches "what is the source
-  // of your motivation to build things?", a real essay that now goes blank-and-flagged. That
-  // costs one paragraph of typing; the other direction puts a false statement about how she found
-  // the job on a real application.
-  referral_source_default: 'referral source',
-  // Field-name-shaped matchers ("date of birth", "\bgpa\b", "gpa scale") with zero collisions
-  // across the essay corpus in referral-textarea-draft.test.ts.
-  date_of_birth: 'date of birth',
-  gpa: 'GPA',
-  gpa_scale: 'GPA scale',
-  // graduation_date is deliberately NOT here. GRADUATION_DATE_QUESTION carries a `\bclass\s+of\b`
-  // arm for "Class of 2026", and that arm also matches "describe the class of problems you enjoy
-  // solving" - a real essay. Refusing it would blank prose to close a gap nobody has hit.
-};
+// That is the actual lesson: classifyField answers "which field is this ABOUT", which is field
+// IDENTITY, not intent. It cannot answer "is this label asking for a value or for sentences", and
+// no regex bolted on top of it did either. So this guard stops trying, and covers the one question
+// where the answer is unambiguous and the harm is proven.
+//
+// The other keys keep the behaviour they have always had: when nothing is stored, they are drafted.
+// That is a pre-existing gap, not one this introduces, and closing it needs a real intent
+// classifier. gradeQuestion (GPA, major) and locationQuestion already close their own corner of it
+// on the five ATS adapters.
+//
+// This predicate is deliberately NOT classifyField/REFERRAL_QUESTION. That expression carries a
+// bare `source of` arm for harvest's benefit, and it matches "what is the source of your motivation
+// to build things?" - a real essay. Refusal needs to be sure, so it asks for more.
+//
+// Two arms, because a referral question comes in two shapes:
+//   1. referred by a PERSON ("Who referred you?", "Referred by", "Employee referral").
+//   2. a DISCOVERY VERB whose object is this posting or this company ("how did you hear about us",
+//      "where did you see this vacancy", "how did you come across this posting").
+// The object requirement in arm 2 is what keeps prose out. Review found the earlier, loose version
+// blanking "where did you find the greatest opportunity for improvement?" and "how did you find us
+// to be different from our competitors?" - both match a bare `where did you find` / `find us`, and
+// neither is asking how she found the job. Every phrasing in both directions is pinned in
+// referral-textarea-draft.test.ts; add a case there before touching this expression.
+const REFERRAL_FACT = new RegExp(
+  [
+    String.raw`\breferral\b|\breferred\b|\brefer(?:red)?\s+by\b|\bwho referred you\b`,
+    String.raw`\b(?:hear|heard|hearing|learn|learned|learnt|find out|found out|discover|discovered|come across|came across|see|saw)\b[^.?!]{0,24}?\b(?:about\s+)?(?:this|the)\s+(?:role|job|position|posting|opening|opportunity|vacancy|company|listing|advert(?:isement)?)\b`,
+    String.raw`\b(?:hear|heard|learn|learned|learnt|find out|found out|discover|discovered|come across|came across)\b[^.?!]{0,24}?\babout\s+us\b`,
+    // "How did you find us?" is a real referral label. The lookahead keeps "how did you find us to
+    // be different from our competitors" out.
+    String.raw`\bhow did you find us\b(?!\s+to\b)`,
+  ].join('|'),
+  'i',
+);
 
-/**
- * Which stored fact is this question asking for, if drafting it would be an invention?
- * Returns the ProfileKey to refuse on, or null to let the drafter have it.
- */
 export function factQuestionRefusingDraft(question: string): ProfileKey | null {
-  const key = classifyField(question);
-  return key && key in REFUSED_FACT_NOUNS ? key : null;
+  return REFERRAL_FACT.test(clean(question ?? '')) ? 'referral_source_default' : null;
 }
 
 // "left for" is the load-bearing phrase, the same one R-010 and R-118 lean on: it is what
-// autosubmit-gate's REVIEW_FLAG matches, so a refused fact question HOLDS the auto-submit
+// autosubmit-gate's REVIEW_FLAG matches, so a refused referral question HOLDS the auto-submit
 // countdown instead of sailing through blank.
 export function factQuestionSkipReason(key: ProfileKey, label: string): string {
-  // The `?? 'profile'` arm is unreachable through factQuestionRefusingDraft, which only ever
-  // returns a key that is in this map. It exists so a future caller passing an uncovered key
-  // still emits a reason carrying "left for" rather than the string "undefined".
-  const noun = REFUSED_FACT_NOUNS[key] ?? 'profile';
-  return `${noun} question left for you (Litos does not draft facts about you): "${label.slice(0, 60)}"`;
+  // One key today. The map keeps the reason correct if the guard ever covers a second, rather than
+  // interpolating a raw ProfileKey slug into text the student reads.
+  const noun: Partial<Record<ProfileKey, string>> = { referral_source_default: 'referral source' };
+  return `${noun[key] ?? 'profile'} question left for you (Litos does not draft facts about you): "${label.slice(0, 60)}"`;
 }
 
 /**

@@ -20,11 +20,9 @@ import type { ApplicationProfile, Profile } from '../types';
 // date of birth, school, degree, graduation date, citizenship and phone each came back as an
 // LLM-authored paragraph asserting a fact the student never recorded.
 //
-// This change closes that for the keys a classifier can identify without ambiguity (referral,
-// date of birth, GPA, GPA scale). School, degree, citizenship and phone are NOT closed here and
-// still draft when nothing is stored: their matchers collide with real essay prompts in both
-// directions, and the essay cases below are the measured proof of why a keyword escape hatch
-// could not separate them. See REFUSED_FACT_NOUNS in generic.ts.
+// The guard covers the referral question only. Two earlier versions tried to cover every
+// ProfileKey and were measured failing in both directions; see REFERRAL_FACT in generic.ts for the
+// corpus that settled it. The essay cases below are the ones those versions blanked.
 
 const RECT = {
   width: 200, height: 24, top: 0, left: 0, right: 200, bottom: 24, x: 0, y: 0,
@@ -63,25 +61,26 @@ const ADAPTERS: Array<[name: string, wrap: (q: string) => string, fill: Fill]> =
   ['workday', (q) => `<fieldset><legend>${q}</legend><textarea></textarea></fieldset>`, fillWorkdayApplication as unknown as Fill],
 ];
 
-// The keys this guard covers. Deliberately narrow: see REFUSED_FACT_NOUNS in generic.ts for why
-// school/degree/major/phone/citizenship/location/zip are excluded (their classifiers collide with
-// real essay prompts in both directions).
+// Every one of these drafted a paragraph on every adapter before the guard existed.
 const FACTS = [
   'How did you hear about us?',
-  'What is your date of birth?',
-  'Tell us your date of birth',
-  'What is your GPA?',
-  'Please share your GPA',
-];
-
-// A prompt that merely contains a field word is still an essay. Blanking one is its own failure,
+  'How did you first hear about this position?',
+  'Where did you hear about this job?',
+  'Who referred you?',
+  'How did you come across this posting?',
+];// A prompt that merely contains a field word is still an essay. Blanking one is its own failure,
 // so the refusal has to be scoped, not blanket.
 const ESSAYS = [
   'Why do you want to work here?',
   'Tell us about a project you worked on at school',
   'Describe your degree and how it prepared you for this role',
-  'What mobile applications have you built?',
-  'What did you learn from your experience at school?',
+  // NB: GPA- and location-themed essays are NOT listed here. gradeQuestion and locationQuestion
+  // intercept those labels on these five adapters before this guard runs, which is pre-existing
+  // behaviour verified against main. The helper test in referral-textarea-draft.test.ts covers
+  // those cases for THIS guard.
+  'Share an example of a project where you had to learn something new quickly',
+  'Tell us about a time you solved a hard problem',
+  'What is the source of your motivation to build things?',
 ];
 
 async function fillOne(wrap: (q: string) => string, fill: Fill, question: string) {
@@ -103,7 +102,7 @@ async function fillOne(wrap: (q: string) => string, fill: Fill, question: string
   return { drafted, result, textarea: document.querySelector('textarea') };
 }
 
-describe.each(ADAPTERS)('%s: a fact the profile owns is never AI-drafted', (name, wrap, fill) => {
+describe.each(ADAPTERS)('%s: a referral question is never AI-drafted', (name, wrap, fill) => {
   it.each(FACTS)('leaves "%s" for the student', async (question) => {
     const { drafted, result, textarea } = await fillOne(wrap, fill, question);
 
