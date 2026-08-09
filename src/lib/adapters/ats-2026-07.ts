@@ -20,10 +20,10 @@ import { browserApplicationCapability } from './browser-application-capabilities
 // purpose. Each puts a consent choice, an account wall or an emailed code before any application
 // field exists, so there is nothing to fill. See gatedPortalNotice below.
 
-type FieldKey = 'fullName' | 'firstName' | 'lastName' | 'email' | 'phone' | 'city' | 'linkedin' | 'portfolio';
+type FieldKey = 'fullName' | 'firstName' | 'lastName' | 'email' | 'confirmEmail' | 'phone' | 'city' | 'linkedin' | 'portfolio';
 
 interface AtsSpec {
-  readonly id: 'rippling' | 'breezy' | 'bamboohr' | 'recruitee' | 'teamtailor' | 'personio' | 'pinpoint' | 'comeet' | 'zoho_recruit' | 'bullhorn';
+  readonly id: 'smartrecruiters' | 'rippling' | 'breezy' | 'bamboohr' | 'recruitee' | 'teamtailor' | 'personio' | 'pinpoint' | 'comeet' | 'zoho_recruit' | 'bullhorn';
   readonly host: (hostname: string) => boolean;
   readonly isApplicationPath: (pathname: string, rawSearch: string, hash: string) => boolean;
   /** Selectors for the fields the profile can answer factually. Absent keys are simply not filled. */
@@ -41,6 +41,8 @@ interface AtsSpec {
   readonly ceiling?: string;
   /** Mirrors the single capability registry for tests and adapter diagnostics. */
   readonly autoSubmit: 'conditional' | 'never';
+  /** Fixed controls live one open shadow root below the captured host selector. */
+  readonly openShadowRoots?: true;
   readonly genericPolicy?: GenericProviderPolicy;
 }
 
@@ -62,9 +64,32 @@ const AUTO_SUBMIT_CAPABILITIES = {
   personio: 'never',
   pinpoint: 'never',
   comeet: 'never',
+  smartrecruiters: 'never',
 } as const satisfies Record<string, 'conditional' | 'never'>;
 
 export const ATS_SPECS: readonly AtsSpec[] = [
+  {
+    id: 'smartrecruiters',
+    host: (h) => h === 'jobs.smartrecruiters.com',
+    // The public posting and one-click form are separate. Only the latter contains applicant
+    // controls, and the publication id is a UUID observed on both live tenants in this pass.
+    isApplicationPath: (p) => /^\/oneclick-ui\/company\/[a-z0-9._-]+\/publication\/[0-9a-f-]{36}\/?$/i.test(p),
+    fields: {
+      firstName: 'spl-input#first-name-input input',
+      lastName: 'spl-input#last-name-input input',
+      email: 'spl-input#email-input input',
+      confirmEmail: 'spl-input#confirm-email-input input',
+      phone: 'spl-phone-field input[aria-label="Phone number"]',
+      linkedin: 'spl-input#linkedin-input input',
+      portfolio: 'spl-input#website-input input',
+    },
+    resume: 'spl-dropzone[data-test="resume-upload"] input[type="file"]',
+    jd: 'main',
+    openShadowRoots: true,
+    autoSubmit: AUTO_SUBMIT_CAPABILITIES.smartrecruiters,
+    ceiling:
+      'SmartRecruiters uses a multi-step application. Litos filled the factual fields on this page and left every later question, confirmation, and send action to you.',
+  },
   {
     id: 'zoho_recruit',
     host: (h) => /^[^.]+\.zohorecruit\.(?:com|eu|in)$/i.test(h),
@@ -332,6 +357,20 @@ export function extractAtsJdText(): string {
   return (node?.textContent?.trim() || document.body.innerText).trim().slice(0, 12000);
 }
 
+function queryAtsControl<T extends Element>(spec: AtsSpec, selector: string): T | null {
+  if (!spec.openShadowRoots) return document.querySelector<T>(selector);
+  // Each captured SmartRecruiters selector crosses one open-shadow boundary. Native
+  // querySelector does not, unlike Playwright, so resolve the stable host first and then the
+  // captured inner selector. Reject a selector with no boundary instead of searching every shadow
+  // root broadly and risking an unrelated field.
+  const boundary = selector.indexOf(' ');
+  if (boundary < 1) return null;
+  const hostSelector = selector.slice(0, boundary);
+  const innerSelector = selector.slice(boundary + 1);
+  const host = document.querySelector<HTMLElement>(hostSelector);
+  return host?.shadowRoot?.querySelector<T>(innerSelector) ?? null;
+}
+
 /**
  * BambooHR renders its form only after "Apply for This Job" is pressed. Scoped by visible text
  * rather than by a class, because the button carries only generated MUI classes.
@@ -377,6 +416,7 @@ export async function fillAtsApplication(params: GenericFillParams): Promise<Aut
     firstName: first,
     lastName: last,
     email,
+    confirmEmail: email,
     phone: ap.phone,
     city: ap.address_city,
     linkedin: ap.linkedin_url,
@@ -390,10 +430,10 @@ export async function fillAtsApplication(params: GenericFillParams): Promise<Aut
     if (!value) continue;
     const el = spec.id === 'zoho_recruit' || spec.id === 'bullhorn'
       ? visibleSafeFixedInput(selector)
-      : document.querySelector<HTMLInputElement>(selector);
+      : queryAtsControl<HTMLInputElement>(spec, selector);
     // Never overwrite: the student may have typed something, or the platform may have prefilled it
     // from a previous application, and either is better information than ours.
-    if (!el || el.value) continue;
+    if (!el || el.value || isHoneypotField(el)) continue;
     if (await fillField(el, value)) filled += 1;
   }
 
@@ -402,20 +442,76 @@ export async function fillAtsApplication(params: GenericFillParams): Promise<Aut
   // (neither has a name, id, aria-label or placeholder, and both sit by the same "Drop or select"
   // text) and so picks whichever is first in the DOM. Right today, wrong the day Rippling reorders,
   // and the failure mode is a resume filed as a cover letter.
+  // SmartRecruiters keeps the upload inside the same open-shadow component boundary as its text
+  // controls. Attach it here because generic.ts intentionally scans only the light DOM. For every
+  // other ATS, generic keeps using the exact captured selector as before.
+  let shadowResumeAttached = false;
+  if (spec.openShadowRoots && spec.resume && params.resumeBlob && params.resumeFileName) {
+    const input = queryAtsControl<HTMLInputElement>(spec, spec.resume);
+    if (input) {
+      const file = new File([params.resumeBlob], params.resumeFileName, { type: 'application/pdf' });
+      const transfer = new DataTransfer();
+      transfer.items.add(file);
+      input.files = transfer.files;
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      shadowResumeAttached = true;
+    }
+  }
+
+  // SmartRecruiters is intentionally fixed-field-only. Its measured capability is the exact
+  // first-page shadow controls above, not arbitrary light-DOM fields that a tenant, injected page,
+  // or later wizard step may expose. Do not call the generic writer at all for this family.
+  if (spec.id === 'smartrecruiters') {
+    const resumeReason = !params.resumeBlob || !params.resumeFileName
+      ? 'resume: no generated resume file available'
+      : shadowResumeAttached
+        ? null
+        : 'resume: no file input found on this form';
+    const skippedReasons = [
+      ...(resumeReason ? [resumeReason] : []),
+      ...(spec.ceiling ? [spec.ceiling] : []),
+    ];
+    const result = {
+      ats_name: spec.id,
+      fields_filled: filled + (shadowResumeAttached ? 1 : 0),
+      fields_skipped: resumeReason ? 1 : 0,
+      ai_drafted: 0,
+      skipped_reasons: skippedReasons,
+    } satisfies AutofillResult;
+    params.onProgress?.({
+      fields_filled: result.fields_filled,
+      fields_skipped: result.fields_skipped,
+      ai_drafted: 0,
+      pendingEssays: 0,
+    });
+    return result;
+  }
+
   const rest = await fillGenericApplication({
     ...params,
+    resumeBlob: spec.openShadowRoots ? undefined : params.resumeBlob,
+    resumeFileName: spec.openShadowRoots ? undefined : params.resumeFileName,
     resumeSelector: spec.resume,
     providerPolicy: spec.genericPolicy,
   });
+  const genericMissingResume = 'resume: no generated resume file available';
+  const skippedReasons = spec.openShadowRoots
+    ? rest.skipped_reasons.map((reason) => reason === genericMissingResume
+      ? shadowResumeAttached
+        ? ''
+        : 'resume: no file input found on this form'
+      : reason).filter(Boolean)
+    : rest.skipped_reasons;
   return {
     ...rest,
     // Names the real platform rather than inheriting generic's label, so the run's own record says
     // which adapter ran. The student's card and the issue register both read this.
     ats_name: spec.id,
-    fields_filled: rest.fields_filled + filled,
+    fields_filled: rest.fields_filled + filled + (shadowResumeAttached ? 1 : 0),
+    fields_skipped: Math.max(0, rest.fields_skipped - (shadowResumeAttached ? 1 : 0)),
     // The ceiling is surfaced to the student as a skip reason rather than swallowed, so a run that
     // stops one step short reads as a known platform limit instead of an unexplained partial fill.
-    skipped_reasons: spec.ceiling ? [...rest.skipped_reasons, spec.ceiling] : rest.skipped_reasons,
+    skipped_reasons: spec.ceiling ? [...skippedReasons, spec.ceiling] : skippedReasons,
   };
 }
 
@@ -427,18 +523,25 @@ export async function fillAtsApplication(params: GenericFillParams): Promise<Aut
 
 type GatedPortal = 'jobvite' | 'icims' | 'oraclecloud' | 'ultipro' | 'sap_successfactors';
 
-const GATED_PORTALS: ReadonlyArray<{ id: GatedPortal; host: (h: string) => boolean; notice: string }> = [
+const GATED_PORTALS: ReadonlyArray<{
+  id: GatedPortal;
+  host: (h: string) => boolean;
+  path: (pathname: string) => boolean;
+  notice: string;
+}> = [
   {
     id: 'jobvite',
     host: (h) => h === 'jobs.jobvite.com',
-    // /apply renders a page headed "Data Consent" whose only control is a select whose only real
-    // option is "Data Privacy Acknowledgement -- Global". Choosing it IS the acknowledgement.
+    path: (p) => /^\/[a-z0-9._-]+\/job\/[a-z0-9]+(?:\/apply)?\/?$/i.test(p),
+    // /apply renders a location-of-residence choice before the application. The selected region
+    // determines the privacy acknowledgement and form that follow, so Litos leaves it untouched.
     notice:
-      'This company asks you to agree to their privacy notice before the application form opens. That choice is yours to make, so Litos stops here. Pick your country on the page and the form appears.',
+      'This company asks you to choose your location and review its privacy notice before the application form opens. Those choices are yours to make, so Litos stops here.',
   },
   {
     id: 'icims',
-    host: (h) => h.endsWith('.icims.com') && h !== 'www.icims.com' && h !== 'community.icims.com',
+    host: (h) => /^(?!(?:www|community|login|api)\.)[a-z0-9-]+\.icims\.com$/i.test(h),
+    path: (p) => /^\/jobs\/\d+\/[a-z0-9%._~-]+\/(?:job|login)\/?$/i.test(p),
     // The apply route redirects to /login: an email field plus an h-captcha-response textarea.
     notice:
       'This company asks you to make an account and prove you are human before the application form opens. Litos cannot do either of those for you.',
@@ -446,18 +549,21 @@ const GATED_PORTALS: ReadonlyArray<{ id: GatedPortal; host: (h: string) => boole
   {
     id: 'oraclecloud',
     host: (h) => h.endsWith('.oraclecloud.com'),
+    path: (p) => /^\/hcmUI\/CandidateExperience\//i.test(p),
     notice:
       'This company emails you a code and asks you to agree to their terms before the application form opens. Both of those need you.',
   },
   {
     id: 'ultipro',
     host: (h) => h === 'recruiting.ultipro.com',
+    path: (p) => /^\/[a-z0-9._-]+\/JobBoard\//i.test(p),
     notice:
       'Litos can find this job but cannot read this company’s application form yet. Everything you need is ready to paste in, so apply on the page itself.',
   },
   {
     id: 'sap_successfactors',
     host: (h) => /^career\d+\.successfactors\.(?:com|eu)$/i.test(h),
+    path: (p) => /^\/(?:sfcareer\/jobreqcareer|career|portalcareer)\/?$/i.test(p),
     notice:
       'This company asks you to sign in or create a SuccessFactors account before the application form opens. Litos leaves that account and every later legal choice to you.',
   },
@@ -466,20 +572,17 @@ const GATED_PORTALS: ReadonlyArray<{ id: GatedPortal; host: (h: string) => boole
 /**
  * The plain-language reason this page cannot be filled, or null if it is not one of them.
  *
- * Oracle is host-gated only in the extension, unlike the backend, which also requires the
- * /hcmUI/CandidateExperience path. The backend needs the tighter rule because it acts on a stored
- * url and oraclecloud.com hosts every Oracle Cloud product there is, including payroll logins. Here
- * the notice is only ever shown on a page the student opened herself, and it says nothing worse than
- * "this one needs you", so the wider match costs nothing and covers tenants on other paths.
+ * Host and path must both match. This keeps vendor pages, search routes, and unrelated Oracle Cloud
+ * products from inheriting an application capability or a misleading handoff notice.
  */
 export function gatedPortalNotice(
   hostname = window.location.hostname,
   pathname = window.location.pathname,
   search = window.location.search,
 ): string | null {
-  const portal = GATED_PORTALS.find((candidate) => candidate.host(hostname));
+  const portal = GATED_PORTALS.find((candidate) => candidate.host(hostname) && candidate.path(pathname));
+  if (!portal) return null;
   if (portal?.id !== 'sap_successfactors') return portal?.notice ?? null;
-  if (!/^\/(?:sfcareer\/jobreqcareer|career|portalcareer)\/?$/i.test(pathname)) return null;
   const query = new URLSearchParams(search);
   const jobId = query.get('jobId') ?? query.get('career_job_req_id') ?? query.get('job_application');
   const company = query.get('company');

@@ -99,6 +99,10 @@ export default defineContentScript({
     // hosts, and only recognition is enabled because the application itself is account-walled.
     'https://*.successfactors.com/*',
     'https://*.successfactors.eu/*',
+    // SmartRecruiters public postings and one-click forms share this exact host. The adapter fills
+    // only the one-click form and is permanently denied programmatic submit because later steps
+    // contain tenant-specific questions and confirmation.
+    'https://jobs.smartrecruiters.com/*',
     // The four below have no adapter and never will until their gates change. They are matched so
     // Litos can RECOGNISE the page and say plainly why it cannot fill it, which is worth more to a
     // job seeker than a card that never appears. See gatedPortalNotice.
@@ -381,11 +385,16 @@ export default defineContentScript({
         const title = document.querySelector<HTMLElement>('h1')?.textContent?.trim()
           ?? (h === 'www.comeet.co' ? referrerParts.at(-2)?.replace(/[-_]+/g, ' ') : undefined)
           ?? document.title.replace(/^apply\s*[-|]\s*/i, '').trim();
-        const tenant = h === 'ats.rippling.com'
-          ? window.location.pathname.split('/').filter(Boolean)[0]
-          : h === 'www.comeet.co'
-            ? new URLSearchParams(window.location.search).get('company-name') ?? referrerParts[1]
-            : h.split('.')[0];
+        const smartRecruitersCompany = h === 'jobs.smartrecruiters.com'
+          ? window.location.pathname.split('/').filter(Boolean).find((_part, index, parts) => parts[index - 1] === 'company')
+            ?? window.location.pathname.split('/').filter(Boolean)[0]
+          : undefined;
+        const tenant = smartRecruitersCompany
+          ?? (h === 'ats.rippling.com'
+            ? window.location.pathname.split('/').filter(Boolean)[0]
+            : h === 'www.comeet.co'
+              ? new URLSearchParams(window.location.search).get('company-name') ?? referrerParts[1]
+              : h.split('.')[0]);
         const company = bullhornEmployerName(h)
           ?? document.querySelector<HTMLMetaElement>('meta[property="og:site_name"]')?.content?.trim()
           ?? (tenant ? tenant.replace(/[-_]+/g, ' ').trim() : undefined);
