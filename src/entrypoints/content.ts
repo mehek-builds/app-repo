@@ -63,8 +63,8 @@ import {
 } from '../lib/workday-account-copy';
 import { bullhornEmployerName, contentInitRoute } from '../lib/content-init-routing';
 import { smartRecruitersApplicationUrl } from '../lib/web-handoff';
-import { reviewedQuestionsForHandoff, type HandoffQuestion } from '../lib/handoff-packet';
-import { frozenAnswerForQuestion, replayReviewedAnswers } from '../lib/reviewed-answer-replay';
+import { reviewedQuestionsForHandoff, validHandoffVersion, type HandoffQuestion } from '../lib/handoff-packet';
+import { frozenAnswerForQuestion, replayReviewedAnswers, reviewedAnswersMatch } from '../lib/reviewed-answer-replay';
 import {
   fillWorkdayVerificationCode,
   findWorkdayAccountSubmit,
@@ -251,13 +251,24 @@ export default defineContentScript({
       controller.scan();
     }
 
-    function armManualSubmissionTracking(submitButton: HTMLElement, applicationId: string, statusEl: HTMLElement | null, atsName: string) {
+    function armManualSubmissionTracking(
+      submitButton: HTMLElement,
+      applicationId: string,
+      statusEl: HTMLElement | null,
+      atsName: string,
+      submissionGuard: () => string | null = () => null,
+    ) {
       let reserving = false;
       const onClick = (event: MouseEvent) => {
         if (!event.isTrusted) return;
         event.preventDefault();
         event.stopImmediatePropagation();
         if (reserving) return;
+        const guardError = submissionGuard();
+        if (guardError) {
+          if (statusEl) statusEl.textContent = guardError;
+          return;
+        }
         // This click was already swallowed by the preventDefault above, so a bare return here is a
         // dead Submit button: nothing sends, the page's own validation never runs, and the student
         // gets no reason. Say which state she is in. Reachable whenever a required control is
@@ -281,11 +292,13 @@ export default defineContentScript({
             return;
           }
           const challengeNow = captchaWaiting || detectChallenge().waiting;
+          const replayGuardError = submissionGuard();
           const replaySafe = submitButton.isConnected
             && isElementVisible(submitButton)
             && !document.hidden
             && document.hasFocus()
             && !challengeNow
+            && !replayGuardError
             && !hasEmptyRequiredFields()
             && findProgrammaticFinalSubmitButton(atsName) === submitButton;
           const clicked = replaySafe && atsName === 'workday'
@@ -313,7 +326,7 @@ export default defineContentScript({
                 pendingRecoveryGate.endLocal(applicationId);
               });
             cancelReservation();
-            if (statusEl) statusEl.textContent = 'The application changed before submission. Review the final page and click Submit again.';
+            if (statusEl) statusEl.textContent = replayGuardError ?? 'The application changed before submission. Review the final page and click Submit again.';
             return;
           }
           submitButton.removeEventListener('click', onClick, true);
@@ -1319,6 +1332,7 @@ export default defineContentScript({
         announcerElement: announcerEl,
       });
       let handoffApplicationId: string | null = null;
+      let handoffFormUrl: string | null = null;
 
       // Must stay longer than the background's WHOLE budget so its descriptive error surfaces
       // first; this is only the backstop for the worse case where the service worker is torn down
@@ -1446,7 +1460,17 @@ export default defineContentScript({
           return;
         }
         const { profile, applicationProfile, resume } = result;
-        const frozenHandoffQuestions = handoffApplicationId ? reviewedQuestionsForHandoff(resume) : [];
+        const parsedHandoffQuestions = handoffApplicationId ? reviewedQuestionsForHandoff(resume) : [];
+        if (handoffApplicationId && (!validHandoffVersion(resume.handoff_version) || parsedHandoffQuestions === null)) {
+          if (statusEl) statusEl.textContent = 'The saved application packet is incomplete, so Litos did not touch this form.';
+          generationController.announce('The saved application packet needs to be prepared again.');
+          if (yesBtn) {
+            yesBtn.disabled = false;
+            yesBtn.textContent = 'Retry';
+          }
+          return;
+        }
+        const frozenHandoffQuestions = parsedHandoffQuestions ?? [];
         const applicantEmail = applicantEmailForGeneratedPacket(resume, profile.email);
         if (!applicantEmail) {
           if (statusEl) statusEl.textContent = 'Litos could not preserve one email across the resume and application, so nothing was filled.';
@@ -1583,13 +1607,25 @@ export default defineContentScript({
         if (!resumeBlob) {
           fillResult.skipped_reasons.push(resumeFetchSkipReason);
         }
-        if (handoffApplicationId && frozenHandoffQuestions.length > 0) {
+        let frozenAnswerReplayFailed = false;
+        if (handoffApplicationId) {
           const replay = replayReviewedAnswers(document, frozenHandoffQuestions);
+          frozenAnswerReplayFailed = replay.failed.length > 0;
           for (const questionId of replay.failed) {
             const question = frozenHandoffQuestions.find((item) => item.id === questionId);
             if (question) fillResult.skipped_reasons.push(`saved answer: ${question.question}`);
           }
         }
+        const handoffSubmissionGuard = (): string | null => {
+          if (!handoffApplicationId) return null;
+          if (!handoffFormUrl || window.location.href !== handoffFormUrl) {
+            return 'The company form changed after the exact packet was loaded. Return to Litos and retry it.';
+          }
+          if (frozenAnswerReplayFailed || reviewedAnswersMatch(document, frozenHandoffQuestions).failed.length > 0) {
+            return 'A saved reviewed answer could not be replayed exactly. Nothing was sent.';
+          }
+          return null;
+        };
 
         const autoSubmitOn = await serverAutoSubmitEnabled();
         const finalSubmitBtn = findProgrammaticFinalSubmitButton(fillResult.ats_name);
@@ -1688,15 +1724,16 @@ export default defineContentScript({
         const autoSubmitHeld =
           autoSubmitOn &&
           (!atsCanAutoSubmit(fillResult.ats_name) || !finalSubmitBtn || resumeMissing || needsReview
+            || Boolean(handoffSubmissionGuard())
             || hasEmptyRequiredFields() || hasApplicationDecisionControls() || document.hidden || captchaWaiting);
         reportEvent(false);
 
         if (autoSubmitOn && !autoSubmitHeld && finalSubmitBtn) {
-          runAutoSubmitCountdown(card, statusEl, yesBtn, noBtn, finalSubmitBtn, fillResult, resume.resume_id, reportEvent, 'Submitting');
+          runAutoSubmitCountdown(card, statusEl, yesBtn, noBtn, finalSubmitBtn, fillResult, resume.resume_id, reportEvent, 'Submitting', handoffSubmissionGuard);
           return;
         }
 
-        if (finalSubmitBtn) armManualSubmissionTracking(finalSubmitBtn, resume.resume_id, statusEl, fillResult.ats_name);
+        if (finalSubmitBtn) armManualSubmissionTracking(finalSubmitBtn, resume.resume_id, statusEl, fillResult.ats_name, handoffSubmissionGuard);
 
         const dashboardQuestions: HandoffQuestion[] = [
           ...frozenHandoffQuestions,
@@ -1711,6 +1748,8 @@ export default defineContentScript({
         ].filter((question, index, all) => all.findIndex((candidate) => candidate.id === question.id) === index);
 
         submitFromDashboard = async (approvedQuestions) => {
+          const handoffGuardError = handoffSubmissionGuard();
+          if (handoffGuardError) return { ok: false, error: handoffGuardError };
           if (!atsCanAutoSubmit(fillResult.ats_name)) {
             return { ok: false, error: 'This application needs your direct confirmation on the company page. Nothing was sent.' };
           }
@@ -1742,6 +1781,8 @@ export default defineContentScript({
           if (findProgrammaticFinalSubmitButton(fillResult.ats_name) !== finalSubmitBtn) {
             return { ok: false, error: 'The company page no longer shows the exact reviewed final submit control. Nothing was sent.' };
           }
+          const finalHandoffGuardError = handoffSubmissionGuard();
+          if (finalHandoffGuardError) return { ok: false, error: finalHandoffGuardError };
           if (!clickDashboardSubmitIfAllowed(fillResult.ats_name, finalSubmitBtn)) {
             return { ok: false, error: 'This application needs your direct confirmation on the company page. Nothing was sent.' };
           }
@@ -1791,6 +1832,7 @@ export default defineContentScript({
         (response: { armed?: boolean; applicationId?: string } | undefined) => {
           if (chrome.runtime.lastError || !response?.armed) return;
           if (response.applicationId) handoffApplicationId = response.applicationId;
+          if (response.applicationId) handoffFormUrl = window.location.href;
           if (!card.isConnected) return;
           const yesBtn = card.querySelector<HTMLButtonElement>('#wp-resume-yes');
           if (!yesBtn || yesBtn.disabled) return;
@@ -1825,6 +1867,7 @@ export default defineContentScript({
       applicationId: string,
       reportEvent: (autoSubmitted: boolean) => void,
       actionLabel: string,
+      submissionGuard: () => string | null = () => null,
     ) {
       // Tear down any countdown already running before standing up a new one. Combined with the SPA
       // navigation handler (which also calls this), there is never an orphaned interval/overlay or a
@@ -2008,12 +2051,14 @@ export default defineContentScript({
           // Re-detected live rather than trusting the flag: a challenge can mount at any point in
           // the countdown window, and this is the last moment before the click.
           const challengeNow = captchaWaiting || detectChallenge().waiting;
+          const handoffGuardError = submissionGuard();
           const portalStillSafe =
             target instanceof HTMLElement &&
             target.isConnected &&
             isElementVisible(target) &&
             tabActive &&
             !challengeNow &&
+            !handoffGuardError &&
             !hasApplicationDecisionControls() &&
             findProgrammaticFinalSubmitButton(fillResult.ats_name) === target &&
             (fillResult.ats_name !== 'workday' || workdayProgrammaticFinalSubmitAllowed(target)) &&
@@ -2022,11 +2067,12 @@ export default defineContentScript({
             cleanupChrome();
             restoreSubmitButton();
             if (statusEl) {
-              statusEl.textContent = challengeNow
+              statusEl.textContent = handoffGuardError
+                ?? (challengeNow
                 ? 'This company asks you to prove you are human, so Litos held off. Solve the check, then send it yourself.'
                 : tabActive
                   ? 'The page changed at the last moment. Check it over, then send it yourself.'
-                  : 'You were on another tab, so Litos held off. Open this one and send it yourself.';
+                  : 'You were on another tab, so Litos held off. Open this one and send it yourself.');
             }
             reportEvent(false);
             setTimeout(() => card.remove(), 2000);
@@ -2043,6 +2089,7 @@ export default defineContentScript({
             const stillSafe = target.isConnected && isElementVisible(target) && !document.hidden && document.hasFocus()
               && !captchaWaiting && !detectChallenge().waiting && !hasEmptyRequiredFields()
               && !hasApplicationDecisionControls()
+              && !submissionGuard()
               && findProgrammaticFinalSubmitButton(fillResult.ats_name) === target
               && (fillResult.ats_name !== 'workday' || workdayProgrammaticFinalSubmitAllowed(target));
             cleanupChrome();
@@ -2060,6 +2107,7 @@ export default defineContentScript({
                 const safeAfterReservation = target.isConnected && isElementVisible(target) && !document.hidden && document.hasFocus()
                   && !captchaWaiting && !detectChallenge().waiting && !hasEmptyRequiredFields()
                   && !hasApplicationDecisionControls()
+                  && !submissionGuard()
                   && findProgrammaticFinalSubmitButton(fillResult.ats_name) === target
                   && (fillResult.ats_name !== 'workday' || workdayProgrammaticFinalSubmitAllowed(target));
                 if (started.ok && safeAfterReservation) {
@@ -2517,25 +2565,19 @@ export default defineContentScript({
           });
           return;
         }
-        chrome.runtime.sendMessage(
-          { type: 'CLAIM_HANDOFF', url: window.location.href },
-          (response: { armed?: boolean; applicationId?: string } | undefined) => {
-            if (chrome.runtime.lastError || !response?.armed || !response.applicationId) {
-              chrome.runtime.sendMessage({
-                type: 'JOB_DETECTED',
-                payload: { title: job.title, company: job.company, url: window.location.href },
-              });
-              return;
-            }
-            chrome.runtime.sendMessage({
-              type: 'CONTINUE_SMARTRECRUITERS_HANDOFF',
-              targetUrl,
-              applicationId: response.applicationId,
-            }, (continued: { ok?: boolean } | undefined) => {
-              if (continued?.ok) window.location.assign(targetUrl);
-            });
-          },
-        );
+        chrome.runtime.sendMessage({
+          type: 'CONTINUE_SMARTRECRUITERS_HANDOFF',
+          targetUrl,
+        }, (continued: { ok?: boolean } | undefined) => {
+          if (continued?.ok) {
+            window.location.assign(targetUrl);
+            return;
+          }
+          chrome.runtime.sendMessage({
+            type: 'JOB_DETECTED',
+            payload: { title: job.title, company: job.company, url: window.location.href },
+          });
+        });
         return;
       }
 

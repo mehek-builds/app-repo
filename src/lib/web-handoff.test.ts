@@ -7,6 +7,7 @@ import {
   handoffKey,
   handoffMatches,
   pruneArmed,
+  continueSmartRecruitersHandoff,
   smartRecruitersApplicationUrl,
   smartRecruitersContinuationAllowed,
 } from './web-handoff';
@@ -68,6 +69,20 @@ describe('SmartRecruiters handoff continuation', () => {
       'http://jobs.smartrecruiters.com/oneclick-ui/company/x/publication/123e4567-e89b-12d3-a456-426614174000',
       'https://jobs.smartrecruiters.com/oneclick-ui/company/OtherEmployer/publication/123e4567-e89b-12d3-a456-426614174000',
     ])).toBeNull();
+  });
+
+  it('moves only the packet id atomically claimed from the exact armed posting', () => {
+    const armed = armHandoffs([], [{ url: posting, applicationId: 'packet-seeka' }], NOW);
+    const continued = continueSmartRecruitersHandoff(armed, posting, form, NOW + 1);
+    expect(continued.applicationId).toBe('packet-seeka');
+    expect(claimArmed(continued.remaining, form, NOW + 2).claimed?.applicationId).toBe('packet-seeka');
+  });
+
+  it('does not continue a different posting or accept an unarmed caller-selected packet', () => {
+    const otherPosting = 'https://jobs.smartrecruiters.com/SeekaTechnology/744000063648999-another-role';
+    const armed = armHandoffs([], [{ url: posting, applicationId: 'packet-seeka' }], NOW);
+    expect(continueSmartRecruitersHandoff(armed, otherPosting, form, NOW + 1).applicationId).toBeNull();
+    expect(continueSmartRecruitersHandoff([], posting, form, NOW + 1).applicationId).toBeNull();
   });
 });
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { reviewedQuestionsForHandoff } from './handoff-packet';
+import { reviewedQuestionsForHandoff, validHandoffVersion } from './handoff-packet';
 import type { GeneratedResume } from './types';
 
 function packet(spec: unknown): GeneratedResume {
@@ -47,7 +47,15 @@ describe('reviewedQuestionsForHandoff', () => {
     }]);
   });
 
-  it('refuses malformed packet question data instead of inventing an answer', () => {
-    expect(reviewedQuestionsForHandoff(packet({ _review: { questions: [{ id: 'q', question: 'Missing answer' }] } }))).toEqual([]);
+  it('distinguishes an explicitly empty review from a malformed or missing answer map', () => {
+    expect(reviewedQuestionsForHandoff(packet({ _review: { questions: [] } }))).toEqual([]);
+    expect(reviewedQuestionsForHandoff(packet({ _review: { questions: [{ id: 'q', question: 'Missing answer' }] } }))).toBeNull();
+    expect(reviewedQuestionsForHandoff(packet({ _review: {} }))).toBeNull();
+  });
+
+  it('accepts only the immutable backend handoff version shape', () => {
+    expect(validHandoffVersion('a'.repeat(64))).toBe(true);
+    expect(validHandoffVersion('A'.repeat(64))).toBe(false);
+    expect(validHandoffVersion('a'.repeat(63))).toBe(false);
   });
 });

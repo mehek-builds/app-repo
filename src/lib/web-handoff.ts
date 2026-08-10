@@ -104,6 +104,35 @@ export function smartRecruitersContinuationAllowed(sourceUrl: string, targetUrl:
   return smartRecruitersApplicationUrl(sourceUrl, [targetUrl]) === targetUrl;
 }
 
+/**
+ * Consume the exact armed SmartRecruiters posting and re-arm only the one-click URL exposed by
+ * that page. The application id always comes from the claimed dashboard arming. A content script
+ * cannot choose a different packet id while asking the background to continue the handoff.
+ */
+export function continueSmartRecruitersHandoff(
+  entries: readonly ArmedHandoff[],
+  sourceUrl: string,
+  targetUrl: string,
+  now: number,
+): { applicationId: string | null; remaining: ArmedHandoff[] } {
+  const live = pruneArmed(entries, now);
+  if (!smartRecruitersContinuationAllowed(sourceUrl, targetUrl)) {
+    return { applicationId: null, remaining: live };
+  }
+  const claimed = claimArmed(live, sourceUrl, now);
+  if (!claimed.claimed?.applicationId) {
+    return { applicationId: null, remaining: claimed.remaining };
+  }
+  return {
+    applicationId: claimed.claimed.applicationId,
+    remaining: armHandoffs(
+      claimed.remaining,
+      [{ url: targetUrl, applicationId: claimed.claimed.applicationId }],
+      now,
+    ),
+  };
+}
+
 /** Drop armings that have aged out. Called on every read so the store cannot grow without bound. */
 export function pruneArmed(entries: readonly ArmedHandoff[], now: number): ArmedHandoff[] {
   return entries.filter((entry) => now - entry.armedAt < ARMED_HANDOFF_TTL_MS);

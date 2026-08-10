@@ -18,6 +18,9 @@ describe('SmartRecruiters exact packet attended handoff', () => {
   it('replays frozen answers and never redrafts an attended packet question', () => {
     expect(content).toMatch(/if \(handoffApplicationId\) \{[\s\S]*?frozenAnswerForQuestion\(frozenHandoffQuestions, question\)/);
     expect(content).toMatch(/replayReviewedAnswers\(document, frozenHandoffQuestions\)/);
+    expect(content).toMatch(/reviewedAnswersMatch\(document, frozenHandoffQuestions\)\.failed\.length/);
+    expect(content).toMatch(/armManualSubmissionTracking\([^;]*handoffSubmissionGuard\)/);
+    expect(content).toMatch(/submitFromDashboard = async[\s\S]*?handoffSubmissionGuard\(\)/);
   });
 
   it('does not touch a form when the backend rejects the authoritative current URL', () => {
@@ -35,7 +38,17 @@ describe('SmartRecruiters exact packet attended handoff', () => {
 
   it('rearms the one-click form before navigating away from the posting', () => {
     expect(content).toMatch(/CONTINUE_SMARTRECRUITERS_HANDOFF[\s\S]*?window\.location\.assign\(targetUrl\)/);
-    expect(background).toMatch(/case 'CONTINUE_SMARTRECRUITERS_HANDOFF'[\s\S]*?smartRecruitersContinuationAllowed/);
+    expect(background).toMatch(/case 'CONTINUE_SMARTRECRUITERS_HANDOFF'[\s\S]*?continueSmartRecruitersHandoff\(entries, sourceUrl, targetUrl/);
+    const continuation = content.slice(content.indexOf("type: 'CONTINUE_SMARTRECRUITERS_HANDOFF'"));
+    expect(continuation.slice(0, continuation.indexOf('});') + 3)).not.toMatch(/applicationId/);
+  });
+
+  it('pins the exact immutable packet version through manual and dashboard starts', () => {
+    expect(background).toMatch(/validHandoffVersion\(resume\.handoff_version\)[\s\S]*?storeHandoffPacketBinding/);
+    expect(background).toMatch(/case 'EXTENSION_SUBMISSION_START'[\s\S]*?handoff_version: binding\.handoffVersion[\s\S]*?current_url: binding\.currentUrl/);
+    const dashboardStart = background.slice(background.indexOf("if (message?.type !== 'LITOS_SUBMIT_APPLICATION')"));
+    expect(dashboardStart).toMatch(/handoff_version: handoffVersion[\s\S]*?current_url: currentUrl/);
+    expect(background).toMatch(/if \(!handoffBinding\) \{[\s\S]*?review handoff failed/);
   });
 
   it('downloads and uploads the exact generated PDF through the SmartRecruiters file control', () => {
