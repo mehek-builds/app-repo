@@ -55,6 +55,22 @@ describe('reviewed answer replay', () => {
     expect(input.value).toBe('Exact reviewed answer');
   });
 
+  it('replays an exact SmartRecruiters radio group inside open shadow DOM', () => {
+    const host = document.createElement('spl-radio-group');
+    const shadow = host.attachShadow({ mode: 'open' });
+    shadow.innerHTML = `
+      <fieldset><legend>Work authorization</legend>
+        <label><input id="shadow-auth-yes" name="shadow-auth" type="radio" value="yes" aria-label="Work authorization">Yes</label>
+        <label><input name="shadow-auth" type="radio" value="no" aria-label="Work authorization">No</label>
+      </fieldset>
+    `;
+    document.body.appendChild(host);
+    const shadowQuestion = [{ ...questions[1], portal_selector: '#shadow-auth-yes' }];
+    expect(replayReviewedAnswers(document, shadowQuestion)).toEqual({ applied: ['choice'], failed: [] });
+    expect((shadow.querySelector('#shadow-auth-yes') as HTMLInputElement).checked).toBe(true);
+    expect(reviewedAnswersMatch(document, shadowQuestion)).toEqual({ matched: ['choice'], failed: [] });
+  });
+
   it('fails closed for optional and required custom answers that cannot be replayed', () => {
     const optional = { ...questions[0], id: 'optional', required: false, portal_selector: '#gone' };
     const required = { ...questions[0], id: 'required', required: true, portal_selector: '#also-gone' };

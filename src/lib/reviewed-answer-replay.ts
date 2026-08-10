@@ -125,7 +125,8 @@ function replayOne(root: Document, question: HandoffQuestion): boolean {
   if (['file', 'password', 'submit', 'button', 'reset', 'image', 'hidden'].includes(control.type)) return false;
   if (control.type === 'radio') {
     const candidates = control.name
-      ? [...root.querySelectorAll<HTMLInputElement>('input[type="radio"]')].filter((item) => item.name === control.name)
+      ? queryAcrossRoots(root, 'input[type="radio"]').filter((item): item is HTMLInputElement =>
+        item instanceof HTMLInputElement && item.name === control.name)
       : [control];
     const answer = normalized(question.answer);
     const option = candidates.find((item) => optionText(item) === answer || optionText(item).split(' ').includes(answer));

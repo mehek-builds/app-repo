@@ -31,7 +31,7 @@ describe('automatic submission runtime wiring', () => {
   });
 
   it('rechecks live application decisions and the exact final control on every programmatic route', () => {
-    const dashboard = content.match(/submitFromDashboard = async[\s\S]*?chrome\.runtime\.sendMessage\(\{\s*type: 'APPLICATION_REVIEW_READY'/)?.[0] ?? '';
+    const dashboard = content.match(/submitFromDashboard = async[\s\S]*?\/\* The attended handoff/)?.[0] ?? '';
     expect(dashboard).toContain('hasApplicationDecisionControls()');
     expect(dashboard).toContain('findProgrammaticFinalSubmitButton(fillResult.ats_name) !== finalSubmitBtn');
 

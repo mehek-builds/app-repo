@@ -66,6 +66,92 @@ export function handoffMatches(armedKey: string, pageKey: string): boolean {
   return pageKey.startsWith(`${armedKey}/`) || armedKey.startsWith(`${pageKey}/`);
 }
 
+/** Exact application-form identity used after a packet has been frozen. */
+export function applicationFormIdentityKey(raw: string): string | null {
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== 'https:') return null;
+    const host = url.hostname.toLowerCase();
+    const path = url.pathname.replace(/\/+$/, '');
+    const clearNoise = () => {
+      url.search = '';
+      url.hash = '';
+      url.pathname = path;
+      return url.toString();
+    };
+    if (host.includes('lever.co') || host.includes('jobs.personio.')) {
+      url.pathname = path.replace(/\/apply$/i, '');
+      url.search = '';
+      url.hash = '';
+      return url.toString();
+    }
+    if (host.includes('jobvite.com')) {
+      url.pathname = path.replace(/\/apply$/i, '');
+      url.search = '';
+      url.hash = '';
+      return url.toString();
+    }
+    if (host.includes('recruitee.com')) {
+      url.pathname = path.replace(/\/c\/new$/i, '');
+      url.search = '';
+      url.hash = '';
+      return url.toString();
+    }
+    if (host.includes('teamtailor.com') || host.includes('pinpointhq.com')) {
+      url.pathname = path.replace(/\/applications\/new$/i, '');
+      url.search = '';
+      url.hash = '';
+      return url.toString();
+    }
+    if (host.includes('smartrecruiters.com') || host.includes('icims.com') || host.includes('zohorecruit.')) return clearNoise();
+    if (host.includes('applytojob.com') || host.includes('bamboohr.com') || host.includes('oraclecloud.com')) return clearNoise();
+    if (host.includes('greenhouse.io')) {
+      const token = url.searchParams.get('token');
+      const board = url.searchParams.get('for');
+      if (token) return `${url.origin}${path}?${board ? `for=${encodeURIComponent(board)}&` : ''}token=${encodeURIComponent(token)}`;
+      return clearNoise();
+    }
+    const embeddedGreenhouseJob = url.searchParams.get('gh_jid');
+    if (embeddedGreenhouseJob) return `${url.origin}${path}?gh_jid=${encodeURIComponent(embeddedGreenhouseJob)}`;
+    if (host.includes('bullhorn') || path.includes('/wp-content/plugins/bullhorn-oscp')) {
+      const jobId = url.hash.match(/^#\/jobs\/(\d+)/i)?.[1];
+      return jobId ? `${url.origin}/wp-content/plugins/bullhorn-oscp/#/jobs/${jobId}` : null;
+    }
+    if (host.includes('successfactors.')) {
+      const jobId = url.searchParams.get('jobId') ?? url.searchParams.get('career_job_req_id') ?? url.searchParams.get('job_application');
+      const company = url.searchParams.get('company');
+      return jobId && company ? `${url.origin}/sfcareer/jobreqcareer?jobId=${encodeURIComponent(jobId)}&company=${encodeURIComponent(company)}` : null;
+    }
+    if (host.includes('taleo.net')) {
+      const job = url.searchParams.get('job');
+      return job ? `${url.origin}${path}?job=${encodeURIComponent(job)}&lang=en` : null;
+    }
+    if (host.includes('myjobs.adp.com')) {
+      const reqId = url.searchParams.get('reqId');
+      return reqId ? `${url.origin}${path}?reqId=${encodeURIComponent(reqId)}` : null;
+    }
+    if (host.includes('ultipro.com')) {
+      const opportunityId = url.searchParams.get('opportunityId');
+      return opportunityId ? `${url.origin}${path}?opportunityId=${encodeURIComponent(opportunityId)}` : `${url.origin}${path}`;
+    }
+    if (host.includes('avature.net')) {
+      const jobId = url.searchParams.get('jobId');
+      return jobId && !/\/JobDetail\/[^/]+\/\d+$/i.test(path)
+        ? `${url.origin}${path}?jobId=${encodeURIComponent(jobId)}`
+        : `${url.origin}${path}`;
+    }
+    // Preserve identity-bearing query keys, but mirror the backend's narrow tracking allowlist.
+    for (const key of [...url.searchParams.keys()]) {
+      if (/^utm_/i.test(key)) url.searchParams.delete(key);
+    }
+    url.hash = '';
+    url.pathname = path;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
 const SMARTRECRUITERS_ONE_CLICK_PATH = /^\/oneclick-ui\/company\/[a-z0-9._-]+\/publication\/[0-9a-f-]{36}\/?$/i;
 
 /**

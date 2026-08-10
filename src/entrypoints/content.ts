@@ -62,7 +62,7 @@ import {
   workdayAccountCompletion,
 } from '../lib/workday-account-copy';
 import { bullhornEmployerName, contentInitRoute } from '../lib/content-init-routing';
-import { smartRecruitersApplicationUrl } from '../lib/web-handoff';
+import { applicationFormIdentityKey, smartRecruitersApplicationUrl } from '../lib/web-handoff';
 import { reviewedQuestionsForHandoff, validHandoffVersion, type HandoffQuestion } from '../lib/handoff-packet';
 import { frozenAnswerForQuestion, replayReviewedAnswers, reviewedAnswersMatch } from '../lib/reviewed-answer-replay';
 import {
@@ -375,8 +375,23 @@ export default defineContentScript({
     let cardInjected = false;
     let approved = false; // true once user taps "Yes" on either card
     let submitFromDashboard: ((questions: Array<{ id: string; question: string; answer: string }>) => Promise<{ ok: boolean; clicked?: boolean; error?: string; finalUrl?: string; confirmationText?: string }>) | null = null;
+    let prepareSubmissionFromDashboard: ((resume: GeneratedResume, expectedUrl: string) => Promise<string | null>) | null = null;
 
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+      if (message?.type === 'GET_CURRENT_APPLICATION_URL') {
+        sendResponse({ url: window.location.href });
+        return false;
+      }
+      if (message?.type === 'PREPARE_SUBMISSION_FROM_DASHBOARD') {
+        if (!prepareSubmissionFromDashboard || !message.payload?.resume) {
+          sendResponse({ ok: false, error: 'This page is not ready to verify the saved application packet.' });
+          return false;
+        }
+        prepareSubmissionFromDashboard(message.payload.resume as GeneratedResume, String(message.payload.expectedUrl ?? ''))
+          .then((error) => sendResponse(error ? { ok: false, error } : { ok: true }))
+          .catch(() => sendResponse({ ok: false, error: 'The exact application packet could not be verified. Nothing was sent.' }));
+        return true;
+      }
       if (message?.type !== 'SUBMIT_FROM_DASHBOARD') return false;
       if (!submitFromDashboard) {
         sendResponse({ ok: false, error: 'This page is not ready to send any more. Open it and check it.' });
@@ -1471,7 +1486,9 @@ export default defineContentScript({
           }
           return;
         }
-        const frozenHandoffQuestions = parsedHandoffQuestions ?? [];
+        let frozenHandoffQuestions = parsedHandoffQuestions ?? [];
+        let exactSubmissionReady = false;
+        let frozenAnswerReplayFailed = false;
         const applicantEmail = applicantEmailForGeneratedPacket(resume, profile.email);
         if (!applicantEmail) {
           if (statusEl) statusEl.textContent = 'Litos could not preserve one email across the resume and application, so nothing was filled.';
@@ -1519,16 +1536,16 @@ export default defineContentScript({
         // labels recorded by this fill.
         drainR030CandidateLabels();
         const draftedQuestions: Array<{ id: string; question: string; answer: string; kind: 'essay'; required: boolean }> = [];
+        const fillApplicationProfile: ApplicationProfile = {
+          ...applicationProfile,
+          school: applicationProfile.school ?? profile.school,
+          degree: applicationProfile.degree ?? profile.degree,
+          grad_date: applicationProfile.grad_date ?? profile.grad_date,
+          grad_year: applicationProfile.grad_year ?? profile.grad_year,
+          currently_enrolled: applicationProfile.currently_enrolled ?? profile.currently_enrolled,
+        };
         let fillResult: AutofillResult;
         try {
-          const fillApplicationProfile: ApplicationProfile = {
-            ...applicationProfile,
-            school: applicationProfile.school ?? profile.school,
-            degree: applicationProfile.degree ?? profile.degree,
-            grad_date: applicationProfile.grad_date ?? profile.grad_date,
-            grad_year: applicationProfile.grad_year ?? profile.grad_year,
-            currently_enrolled: applicationProfile.currently_enrolled ?? profile.currently_enrolled,
-          };
           fillResult = await withInactivityTimeout(
             (reportProgress, signal) => fill({
               fullName: profile.full_name ?? '',
@@ -1608,7 +1625,53 @@ export default defineContentScript({
         if (!resumeBlob) {
           fillResult.skipped_reasons.push(resumeFetchSkipReason);
         }
-        let frozenAnswerReplayFailed = false;
+        type AttachedResumeEvidence = { input: HTMLInputElement; file: File; digest: string };
+        const fileInputsAcrossOpenRoots = (): HTMLInputElement[] => {
+          const roots: Array<Document | ShadowRoot> = [document];
+          const inputs: HTMLInputElement[] = [];
+          for (let index = 0; index < roots.length; index += 1) {
+            for (const element of roots[index].querySelectorAll<HTMLElement>('*')) {
+              if (element.shadowRoot && !roots.includes(element.shadowRoot)) roots.push(element.shadowRoot);
+            }
+            for (const input of roots[index].querySelectorAll<HTMLInputElement>('input[type="file"]')) {
+              inputs.push(input);
+            }
+          }
+          return inputs;
+        };
+        const sha256 = async (blob: Blob): Promise<string> => {
+          const bytes = await blob.arrayBuffer();
+          const digest = await crypto.subtle.digest('SHA-256', bytes);
+          return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+        };
+        const resumeFileInputs = (): HTMLInputElement[] => {
+          const inputs = fileInputsAcrossOpenRoots();
+          if (inputs.length === 1) return inputs;
+          return inputs.filter((input) => {
+            const container = input.closest('label, [data-test], fieldset');
+            const text = [
+              input.name,
+              input.id,
+              input.getAttribute('aria-label') ?? '',
+              input.getAttribute('data-test') ?? '',
+              container?.getAttribute('data-test') ?? '',
+              container?.textContent ?? '',
+              ...Array.from(input.labels ?? []).map((label) => label.textContent ?? ''),
+            ].join(' ').toLowerCase();
+            return /\b(resume|résumé|cv)\b/.test(text) && !/cover\s*letter|portfolio/.test(text);
+          });
+        };
+        const exactAttachment = async (blob: Blob, fileName: string): Promise<AttachedResumeEvidence | null> => {
+          const expectedDigest = await sha256(blob);
+          for (const input of resumeFileInputs()) {
+            for (const file of Array.from(input.files ?? [])) {
+              if (file.name !== fileName || file.size !== blob.size) continue;
+              if (await sha256(file) === expectedDigest) return { input, file, digest: expectedDigest };
+            }
+          }
+          return null;
+        };
+        let exactAttachedResume: AttachedResumeEvidence | null = null;
         if (handoffApplicationId) {
           const replay = replayReviewedAnswers(document, frozenHandoffQuestions);
           frozenAnswerReplayFailed = replay.failed.length > 0;
@@ -1616,10 +1679,106 @@ export default defineContentScript({
             const question = frozenHandoffQuestions.find((item) => item.id === questionId);
             if (question) fillResult.skipped_reasons.push(`saved answer: ${question.question}`);
           }
+          exactAttachedResume = resumeBlob ? await exactAttachment(resumeBlob, resume.file_name) : null;
+          exactSubmissionReady = Boolean(exactAttachedResume) && !frozenAnswerReplayFailed
+            && reviewedAnswersMatch(document, frozenHandoffQuestions).failed.length === 0;
         }
+        const sameApplicationPage = (expected: string, current: string): boolean => {
+          const expectedKey = applicationFormIdentityKey(expected);
+          const currentKey = applicationFormIdentityKey(current);
+          return Boolean(expectedKey && currentKey && expectedKey === currentKey);
+        };
+        let latestAdoptionRequest = 0;
+        let adoptionTail: Promise<void> = Promise.resolve();
+        const adoptAuthoritativePacketImpl = async (
+          exactResume: GeneratedResume,
+          expectedUrl: string,
+          requestId: number,
+        ): Promise<string | null> => {
+          exactSubmissionReady = false;
+          frozenAnswerReplayFailed = true;
+          if (!expectedUrl || !sameApplicationPage(expectedUrl, window.location.href)) {
+            return 'The company form changed before the exact packet could be loaded. Nothing was sent.';
+          }
+          if (
+            exactResume.resume_id !== resume.resume_id
+            || exactResume.application?.id !== resume.resume_id
+            || !validHandoffVersion(exactResume.handoff_version)
+          ) return 'The saved application packet no longer matches this form. Nothing was sent.';
+          const exactQuestions = reviewedQuestionsForHandoff(exactResume);
+          if (exactQuestions === null) return 'The saved reviewed answers are incomplete. Nothing was sent.';
+          if (handoffFormUrl && !sameApplicationPage(handoffFormUrl, window.location.href)) {
+            return 'The company form changed after the exact packet was loaded. Return to Litos and retry it.';
+          }
+          const exactBlob = await fetchResumeBlob(exactResume.resume_url);
+          if (!exactBlob) return 'The exact reviewed resume could not be downloaded. Nothing was sent.';
+          if (!sameApplicationPage(expectedUrl, window.location.href)) {
+            return 'The company form changed while the exact resume was downloading. Nothing was sent.';
+          }
+          let refill: AutofillResult;
+          try {
+            refill = await withInactivityTimeout((reportProgress, signal) => fill({
+              fullName: profile.full_name ?? '',
+              email: applicantEmail,
+              profile,
+              applicationProfile: fillApplicationProfile,
+              resumeBlob: exactBlob,
+              resumeFileName: exactResume.file_name,
+              eeo: (fillApplicationProfile.eeo_prefs as Record<string, string> | undefined) ?? {},
+              postingCompensation: result.posting_compensation ?? null,
+              signal,
+              onProgress: () => reportProgress(),
+              draftAnswer: (question) => Promise.resolve(frozenAnswerForQuestion(exactQuestions, question)),
+            }), 90_000);
+          } catch {
+            return 'The exact application refill did not finish safely. Nothing was sent.';
+          }
+          if (requestId !== latestAdoptionRequest) return null;
+          if (!sameApplicationPage(expectedUrl, window.location.href)) {
+            return 'The company form changed while the exact packet was being replayed. Nothing was sent.';
+          }
+          if (refill.skipped_reasons.some((reason) => /^resume:/i.test(reason))) {
+            return 'The exact reviewed resume could not be attached. Nothing was sent.';
+          }
+          if (skippedReasonsNeedReview(refill.skipped_reasons, { allowGroundedDrafts: true })) {
+            return 'The company form changed and now needs another answer. Nothing was sent.';
+          }
+          exactAttachedResume = await exactAttachment(exactBlob, exactResume.file_name);
+          if (!exactAttachedResume) return 'The exact reviewed resume is not attached. Nothing was sent.';
+          if (requestId !== latestAdoptionRequest) {
+            exactAttachedResume = null;
+            return null;
+          }
+          if (!sameApplicationPage(expectedUrl, window.location.href)) {
+            exactAttachedResume = null;
+            return 'The company form changed while the exact packet was being verified. Nothing was sent.';
+          }
+          frozenHandoffQuestions = exactQuestions;
+          const replay = replayReviewedAnswers(document, frozenHandoffQuestions);
+          frozenAnswerReplayFailed = replay.failed.length > 0
+            || reviewedAnswersMatch(document, frozenHandoffQuestions).failed.length > 0;
+          if (frozenAnswerReplayFailed) return 'A saved reviewed answer could not be replayed exactly. Nothing was sent.';
+          handoffFormUrl = expectedUrl;
+          exactSubmissionReady = true;
+          return null;
+        };
+        const adoptAuthoritativePacket = (exactResume: GeneratedResume, expectedUrl: string): Promise<string | null> => {
+          const requestId = ++latestAdoptionRequest;
+          const run = adoptionTail.then(() => adoptAuthoritativePacketImpl(exactResume, expectedUrl, requestId));
+          adoptionTail = run.then(() => undefined, () => undefined);
+          return run.catch(() => 'The exact application packet could not be verified. Nothing was sent.');
+        };
+        prepareSubmissionFromDashboard = adoptAuthoritativePacket;
         const handoffSubmissionGuard = (): string | null => {
-          if (!handoffApplicationId) return null;
-          if (!handoffFormUrl || window.location.href !== handoffFormUrl) {
+          if (!exactSubmissionReady) return 'Litos has not verified the exact reviewed packet yet. Nothing was sent.';
+          if (
+            !exactAttachedResume
+            || !exactAttachedResume.input.isConnected
+            || !Array.from(exactAttachedResume.input.files ?? []).includes(exactAttachedResume.file)
+          ) {
+            return 'The exact reviewed resume was removed or replaced. Nothing was sent.';
+          }
+          if (!handoffFormUrl || !sameApplicationPage(handoffFormUrl, window.location.href)) {
             return 'The company form changed after the exact packet was loaded. Return to Litos and retry it.';
           }
           if (frozenAnswerReplayFailed || reviewedAnswersMatch(document, frozenHandoffQuestions).failed.length > 0) {
@@ -1711,6 +1870,61 @@ export default defineContentScript({
           return;
         }
 
+        const dashboardQuestions: HandoffQuestion[] = [
+          ...frozenHandoffQuestions,
+          ...draftedQuestions,
+          ...selectNeedsYouReasons(fillResult.skipped_reasons, 20).map((reason, index) => ({
+            id: `required-${index + 1}`,
+            question: reason,
+            answer: '',
+            kind: 'required' as const,
+            required: true,
+          })),
+        ].filter((question, index, all) => all.findIndex((candidate) => candidate.id === question.id) === index);
+        const otherwiseReadyForAutomaticSubmission = autoSubmitOn
+          && atsCanAutoSubmit(fillResult.ats_name)
+          && Boolean(finalSubmitBtn)
+          && !resumeMissing
+          && !needsReview
+          && !hasEmptyRequiredFields()
+          && !hasApplicationDecisionControls()
+          && !document.hidden
+          && !captchaWaiting;
+        const reviewCurrentUrl = window.location.href;
+        const reviewPreparationError = await new Promise<string | null>((resolve) => {
+          chrome.runtime.sendMessage({
+            type: 'APPLICATION_REVIEW_READY',
+            payload: {
+              applicationId: resume.resume_id,
+              atsName: fillResult.ats_name,
+              portalUrl: window.location.href,
+              attendedHandoff: Boolean(handoffApplicationId),
+              openDashboard: !otherwiseReadyForAutomaticSubmission,
+              questions: dashboardQuestions,
+              skippedReasons: fillResult.skipped_reasons,
+            },
+          }, (response: { ok?: boolean; error?: string; resume?: GeneratedResume } | undefined) => {
+            if (!response?.ok) {
+              resolve(response?.error ?? 'Could not prepare the exact application packet. Nothing was sent.');
+              return;
+            }
+            if (!response.resume) {
+              resolve(handoffApplicationId && exactSubmissionReady
+                ? null
+                : 'The exact application packet was not returned. Nothing was sent.');
+              return;
+            }
+            adoptAuthoritativePacket(response.resume, reviewCurrentUrl)
+              .then(resolve)
+              .catch(() => resolve('The exact application packet could not be verified. Nothing was sent.'));
+          });
+        });
+        if (reviewPreparationError) {
+          if (statusEl) statusEl.textContent = reviewPreparationError;
+          reportEvent(false);
+          return;
+        }
+
         // Auto-submit is opt-in (AutofillSetupScreen toggle, off by default) AND only fires when it
         // is actually safe: a real FINAL-submit button exists (not a "Next"/"Continue" step button,
         // which would advance a multi-step form and then falsely report a submit), the resume
@@ -1736,19 +1950,7 @@ export default defineContentScript({
 
         if (finalSubmitBtn) armManualSubmissionTracking(finalSubmitBtn, resume.resume_id, statusEl, fillResult.ats_name, handoffSubmissionGuard, Boolean(handoffApplicationId));
 
-        const dashboardQuestions: HandoffQuestion[] = [
-          ...frozenHandoffQuestions,
-          ...draftedQuestions,
-          ...selectNeedsYouReasons(fillResult.skipped_reasons, 20).map((reason, index) => ({
-            id: `required-${index + 1}`,
-            question: reason,
-            answer: '',
-            kind: 'required' as const,
-            required: true,
-          })),
-        ].filter((question, index, all) => all.findIndex((candidate) => candidate.id === question.id) === index);
-
-        submitFromDashboard = async (approvedQuestions) => {
+        submitFromDashboard = async (_approvedQuestions) => {
           const handoffGuardError = handoffSubmissionGuard();
           if (handoffGuardError) return { ok: false, error: handoffGuardError };
           if (!atsCanAutoSubmit(fillResult.ats_name)) {
@@ -1756,17 +1958,6 @@ export default defineContentScript({
           }
           if (!finalSubmitBtn || !finalSubmitBtn.isConnected) {
             return { ok: false, error: 'This page no longer has a Submit button. Finish it yourself.' };
-          }
-          for (const approvedQuestion of approvedQuestions) {
-            const original = draftedQuestions.find((item) => item.id === approvedQuestion.id);
-            if (!original || original.answer === approvedQuestion.answer) continue;
-            const target = [...document.querySelectorAll<HTMLTextAreaElement>('textarea')]
-              .find((field) => field.value.trim() === original.answer.trim());
-            if (!target) return { ok: false, error: `Could not apply the edited answer for: ${approvedQuestion.question}` };
-            const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
-            setter?.call(target, approvedQuestion.answer);
-            target.dispatchEvent(new Event('input', { bubbles: true }));
-            target.dispatchEvent(new Event('change', { bubbles: true }));
           }
           if (hasEmptyRequiredFields()) return { ok: false, error: 'Some required boxes are still empty. Fill them in, then send it.' };
           if (hasApplicationDecisionControls()) {
@@ -1798,22 +1989,9 @@ export default defineContentScript({
           return { ok: false, clicked: true, error: 'The company never confirmed it. Open the tab and check whether it went through.' };
         };
 
-        chrome.runtime.sendMessage({
-          type: 'APPLICATION_REVIEW_READY',
-          payload: {
-            applicationId: resume.resume_id,
-            atsName: fillResult.ats_name,
-            portalUrl: window.location.href,
-            attendedHandoff: Boolean(handoffApplicationId),
-            questions: dashboardQuestions,
-            skippedReasons: fillResult.skipped_reasons,
-          },
-        }, (response: { ok?: boolean; error?: string } | undefined) => {
-          if (!statusEl) return;
-          statusEl.textContent = response?.ok
-            ? 'Ready for you to check. This tab stays open.'
-            : response?.error ?? 'Could not open your review. Nothing was sent.';
-        });
+        if (statusEl && !otherwiseReadyForAutomaticSubmission) {
+          statusEl.textContent = 'Ready for you to check. This tab stays open.';
+        }
       });
 
       /* The attended handoff: "Finish this one" on the Litos dashboard.
