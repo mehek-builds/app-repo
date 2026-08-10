@@ -162,6 +162,8 @@ export interface GeneratedResume {
   resume_id: string;
   resume_url: string;
   file_name: string;
+  /** Immutable backend version for an attended extension handoff. */
+  handoff_version?: string;
   spec: unknown;
   application?: {
     id: string;

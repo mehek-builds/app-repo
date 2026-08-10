@@ -66,6 +66,159 @@ export function handoffMatches(armedKey: string, pageKey: string): boolean {
   return pageKey.startsWith(`${armedKey}/`) || armedKey.startsWith(`${pageKey}/`);
 }
 
+/** Exact application-form identity used after a packet has been frozen. */
+export function applicationFormIdentityKey(raw: string): string | null {
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== 'https:') return null;
+    const host = url.hostname.toLowerCase();
+    const path = url.pathname.replace(/\/+$/, '');
+    const clearNoise = () => {
+      url.search = '';
+      url.hash = '';
+      url.pathname = path;
+      return url.toString();
+    };
+    if (host.includes('lever.co') || host.includes('jobs.personio.')) {
+      url.pathname = path.replace(/\/apply$/i, '');
+      url.search = '';
+      url.hash = '';
+      return url.toString();
+    }
+    if (host.includes('jobvite.com')) {
+      url.pathname = path.replace(/\/apply$/i, '');
+      url.search = '';
+      url.hash = '';
+      return url.toString();
+    }
+    if (host.includes('recruitee.com')) {
+      url.pathname = path.replace(/\/c\/new$/i, '');
+      url.search = '';
+      url.hash = '';
+      return url.toString();
+    }
+    if (host.includes('teamtailor.com') || host.includes('pinpointhq.com')) {
+      url.pathname = path.replace(/\/applications\/new$/i, '');
+      url.search = '';
+      url.hash = '';
+      return url.toString();
+    }
+    if (host.includes('smartrecruiters.com') || host.includes('icims.com') || host.includes('zohorecruit.')) return clearNoise();
+    if (host.includes('applytojob.com') || host.includes('bamboohr.com') || host.includes('oraclecloud.com')) return clearNoise();
+    if (host.includes('greenhouse.io')) {
+      const token = url.searchParams.get('token');
+      const board = url.searchParams.get('for');
+      if (token) return `${url.origin}${path}?${board ? `for=${encodeURIComponent(board)}&` : ''}token=${encodeURIComponent(token)}`;
+      return clearNoise();
+    }
+    const embeddedGreenhouseJob = url.searchParams.get('gh_jid');
+    if (embeddedGreenhouseJob) return `${url.origin}${path}?gh_jid=${encodeURIComponent(embeddedGreenhouseJob)}`;
+    if (host.includes('bullhorn') || path.includes('/wp-content/plugins/bullhorn-oscp')) {
+      const jobId = url.hash.match(/^#\/jobs\/(\d+)/i)?.[1];
+      return jobId ? `${url.origin}/wp-content/plugins/bullhorn-oscp/#/jobs/${jobId}` : null;
+    }
+    if (host.includes('successfactors.')) {
+      const jobId = url.searchParams.get('jobId') ?? url.searchParams.get('career_job_req_id') ?? url.searchParams.get('job_application');
+      const company = url.searchParams.get('company');
+      return jobId && company ? `${url.origin}/sfcareer/jobreqcareer?jobId=${encodeURIComponent(jobId)}&company=${encodeURIComponent(company)}` : null;
+    }
+    if (host.includes('taleo.net')) {
+      const job = url.searchParams.get('job');
+      return job ? `${url.origin}${path}?job=${encodeURIComponent(job)}&lang=en` : null;
+    }
+    if (host.includes('myjobs.adp.com')) {
+      const reqId = url.searchParams.get('reqId');
+      return reqId ? `${url.origin}${path}?reqId=${encodeURIComponent(reqId)}` : null;
+    }
+    if (host.includes('ultipro.com')) {
+      const opportunityId = url.searchParams.get('opportunityId');
+      return opportunityId ? `${url.origin}${path}?opportunityId=${encodeURIComponent(opportunityId)}` : `${url.origin}${path}`;
+    }
+    if (host.includes('avature.net')) {
+      const jobId = url.searchParams.get('jobId');
+      return jobId && !/\/JobDetail\/[^/]+\/\d+$/i.test(path)
+        ? `${url.origin}${path}?jobId=${encodeURIComponent(jobId)}`
+        : `${url.origin}${path}`;
+    }
+    // Preserve identity-bearing query keys, but mirror the backend's narrow tracking allowlist.
+    for (const key of [...url.searchParams.keys()]) {
+      if (/^utm_/i.test(key)) url.searchParams.delete(key);
+    }
+    url.hash = '';
+    url.pathname = path;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+const SMARTRECRUITERS_ONE_CLICK_PATH = /^\/oneclick-ui\/company\/[a-z0-9._-]+\/publication\/[0-9a-f-]{36}\/?$/i;
+
+/**
+ * Resolve the application-form link exposed by a SmartRecruiters posting without trusting an
+ * arbitrary page link. The public posting and one-click form use unrelated paths, so ordinary
+ * prefix handoff matching cannot bridge them.
+ */
+export function smartRecruitersApplicationUrl(pageUrl: string, hrefs: readonly string[]): string | null {
+  let page: URL;
+  try {
+    page = new URL(pageUrl);
+  } catch {
+    return null;
+  }
+  if (page.protocol !== 'https:' || page.hostname !== 'jobs.smartrecruiters.com') return null;
+  const postingCompany = page.pathname.split('/').filter(Boolean)[0]?.toLowerCase();
+  if (!postingCompany) return null;
+  for (const href of hrefs) {
+    try {
+      const candidate = new URL(href, page);
+      if (candidate.protocol !== 'https:' || candidate.hostname !== page.hostname) continue;
+      if (!SMARTRECRUITERS_ONE_CLICK_PATH.test(candidate.pathname)) continue;
+      const formCompany = candidate.pathname.match(/^\/oneclick-ui\/company\/([^/]+)\//i)?.[1]?.toLowerCase();
+      if (formCompany !== postingCompany) continue;
+      candidate.search = '';
+      candidate.hash = '';
+      return candidate.toString();
+    } catch {
+      // Ignore malformed employer-page links and keep looking for the exact application route.
+    }
+  }
+  return null;
+}
+
+export function smartRecruitersContinuationAllowed(sourceUrl: string, targetUrl: string): boolean {
+  return smartRecruitersApplicationUrl(sourceUrl, [targetUrl]) === targetUrl;
+}
+
+/**
+ * Consume the exact armed SmartRecruiters posting and re-arm only the one-click URL exposed by
+ * that page. The application id always comes from the claimed dashboard arming. A content script
+ * cannot choose a different packet id while asking the background to continue the handoff.
+ */
+export function continueSmartRecruitersHandoff(
+  entries: readonly ArmedHandoff[],
+  sourceUrl: string,
+  targetUrl: string,
+  now: number,
+): { applicationId: string | null; remaining: ArmedHandoff[] } {
+  const live = pruneArmed(entries, now);
+  if (!smartRecruitersContinuationAllowed(sourceUrl, targetUrl)) {
+    return { applicationId: null, remaining: live };
+  }
+  const claimed = claimArmed(live, sourceUrl, now);
+  if (!claimed.claimed?.applicationId) {
+    return { applicationId: null, remaining: claimed.remaining };
+  }
+  return {
+    applicationId: claimed.claimed.applicationId,
+    remaining: armHandoffs(
+      claimed.remaining,
+      [{ url: targetUrl, applicationId: claimed.claimed.applicationId }],
+      now,
+    ),
+  };
+}
+
 /** Drop armings that have aged out. Called on every read so the store cannot grow without bound. */
 export function pruneArmed(entries: readonly ArmedHandoff[], now: number): ArmedHandoff[] {
   return entries.filter((entry) => now - entry.armedAt < ARMED_HANDOFF_TTL_MS);

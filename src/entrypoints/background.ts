@@ -26,10 +26,13 @@ import {
   ARMED_HANDOFF_KEY,
   armHandoffs,
   claimArmed,
+  continueSmartRecruitersHandoff,
+  applicationFormIdentityKey,
   decideAdoption,
   type AdoptionOutcome,
   type ArmedHandoff,
 } from '../lib/web-handoff';
+import { validHandoffVersion } from '../lib/handoff-packet';
 import { automaticSubmissionEnabled, groundedDraftAnswer } from '../lib/auto-submit-consent';
 import { backendFetch } from '../lib/backend-fetch';
 import { flushAnalyticsQueue, trackExtensionEvent } from '../lib/analytics';
@@ -57,6 +60,72 @@ type PendingExtensionSubmission = {
 
 const PENDING_SUBMISSIONS_KEY = 'litos_pending_extension_submission';
 const PENDING_SUBMISSION_MAX_AGE_MS = 5 * 60_000;
+const HANDOFF_PACKET_BINDINGS_KEY = 'litos_extension_handoff_packet_bindings';
+const dashboardSubmissionsInFlight = new Set<string>();
+
+type HandoffPacketBinding = {
+  applicationId: string;
+  tabId: number;
+  frameId: number;
+  currentUrl: string;
+  handoffVersion: string;
+};
+
+async function handoffPacketBindings(): Promise<Record<string, HandoffPacketBinding>> {
+  const stored = await chrome.storage.session.get(HANDOFF_PACKET_BINDINGS_KEY);
+  return (stored[HANDOFF_PACKET_BINDINGS_KEY] ?? {}) as Record<string, HandoffPacketBinding>;
+}
+
+async function storeHandoffPacketBinding(binding: HandoffPacketBinding): Promise<void> {
+  const bindings = await handoffPacketBindings();
+  await chrome.storage.session.set({
+    [HANDOFF_PACKET_BINDINGS_KEY]: { ...bindings, [binding.applicationId]: binding },
+  });
+}
+
+async function handoffPacketBinding(
+  applicationId: string,
+  tabId: number,
+  frameId: number,
+): Promise<HandoffPacketBinding | null> {
+  const binding = (await handoffPacketBindings())[applicationId];
+  return binding?.tabId === tabId && binding.frameId === frameId && validHandoffVersion(binding.handoffVersion)
+    ? binding
+    : null;
+}
+
+async function fetchAndBindHandoffPacket(input: {
+  applicationId: string;
+  currentUrl: string;
+  tabId: number;
+  frameId: number;
+  token: string;
+  publishBinding?: boolean;
+}): Promise<GeneratedResume> {
+  const packetRes = await timeoutBackendFetch(
+    `/applications/${input.applicationId}/submission/extension-packet?current_url=${encodeURIComponent(input.currentUrl)}`,
+    {},
+    input.token,
+  );
+  if (!packetRes.ok) throw new Error(`The saved application packet is not available (${packetRes.status}).`);
+  const resume = await packetRes.json() as GeneratedResume;
+  if (resume.resume_id !== input.applicationId || resume.application?.id !== input.applicationId) {
+    throw new Error('The downloaded resume does not belong to this application packet.');
+  }
+  if (!validHandoffVersion(resume.handoff_version)) {
+    throw new Error('The saved application packet has no immutable handoff version.');
+  }
+  if (input.publishBinding !== false) {
+    await storeHandoffPacketBinding({
+      applicationId: input.applicationId,
+      tabId: input.tabId,
+      frameId: input.frameId,
+      currentUrl: input.currentUrl,
+      handoffVersion: resume.handoff_version,
+    });
+  }
+  return resume;
+}
 
 function pendingSubmissionKey(tabId: number): string {
   return `${PENDING_SUBMISSIONS_KEY}:${tabId}`;
@@ -662,13 +731,22 @@ export default defineBackground(() => {
           .then(async ([token, tabId]) => {
             if (!token || tabId === undefined) throw new Error('Litos could not identify this application tab.');
             const applicationId = String(message.payload?.applicationId ?? '');
+            const frameId = sender.frameId ?? 0;
+            const binding = await handoffPacketBinding(applicationId, tabId, frameId);
+            if (!binding) throw new Error('Reload this saved application before submitting from Chrome.');
+            const currentUrl = sender.url ?? '';
+            if (!currentUrl) throw new Error('Litos could not verify the current application page.');
             const authorization = message.payload?.authorization === 'user_initiated'
               ? 'user_initiated'
               : 'standing_consent';
             const response = await timeoutBackendFetch(`/applications/${applicationId}/submission/extension-start`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ authorization }),
+              body: JSON.stringify({
+                authorization,
+                handoff_version: binding.handoffVersion,
+                current_url: currentUrl,
+              }),
             }, token);
             const body = await response.json().catch(() => null) as { claim_id?: string; error?: string; already_submitted?: boolean } | null;
             if (!response.ok || !body?.claim_id) throw new Error(body?.error ?? 'Litos could not reserve this application.');
@@ -932,6 +1010,37 @@ export default defineBackground(() => {
         return true;
       }
 
+      case 'GET_APPLICATION_HANDOFF_PACKET': {
+        const applicationId = String(message.applicationId ?? '');
+        const currentUrl = sender.url ?? '';
+        const tabId = sender.tab?.id;
+        const frameId = sender.frameId ?? 0;
+        if (!/^[0-9a-f-]{36}$/i.test(applicationId)) {
+          sendResponse({ error: 'The saved application packet could not be identified.' });
+          return false;
+        }
+        getStoredToken().then(async (token) => {
+          if (!token) {
+            sendResponse({ error: NOT_SIGNED_IN_MESSAGE });
+            return;
+          }
+          try {
+            if (tabId === undefined) throw new Error('The application tab is no longer available.');
+            const [resume, profileRes, appProfileRes] = await Promise.all([
+              fetchAndBindHandoffPacket({ applicationId, currentUrl, tabId, frameId, token }),
+              timeoutBackendFetch('/profile', {}, token),
+              timeoutBackendFetch('/profile/application', {}, token),
+            ]);
+            const profile: Profile = profileRes.ok ? await profileRes.json() : EMPTY_PROFILE;
+            const applicationProfile: ApplicationProfile = appProfileRes.ok ? await appProfileRes.json() : {};
+            sendResponse({ profile, applicationProfile, resume });
+          } catch (error) {
+            sendResponse({ error: error instanceof Error ? error.message : 'The saved application packet could not be loaded.' });
+          }
+        });
+        return true;
+      }
+
       case 'GET_WORKDAY_ACCOUNT_STATE':
       case 'CLAIM_WORKDAY_ACCOUNT':
       case 'VALIDATE_WORKDAY_ACCOUNT_ACTION':
@@ -1088,31 +1197,71 @@ export default defineBackground(() => {
             applicationId: string;
             atsName: string;
             portalUrl: string;
+            attendedHandoff?: boolean;
+            openDashboard?: boolean;
             questions: Array<{ id: string; question: string; answer: string; kind: 'essay' | 'required'; required: boolean }>;
             skippedReasons: string[];
           };
           try {
-            const res = await timeoutBackendFetch(`/applications/${payload.applicationId}/review`, {
-              method: 'PUT',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                ats_name: payload.atsName,
-                portal_url: payload.portalUrl,
-                questions: payload.questions,
-                skipped_reasons: payload.skippedReasons,
-              }),
-            }, token);
-            if (!res.ok) throw new Error(`review handoff failed (${res.status})`);
+            const frameId = sender.frameId ?? 0;
+            const existingHandoffBinding = await handoffPacketBinding(payload.applicationId, tabId, frameId);
+            if (payload.attendedHandoff === true && !existingHandoffBinding) throw new Error('Reload this saved application before reviewing it from Chrome.');
+            // An attended handoff is already a frozen, reviewed packet. Writing its form state back
+            // through PUT /review here would mutate the packet after GET and invalidate the exact
+            // PDF/spec/answer version that must be echoed at extension-start.
+            if (payload.attendedHandoff !== true) {
+              const res = await timeoutBackendFetch(`/applications/${payload.applicationId}/review`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  ats_name: payload.atsName,
+                  portal_url: payload.portalUrl,
+                  questions: payload.questions,
+                  skipped_reasons: payload.skippedReasons,
+                }),
+              }, token);
+              if (!res.ok) throw new Error(`review handoff failed (${res.status})`);
+            }
+            const currentUrl = sender.url ?? '';
+            if (!currentUrl) throw new Error('Litos could not verify the current application page.');
+            const exactResume = payload.attendedHandoff === true
+              ? undefined
+              : await fetchAndBindHandoffPacket({
+                applicationId: payload.applicationId,
+                currentUrl,
+                tabId,
+                frameId,
+                token,
+              });
+            const handoffBinding = await handoffPacketBinding(payload.applicationId, tabId, frameId);
+            if (!handoffBinding) throw new Error('The exact application packet binding was not saved.');
             const stored = await chrome.storage.session.get('litos_application_tabs');
-            const tabs = (stored.litos_application_tabs ?? {}) as Record<string, number | { tabId: number; frameId: number }>;
+            const tabs = (stored.litos_application_tabs ?? {}) as Record<string, number | {
+              tabId: number;
+              frameId: number;
+              currentUrl?: string;
+              handoffVersion?: string;
+              attendedHandoff?: boolean;
+            }>;
             await chrome.storage.session.set({
-              litos_application_tabs: { ...tabs, [payload.applicationId]: { tabId, frameId: sender.frameId ?? 0 } },
+              litos_application_tabs: {
+                ...tabs,
+                [payload.applicationId]: {
+                  tabId,
+                  frameId,
+                  currentUrl: handoffBinding.currentUrl,
+                  handoffVersion: handoffBinding.handoffVersion,
+                  attendedHandoff: payload.attendedHandoff === true,
+                },
+              },
             });
-            await chrome.tabs.create({
-              url: `https://trylitos.com/dashboard/applications?application=${encodeURIComponent(payload.applicationId)}`,
-              active: true,
-            });
-            sendResponse({ ok: true });
+            if (payload.openDashboard !== false) {
+              await chrome.tabs.create({
+                url: `https://trylitos.com/dashboard/applications?application=${encodeURIComponent(payload.applicationId)}`,
+                active: true,
+              });
+            }
+            sendResponse({ ok: true, resume: exactResume });
           } catch (error) {
             sendResponse({ error: error instanceof Error ? error.message : 'Could not prepare dashboard review.' });
           }
@@ -1160,6 +1309,19 @@ export default defineBackground(() => {
             sendResponse({ armed: Boolean(hit), applicationId: hit?.applicationId });
           })
           .catch(() => sendResponse({ armed: false }));
+        return true;
+      }
+
+      case 'CONTINUE_SMARTRECRUITERS_HANDOFF': {
+        const sourceUrl = sender.tab?.url ?? '';
+        const targetUrl = String(message.targetUrl ?? '');
+        readArmedHandoffs()
+          .then(async (entries) => {
+            const continued = continueSmartRecruitersHandoff(entries, sourceUrl, targetUrl, Date.now());
+            await writeArmedHandoffs(continued.remaining);
+            sendResponse({ ok: Boolean(continued.applicationId) });
+          })
+          .catch(() => sendResponse({ ok: false }));
         return true;
       }
 
@@ -1239,17 +1401,79 @@ export default defineBackground(() => {
     if (message?.type !== 'LITOS_SUBMIT_APPLICATION') return false;
 
     const applicationId = String(message.applicationId ?? '');
-    const questions = Array.isArray(message.questions) ? message.questions : [];
+    if (dashboardSubmissionsInFlight.has(applicationId)) {
+      sendResponse({ error: 'This application is already being prepared for submission.' });
+      return false;
+    }
+    dashboardSubmissionsInFlight.add(applicationId);
     Promise.all([getStoredToken(), chrome.storage.session.get('litos_application_tabs')])
       .then(async ([token, stored]) => {
-        const storedTarget = ((stored.litos_application_tabs ?? {}) as Record<string, number | { tabId: number; frameId: number }>)[applicationId];
+        const storedTarget = ((stored.litos_application_tabs ?? {}) as Record<string, number | {
+          tabId: number;
+          frameId: number;
+          currentUrl?: string;
+          handoffVersion?: string;
+          attendedHandoff?: boolean;
+        }>)[applicationId];
         const tabId = typeof storedTarget === 'number' ? storedTarget : storedTarget?.tabId;
         const frameId = typeof storedTarget === 'number' ? 0 : storedTarget?.frameId ?? 0;
         if (!token || tabId === undefined) throw new Error('That tab is no longer open. Go back to the job and start it again.');
+        const livePage = await chrome.tabs.sendMessage(tabId, {
+          type: 'GET_CURRENT_APPLICATION_URL',
+        }, { frameId }) as { url?: string };
+        const currentUrl = livePage?.url ?? '';
+        if (!currentUrl) throw new Error('Litos could not verify the current application page.');
+        const exactResume = await fetchAndBindHandoffPacket({
+          applicationId,
+          currentUrl,
+          tabId,
+          frameId,
+          token,
+          publishBinding: false,
+        });
+        const prepared = await chrome.tabs.sendMessage(tabId, {
+          type: 'PREPARE_SUBMISSION_FROM_DASHBOARD',
+          payload: { applicationId, resume: exactResume, expectedUrl: currentUrl },
+        }, { frameId }) as { ok?: boolean; error?: string };
+        if (!prepared?.ok) throw new Error(prepared?.error ?? 'The saved answers could not be replayed on the company form.');
+        const verifiedPage = await chrome.tabs.sendMessage(tabId, {
+          type: 'GET_CURRENT_APPLICATION_URL',
+        }, { frameId }) as { url?: string };
+        const verifiedCurrentUrl = verifiedPage?.url ?? '';
+        const fetchedPageKey = applicationFormIdentityKey(currentUrl);
+        const verifiedPageKey = applicationFormIdentityKey(verifiedCurrentUrl);
+        if (
+          !verifiedCurrentUrl
+          || !fetchedPageKey
+          || !verifiedPageKey
+          || verifiedPageKey !== fetchedPageKey
+        ) throw new Error('The company form changed while the exact packet was being replayed. Nothing was sent.');
+        const verifiedResume = await fetchAndBindHandoffPacket({
+          applicationId,
+          currentUrl: verifiedCurrentUrl,
+          tabId,
+          frameId,
+          token,
+          publishBinding: false,
+        });
+        if (verifiedResume.handoff_version !== exactResume.handoff_version) {
+          throw new Error('The saved application changed while it was being replayed. Nothing was sent.');
+        }
+        await storeHandoffPacketBinding({
+          applicationId,
+          tabId,
+          frameId,
+          currentUrl: verifiedCurrentUrl,
+          handoffVersion: exactResume.handoff_version!,
+        });
         const startResponse = await timeoutBackendFetch(`/applications/${applicationId}/submission/extension-start`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ authorization: 'user_initiated' }),
+          body: JSON.stringify({
+            authorization: 'user_initiated',
+            handoff_version: exactResume.handoff_version,
+            current_url: verifiedCurrentUrl,
+          }),
         }, token);
         const started = await startResponse.json().catch(() => null) as { claim_id?: string; error?: string } | null;
         if (!startResponse.ok || !started?.claim_id) throw new Error(started?.error ?? 'Could not reserve this application.');
@@ -1258,7 +1482,7 @@ export default defineBackground(() => {
         try {
           const result = await chrome.tabs.sendMessage(tabId, {
             type: 'SUBMIT_FROM_DASHBOARD',
-            payload: { applicationId, questions },
+            payload: { applicationId, questions: [] },
           }, { frameId }) as { ok?: boolean; clicked?: boolean; error?: string; finalUrl?: string; confirmationText?: string };
           await postExtensionOutcome(
             pending,
@@ -1282,7 +1506,8 @@ export default defineBackground(() => {
           throw error;
         }
       })
-      .catch((error) => sendResponse({ error: error instanceof Error ? error.message : 'Submission failed.' }));
+      .catch((error) => sendResponse({ error: error instanceof Error ? error.message : 'Submission failed.' }))
+      .finally(() => dashboardSubmissionsInFlight.delete(applicationId));
     return true;
   });
 });

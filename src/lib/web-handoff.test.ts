@@ -1,12 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import {
   ARMED_HANDOFF_TTL_MS,
+  applicationFormIdentityKey,
   armHandoffs,
   claimArmed,
   decideAdoption,
   handoffKey,
   handoffMatches,
   pruneArmed,
+  continueSmartRecruitersHandoff,
+  smartRecruitersApplicationUrl,
+  smartRecruitersContinuationAllowed,
 } from './web-handoff';
 
 const NOW = 1_760_000_000_000;
@@ -47,6 +51,75 @@ describe('handoffMatches', () => {
 
   it('never matches across employers', () => {
     expect(handoffMatches('https://jobs.lever.co/palantir/9e40', 'https://jobs.lever.co/other/9e40')).toBe(false);
+  });
+
+});
+
+describe('applicationFormIdentityKey', () => {
+  const cases = [
+    ['Lever', 'https://jobs.lever.co/acme/one/apply?utm_source=a#x', 'https://jobs.lever.co/acme/one?utm_source=b', 'https://jobs.lever.co/acme/two/apply'],
+    ['Greenhouse', 'https://job-boards.greenhouse.io/acme/jobs/123?gh_src=a#x', 'https://job-boards.greenhouse.io/acme/jobs/123?utm_source=b', 'https://job-boards.greenhouse.io/acme/jobs/456'],
+    ['Greenhouse embed', 'https://job-boards.greenhouse.io/embed/job_app?for=acme&token=123&utm_source=a#x', 'https://job-boards.greenhouse.io/embed/job_app?token=123&for=acme', 'https://job-boards.greenhouse.io/embed/job_app?for=acme&token=456'],
+    ['Ashby', 'https://jobs.ashbyhq.com/acme/one/application', 'https://jobs.ashbyhq.com/acme/one/application', 'https://jobs.ashbyhq.com/acme/two/application'],
+    ['Workday', 'https://acme.wd5.myworkdayjobs.com/en-US/jobs/job/one/apply', 'https://acme.wd5.myworkdayjobs.com/en-US/jobs/job/one/apply', 'https://acme.wd5.myworkdayjobs.com/en-US/jobs/job/two/apply'],
+    ['SmartRecruiters', 'https://jobs.smartrecruiters.com/oneclick-ui/company/Acme/publication/123e4567-e89b-12d3-a456-426614174000?dcr_ci=Acme', 'https://jobs.smartrecruiters.com/oneclick-ui/company/Acme/publication/123e4567-e89b-12d3-a456-426614174000?utm_source=x', 'https://jobs.smartrecruiters.com/oneclick-ui/company/Acme/publication/223e4567-e89b-12d3-a456-426614174999'],
+    ['iCIMS', 'https://careers-acme.icims.com/jobs/123/job?mobile=true', 'https://careers-acme.icims.com/jobs/123/job?utm_source=x', 'https://careers-acme.icims.com/jobs/456/job'],
+    ['Jobvite', 'https://jobs.jobvite.com/acme/job/one/apply?source=a', 'https://jobs.jobvite.com/acme/job/one?source=b', 'https://jobs.jobvite.com/acme/job/two'],
+    ['Personio', 'https://acme.jobs.personio.com/job/123/apply?language=en', 'https://acme.jobs.personio.com/job/123?language=de', 'https://acme.jobs.personio.com/job/456'],
+    ['Recruitee', 'https://acme.recruitee.com/o/one/c/new?source=a', 'https://acme.recruitee.com/o/one?source=b', 'https://acme.recruitee.com/o/two'],
+    ['Teamtailor', 'https://jobs.acme.teamtailor.com/jobs/123/applications/new?source=a', 'https://jobs.acme.teamtailor.com/jobs/123?source=b', 'https://jobs.acme.teamtailor.com/jobs/456'],
+    ['Pinpoint', 'https://acme.pinpointhq.com/en/postings/one/applications/new?source=a', 'https://acme.pinpointhq.com/en/postings/one?source=b', 'https://acme.pinpointhq.com/en/postings/two'],
+    ['Zoho', 'https://acme.zohorecruit.com/jobs/Careers/123/apply?source=a', 'https://acme.zohorecruit.com/jobs/Careers/123/apply?source=b', 'https://acme.zohorecruit.com/jobs/Careers/456/apply'],
+    ['Bullhorn', 'https://www.serverlogic.com/wp-content/plugins/bullhorn-oscp/?source=a#/jobs/123', 'https://www.serverlogic.com/wp-content/plugins/bullhorn-oscp/#/jobs/123', 'https://www.serverlogic.com/wp-content/plugins/bullhorn-oscp/#/jobs/456'],
+    ['SAP', 'https://career5.successfactors.eu/sfcareer/jobreqcareer?jobId=123&company=ACME&utm_source=a', 'https://career5.successfactors.eu/sfcareer/jobreqcareer?company=ACME&jobId=123', 'https://career5.successfactors.eu/sfcareer/jobreqcareer?jobId=456&company=ACME'],
+    ['Taleo', 'https://acme.taleo.net/careersection/ex/jobdetail.ftl?job=123&lang=fr', 'https://acme.taleo.net/careersection/ex/jobdetail.ftl?job=123&lang=en', 'https://acme.taleo.net/careersection/ex/jobdetail.ftl?job=456'],
+    ['ADP', 'https://myjobs.adp.com/acme/cx/job-details?reqId=123&utm_source=a', 'https://myjobs.adp.com/acme/cx/job-details?reqId=123', 'https://myjobs.adp.com/acme/cx/job-details?reqId=456'],
+    ['JazzHR', 'https://acme.applytojob.com/apply/one?source=a', 'https://acme.applytojob.com/apply/one?source=b', 'https://acme.applytojob.com/apply/two'],
+    ['BambooHR', 'https://acme.bamboohr.com/careers/123?source=a', 'https://acme.bamboohr.com/careers/123?source=b', 'https://acme.bamboohr.com/careers/456'],
+    ['Oracle Cloud', 'https://acme.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1/job/123?source=a', 'https://acme.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1/job/123?source=b', 'https://acme.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1/job/456'],
+    ['Avature', 'https://acme.avature.net/careers/JobDetail/Test?jobId=123&utm_source=a', 'https://acme.avature.net/careers/JobDetail/Test?jobId=123', 'https://acme.avature.net/careers/JobDetail/Test?jobId=456'],
+    ['UKG', 'https://recruiting.ultipro.com/ACM/jobboard/x/OpportunityDetail?opportunityId=123e4567-e89b-12d3-a456-426614174000&utm_source=a', 'https://recruiting.ultipro.com/ACM/jobboard/x/OpportunityDetail?opportunityId=123e4567-e89b-12d3-a456-426614174000', 'https://recruiting.ultipro.com/ACM/jobboard/x/OpportunityDetail?opportunityId=223e4567-e89b-12d3-a456-426614174999'],
+    ['Comeet', 'https://www.comeet.com/jobs/acme/one?token=secret&utm_source=first#form', 'https://www.comeet.com/jobs/acme/one?token=secret&utm_campaign=second', 'https://www.comeet.com/jobs/acme/one?token=other'],
+    ['Rippling', 'https://ats.rippling.com/acme/jobs/one', 'https://ats.rippling.com/acme/jobs/one', 'https://ats.rippling.com/acme/jobs/two'],
+    ['Breezy', 'https://acme.breezy.hr/p/one/apply', 'https://acme.breezy.hr/p/one/apply', 'https://acme.breezy.hr/p/two/apply'],
+  ] as const;
+
+  it.each(cases)('%s keeps one form stable and rejects a different job', (_name, reviewed, same, other) => {
+    expect(applicationFormIdentityKey(reviewed)).toBe(applicationFormIdentityKey(same));
+    expect(applicationFormIdentityKey(reviewed)).not.toBe(applicationFormIdentityKey(other));
+  });
+});
+
+describe('SmartRecruiters handoff continuation', () => {
+  const posting = 'https://jobs.smartrecruiters.com/SeekaTechnology/744000063648206-software-engineer-internship';
+  const form = 'https://jobs.smartrecruiters.com/oneclick-ui/company/SeekaTechnology/publication/123e4567-e89b-12d3-a456-426614174000';
+
+  it('moves an armed posting only to its trusted one-click application form', () => {
+    expect(smartRecruitersApplicationUrl(posting, ['/privacy', form])).toBe(form);
+    expect(smartRecruitersContinuationAllowed(posting, form)).toBe(true);
+  });
+
+  it('refuses lookalike hosts, arbitrary SmartRecruiters paths, and non-https links', () => {
+    expect(smartRecruitersApplicationUrl(posting, [
+      'https://evil.example/oneclick-ui/company/x/publication/123e4567-e89b-12d3-a456-426614174000',
+      'https://jobs.smartrecruiters.com/company/admin',
+      'http://jobs.smartrecruiters.com/oneclick-ui/company/x/publication/123e4567-e89b-12d3-a456-426614174000',
+      'https://jobs.smartrecruiters.com/oneclick-ui/company/OtherEmployer/publication/123e4567-e89b-12d3-a456-426614174000',
+    ])).toBeNull();
+  });
+
+  it('moves only the packet id atomically claimed from the exact armed posting', () => {
+    const armed = armHandoffs([], [{ url: posting, applicationId: 'packet-seeka' }], NOW);
+    const continued = continueSmartRecruitersHandoff(armed, posting, form, NOW + 1);
+    expect(continued.applicationId).toBe('packet-seeka');
+    expect(claimArmed(continued.remaining, form, NOW + 2).claimed?.applicationId).toBe('packet-seeka');
+  });
+
+  it('does not continue a different posting or accept an unarmed caller-selected packet', () => {
+    const otherPosting = 'https://jobs.smartrecruiters.com/SeekaTechnology/744000063648999-another-role';
+    const armed = armHandoffs([], [{ url: posting, applicationId: 'packet-seeka' }], NOW);
+    expect(continueSmartRecruitersHandoff(armed, otherPosting, form, NOW + 1).applicationId).toBeNull();
+    expect(continueSmartRecruitersHandoff([], posting, form, NOW + 1).applicationId).toBeNull();
   });
 });
 
