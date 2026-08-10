@@ -65,6 +65,7 @@ import { bullhornEmployerName, contentInitRoute } from '../lib/content-init-rout
 import { applicationFormIdentityKey, smartRecruitersApplicationUrl } from '../lib/web-handoff';
 import { reviewedQuestionsForHandoff, validHandoffVersion, type HandoffQuestion } from '../lib/handoff-packet';
 import { frozenAnswerForQuestion, replayReviewedAnswers, reviewedAnswersMatch } from '../lib/reviewed-answer-replay';
+import { manualSubmissionPreflightError } from '../lib/manual-submission-preflight';
 import {
   fillWorkdayVerificationCode,
   findWorkdayAccountSubmit,
@@ -266,17 +267,18 @@ export default defineContentScript({
         event.stopImmediatePropagation();
         if (reserving) return;
         const guardError = submissionGuard();
-        if (guardError) {
-          if (statusEl) statusEl.textContent = guardError;
-          return;
-        }
         // This click was already swallowed by the preventDefault above, so a bare return here is a
         // dead Submit button: nothing sends, the page's own validation never runs, and the student
         // gets no reason. Say which state she is in. Reachable whenever a required control is
         // genuinely empty, which the combobox abandon path (closeOpenCombobox) now makes honest
         // rather than hiding behind Litos's own uncommitted typeahead text.
-        if (hasEmptyRequiredFields()) {
-          if (statusEl) statusEl.textContent = 'Something required is still blank. Fill it in, then click Submit again.';
+        const preflightError = manualSubmissionPreflightError({
+          guardError,
+          requiredFieldMissing: hasEmptyRequiredFields(),
+          challengeWaiting: captchaWaiting || detectChallenge().waiting,
+        });
+        if (preflightError) {
+          if (statusEl) statusEl.textContent = preflightError;
           return;
         }
         reserving = true;

@@ -1351,8 +1351,8 @@ export default defineBackground(() => {
       // `signedIn` is the whole point of the ping now: the website cannot see chrome.storage, so
       // without an answer here it has no way to know the extension is sitting there logged out.
       getStoredToken()
-        .then((token) => sendResponse({ ok: true, signedIn: Boolean(token) }))
-        .catch(() => sendResponse({ ok: true, signedIn: false }));
+        .then((token) => sendResponse({ ok: true, signedIn: Boolean(token), version: chrome.runtime.getManifest().version }))
+        .catch(() => sendResponse({ ok: true, signedIn: false, version: chrome.runtime.getManifest().version }));
       return true;
     }
 

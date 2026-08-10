@@ -28,6 +28,9 @@ describe('automatic submission runtime wiring', () => {
     expect(manual).toContain('findProgrammaticFinalSubmitButton(atsName) === submitButton');
     expect(manual).toContain('detectChallenge().waiting');
     expect(manual).toContain('document.hasFocus()');
+    expect(manual.indexOf('detectChallenge().waiting')).toBeLessThan(manual.indexOf('reserving = true'));
+    expect(manual.indexOf('detectChallenge().waiting')).toBeLessThan(manual.indexOf("type: 'EXTENSION_SUBMISSION_START'"));
+    expect(manual.indexOf('detectChallenge().waiting')).toBeLessThan(manual.indexOf('submitButton.click()'));
   });
 
   it('rechecks live application decisions and the exact final control on every programmatic route', () => {
