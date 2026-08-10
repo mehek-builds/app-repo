@@ -257,6 +257,7 @@ export default defineContentScript({
       statusEl: HTMLElement | null,
       atsName: string,
       submissionGuard: () => string | null = () => null,
+      attendedHandoff = false,
     ) {
       let reserving = false;
       const onClick = (event: MouseEvent) => {
@@ -283,7 +284,7 @@ export default defineContentScript({
         const baselineTexts = new Set(visibleSubmissionOutcomeTexts());
         chrome.runtime.sendMessage({
           type: 'EXTENSION_SUBMISSION_START',
-          payload: { applicationId, authorization: 'user_initiated' },
+          payload: { applicationId, authorization: 'user_initiated', attendedHandoff },
         }, (response: { ok?: boolean; error?: string } | undefined) => {
           reserving = false;
           if (!response?.ok) {
@@ -1729,11 +1730,11 @@ export default defineContentScript({
         reportEvent(false);
 
         if (autoSubmitOn && !autoSubmitHeld && finalSubmitBtn) {
-          runAutoSubmitCountdown(card, statusEl, yesBtn, noBtn, finalSubmitBtn, fillResult, resume.resume_id, reportEvent, 'Submitting', handoffSubmissionGuard);
+          runAutoSubmitCountdown(card, statusEl, yesBtn, noBtn, finalSubmitBtn, fillResult, resume.resume_id, reportEvent, 'Submitting', handoffSubmissionGuard, Boolean(handoffApplicationId));
           return;
         }
 
-        if (finalSubmitBtn) armManualSubmissionTracking(finalSubmitBtn, resume.resume_id, statusEl, fillResult.ats_name, handoffSubmissionGuard);
+        if (finalSubmitBtn) armManualSubmissionTracking(finalSubmitBtn, resume.resume_id, statusEl, fillResult.ats_name, handoffSubmissionGuard, Boolean(handoffApplicationId));
 
         const dashboardQuestions: HandoffQuestion[] = [
           ...frozenHandoffQuestions,
@@ -1803,6 +1804,7 @@ export default defineContentScript({
             applicationId: resume.resume_id,
             atsName: fillResult.ats_name,
             portalUrl: window.location.href,
+            attendedHandoff: Boolean(handoffApplicationId),
             questions: dashboardQuestions,
             skippedReasons: fillResult.skipped_reasons,
           },
@@ -1868,6 +1870,7 @@ export default defineContentScript({
       reportEvent: (autoSubmitted: boolean) => void,
       actionLabel: string,
       submissionGuard: () => string | null = () => null,
+      attendedHandoff = false,
     ) {
       // Tear down any countdown already running before standing up a new one. Combined with the SPA
       // navigation handler (which also calls this), there is never an orphaned interval/overlay or a
@@ -2101,7 +2104,7 @@ export default defineContentScript({
                 const started = await new Promise<{ ok?: boolean; error?: string }>((resolve) => {
                   chrome.runtime.sendMessage({
                     type: 'EXTENSION_SUBMISSION_START',
-                    payload: { applicationId, authorization: 'standing_consent' },
+                    payload: { applicationId, authorization: 'standing_consent', attendedHandoff },
                   }, (response) => resolve(response ?? { ok: false, error: 'Litos did not respond.' }));
                 });
                 const safeAfterReservation = target.isConnected && isElementVisible(target) && !document.hidden && document.hasFocus()

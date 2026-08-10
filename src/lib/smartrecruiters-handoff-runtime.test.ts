@@ -19,7 +19,7 @@ describe('SmartRecruiters exact packet attended handoff', () => {
     expect(content).toMatch(/if \(handoffApplicationId\) \{[\s\S]*?frozenAnswerForQuestion\(frozenHandoffQuestions, question\)/);
     expect(content).toMatch(/replayReviewedAnswers\(document, frozenHandoffQuestions\)/);
     expect(content).toMatch(/reviewedAnswersMatch\(document, frozenHandoffQuestions\)\.failed\.length/);
-    expect(content).toMatch(/armManualSubmissionTracking\([^;]*handoffSubmissionGuard\)/);
+    expect(content).toMatch(/armManualSubmissionTracking\([^;]*handoffSubmissionGuard, Boolean\(handoffApplicationId\)\)/);
     expect(content).toMatch(/submitFromDashboard = async[\s\S]*?handoffSubmissionGuard\(\)/);
   });
 
@@ -49,6 +49,22 @@ describe('SmartRecruiters exact packet attended handoff', () => {
     const dashboardStart = background.slice(background.indexOf("if (message?.type !== 'LITOS_SUBMIT_APPLICATION')"));
     expect(dashboardStart).toMatch(/handoff_version: handoffVersion[\s\S]*?current_url: currentUrl/);
     expect(background).toMatch(/if \(!handoffBinding\) \{[\s\S]*?review handoff failed/);
+  });
+
+  it('refuses manual and dashboard attended starts when the GET-fetched binding is absent', () => {
+    const manualStart = background.slice(
+      background.indexOf("case 'EXTENSION_SUBMISSION_START'"),
+      background.indexOf("case 'EXTENSION_SUBMISSION_OUTCOME'"),
+    );
+    expect(manualStart).toMatch(/attendedHandoff === true && !binding/);
+    expect(content).toMatch(/authorization: 'user_initiated', attendedHandoff/);
+    expect(content).toMatch(/authorization: 'standing_consent', attendedHandoff/);
+
+    const dashboardStart = background.slice(background.indexOf("if (message?.type !== 'LITOS_SUBMIT_APPLICATION')"));
+    expect(dashboardStart).toMatch(/attendedHandoff && \(!validHandoffVersion\(handoffVersion\) \|\| !currentUrl\)/);
+    expect(background).toMatch(/attendedHandoff: payload\.attendedHandoff === true/);
+    expect(background).toMatch(/payload\.attendedHandoff === true && !handoffBinding/);
+    expect(content).toMatch(/attendedHandoff: Boolean\(handoffApplicationId\)/);
   });
 
   it('downloads and uploads the exact generated PDF through the SmartRecruiters file control', () => {

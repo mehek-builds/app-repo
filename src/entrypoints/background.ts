@@ -698,6 +698,9 @@ export default defineBackground(() => {
             const applicationId = String(message.payload?.applicationId ?? '');
             const frameId = sender.frameId ?? 0;
             const binding = await handoffPacketBinding(applicationId, tabId, frameId);
+            if (message.payload?.attendedHandoff === true && !binding) {
+              throw new Error('Reload this saved application before submitting from Chrome.');
+            }
             const authorization = message.payload?.authorization === 'user_initiated'
               ? 'user_initiated'
               : 'standing_consent';
@@ -1179,12 +1182,16 @@ export default defineBackground(() => {
             applicationId: string;
             atsName: string;
             portalUrl: string;
+            attendedHandoff?: boolean;
             questions: Array<{ id: string; question: string; answer: string; kind: 'essay' | 'required'; required: boolean }>;
             skippedReasons: string[];
           };
           try {
             const frameId = sender.frameId ?? 0;
             const handoffBinding = await handoffPacketBinding(payload.applicationId, tabId, frameId);
+            if (payload.attendedHandoff === true && !handoffBinding) {
+              throw new Error('Reload this saved application before reviewing it from Chrome.');
+            }
             // An attended handoff is already a frozen, reviewed packet. Writing its form state back
             // through PUT /review here would mutate the packet after GET and invalidate the exact
             // PDF/spec/answer version that must be echoed at extension-start.
@@ -1207,6 +1214,7 @@ export default defineBackground(() => {
               frameId: number;
               currentUrl?: string;
               handoffVersion?: string;
+              attendedHandoff?: boolean;
             }>;
             await chrome.storage.session.set({
               litos_application_tabs: {
@@ -1218,6 +1226,7 @@ export default defineBackground(() => {
                     currentUrl: handoffBinding.currentUrl,
                     handoffVersion: handoffBinding.handoffVersion,
                   } : {}),
+                  attendedHandoff: payload.attendedHandoff === true,
                 },
               },
             });
@@ -1373,12 +1382,17 @@ export default defineBackground(() => {
           frameId: number;
           currentUrl?: string;
           handoffVersion?: string;
+          attendedHandoff?: boolean;
         }>)[applicationId];
         const tabId = typeof storedTarget === 'number' ? storedTarget : storedTarget?.tabId;
         const frameId = typeof storedTarget === 'number' ? 0 : storedTarget?.frameId ?? 0;
         if (!token || tabId === undefined) throw new Error('That tab is no longer open. Go back to the job and start it again.');
         const handoffVersion = typeof storedTarget === 'number' ? undefined : storedTarget?.handoffVersion;
         const currentUrl = typeof storedTarget === 'number' ? undefined : storedTarget?.currentUrl;
+        const attendedHandoff = typeof storedTarget === 'number' ? false : storedTarget?.attendedHandoff === true;
+        if (attendedHandoff && (!validHandoffVersion(handoffVersion) || !currentUrl)) {
+          throw new Error('Reload this saved application before submitting from Chrome.');
+        }
         if ((handoffVersion || currentUrl) && (!validHandoffVersion(handoffVersion) || !currentUrl)) {
           throw new Error('That attended application packet is incomplete. Return to the exact company form and retry it.');
         }
