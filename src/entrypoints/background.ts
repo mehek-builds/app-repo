@@ -27,6 +27,7 @@ import {
   armHandoffs,
   claimArmed,
   decideAdoption,
+  smartRecruitersContinuationAllowed,
   type AdoptionOutcome,
   type ArmedHandoff,
 } from '../lib/web-handoff';
@@ -932,6 +933,38 @@ export default defineBackground(() => {
         return true;
       }
 
+      case 'GET_APPLICATION_HANDOFF_PACKET': {
+        const applicationId = String(message.applicationId ?? '');
+        if (!/^[0-9a-f-]{36}$/i.test(applicationId)) {
+          sendResponse({ error: 'The saved application packet could not be identified.' });
+          return false;
+        }
+        getStoredToken().then(async (token) => {
+          if (!token) {
+            sendResponse({ error: NOT_SIGNED_IN_MESSAGE });
+            return;
+          }
+          try {
+            const [packetRes, profileRes, appProfileRes] = await Promise.all([
+              timeoutBackendFetch(`/applications/${applicationId}/submission/extension-packet`, {}, token),
+              timeoutBackendFetch('/profile', {}, token),
+              timeoutBackendFetch('/profile/application', {}, token),
+            ]);
+            if (!packetRes.ok) throw new Error(`The saved application packet is not available (${packetRes.status}).`);
+            const resume = await packetRes.json() as GeneratedResume;
+            if (resume.resume_id !== applicationId || resume.application?.id !== applicationId) {
+              throw new Error('The downloaded resume does not belong to this application packet.');
+            }
+            const profile: Profile = profileRes.ok ? await profileRes.json() : EMPTY_PROFILE;
+            const applicationProfile: ApplicationProfile = appProfileRes.ok ? await appProfileRes.json() : {};
+            sendResponse({ profile, applicationProfile, resume });
+          } catch (error) {
+            sendResponse({ error: error instanceof Error ? error.message : 'The saved application packet could not be loaded.' });
+          }
+        });
+        return true;
+      }
+
       case 'GET_WORKDAY_ACCOUNT_STATE':
       case 'CLAIM_WORKDAY_ACCOUNT':
       case 'VALIDATE_WORKDAY_ACCOUNT_ACTION':
@@ -1160,6 +1193,24 @@ export default defineBackground(() => {
             sendResponse({ armed: Boolean(hit), applicationId: hit?.applicationId });
           })
           .catch(() => sendResponse({ armed: false }));
+        return true;
+      }
+
+      case 'CONTINUE_SMARTRECRUITERS_HANDOFF': {
+        const sourceUrl = sender.tab?.url ?? '';
+        const targetUrl = String(message.targetUrl ?? '');
+        const applicationId = String(message.applicationId ?? '');
+        if (!/^[0-9a-f-]{36}$/i.test(applicationId)
+          || !smartRecruitersContinuationAllowed(sourceUrl, targetUrl)) {
+          sendResponse({ ok: false });
+          return false;
+        }
+        readArmedHandoffs()
+          .then(async (entries) => {
+            await writeArmedHandoffs(armHandoffs(entries, [{ url: targetUrl, applicationId }], Date.now()));
+            sendResponse({ ok: true });
+          })
+          .catch(() => sendResponse({ ok: false }));
         return true;
       }
 

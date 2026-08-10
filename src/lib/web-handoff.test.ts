@@ -7,6 +7,8 @@ import {
   handoffKey,
   handoffMatches,
   pruneArmed,
+  smartRecruitersApplicationUrl,
+  smartRecruitersContinuationAllowed,
 } from './web-handoff';
 
 const NOW = 1_760_000_000_000;
@@ -47,6 +49,25 @@ describe('handoffMatches', () => {
 
   it('never matches across employers', () => {
     expect(handoffMatches('https://jobs.lever.co/palantir/9e40', 'https://jobs.lever.co/other/9e40')).toBe(false);
+  });
+});
+
+describe('SmartRecruiters handoff continuation', () => {
+  const posting = 'https://jobs.smartrecruiters.com/SeekaTechnology/744000063648206-software-engineer-internship';
+  const form = 'https://jobs.smartrecruiters.com/oneclick-ui/company/SeekaTechnology/publication/123e4567-e89b-12d3-a456-426614174000';
+
+  it('moves an armed posting only to its trusted one-click application form', () => {
+    expect(smartRecruitersApplicationUrl(posting, ['/privacy', form])).toBe(form);
+    expect(smartRecruitersContinuationAllowed(posting, form)).toBe(true);
+  });
+
+  it('refuses lookalike hosts, arbitrary SmartRecruiters paths, and non-https links', () => {
+    expect(smartRecruitersApplicationUrl(posting, [
+      'https://evil.example/oneclick-ui/company/x/publication/123e4567-e89b-12d3-a456-426614174000',
+      'https://jobs.smartrecruiters.com/company/admin',
+      'http://jobs.smartrecruiters.com/oneclick-ui/company/x/publication/123e4567-e89b-12d3-a456-426614174000',
+      'https://jobs.smartrecruiters.com/oneclick-ui/company/OtherEmployer/publication/123e4567-e89b-12d3-a456-426614174000',
+    ])).toBeNull();
   });
 });
 

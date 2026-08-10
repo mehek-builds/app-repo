@@ -62,6 +62,8 @@ import {
   workdayAccountCompletion,
 } from '../lib/workday-account-copy';
 import { bullhornEmployerName, contentInitRoute } from '../lib/content-init-routing';
+import { smartRecruitersApplicationUrl } from '../lib/web-handoff';
+import { reviewedQuestionsForHandoff, type HandoffQuestion } from '../lib/handoff-packet';
 import {
   fillWorkdayVerificationCode,
   findWorkdayAccountSubmit,
@@ -1315,6 +1317,7 @@ export default defineContentScript({
         statusElement: statusEl,
         announcerElement: announcerEl,
       });
+      let handoffApplicationId: string | null = null;
 
       // Must stay longer than the background's WHOLE budget so its descriptive error surfaces
       // first; this is only the backstop for the worse case where the service worker is torn down
@@ -1329,7 +1332,8 @@ export default defineContentScript({
       const RESUME_GEN_TIMEOUT_MS = 215000;
       const jobKey = `${company}\u0000${title}`;
       const startResumeGen = (): Promise<ResumeGenResult> => {
-        const cached = resumeGenByJob.get(jobKey);
+        const cacheKey = handoffApplicationId ? `application:${handoffApplicationId}` : jobKey;
+        const cached = resumeGenByJob.get(cacheKey);
         if (cached) return cached; // reuse across steps of a multi-step application (no re-charge)
         resumeGenStartedAt = Date.now();
         const p = new Promise<ResumeGenResult>((resolve) => {
@@ -1347,7 +1351,9 @@ export default defineContentScript({
           chrome.runtime.sendMessage(
             // `url` lets the background fetch Ashby's structured compensation range (R-031)
             // for this exact posting; harmless everywhere else (it resolves to null).
-            { type: 'GENERATE_RESUME_AND_FILL_DATA', payload: { company, role: title, jd_text: getJd(), url: location.href } },
+            handoffApplicationId
+              ? { type: 'GET_APPLICATION_HANDOFF_PACKET', applicationId: handoffApplicationId }
+              : { type: 'GENERATE_RESUME_AND_FILL_DATA', payload: { company, role: title, jd_text: getJd(), url: location.href } },
             (result: ResumeGenResult | undefined) => {
               clearTimeout(timer);
               // A dead service worker resolves the callback with lastError set (or with no
@@ -1361,7 +1367,7 @@ export default defineContentScript({
             },
           );
         });
-        resumeGenByJob.set(jobKey, p);
+        resumeGenByJob.set(cacheKey, p);
         return p;
       };
       card.addEventListener('mouseenter', () => void startResumeGen(), { once: true });
@@ -1679,7 +1685,8 @@ export default defineContentScript({
 
         if (finalSubmitBtn) armManualSubmissionTracking(finalSubmitBtn, resume.resume_id, statusEl, fillResult.ats_name);
 
-        const dashboardQuestions = [
+        const dashboardQuestions: HandoffQuestion[] = [
+          ...reviewedQuestionsForHandoff(resume),
           ...draftedQuestions,
           ...selectNeedsYouReasons(fillResult.skipped_reasons, 20).map((reason, index) => ({
             id: `required-${index + 1}`,
@@ -1688,7 +1695,7 @@ export default defineContentScript({
             kind: 'required' as const,
             required: true,
           })),
-        ];
+        ].filter((question, index, all) => all.findIndex((candidate) => candidate.id === question.id) === index);
 
         submitFromDashboard = async (approvedQuestions) => {
           if (!atsCanAutoSubmit(fillResult.ats_name)) {
@@ -1768,8 +1775,9 @@ export default defineContentScript({
        */
       chrome.runtime.sendMessage(
         { type: 'CLAIM_HANDOFF', url: window.location.href },
-        (response: { armed?: boolean } | undefined) => {
+        (response: { armed?: boolean; applicationId?: string } | undefined) => {
           if (chrome.runtime.lastError || !response?.armed) return;
+          if (response.applicationId) handoffApplicationId = response.applicationId;
           if (!card.isConnected) return;
           const yesBtn = card.querySelector<HTMLButtonElement>('#wp-resume-yes');
           if (!yesBtn || yesBtn.disabled) return;
@@ -2483,6 +2491,40 @@ export default defineContentScript({
 
       const job = getJobDetails();
       if (!job) return;
+
+      if (h === 'jobs.smartrecruiters.com' && !isAtsApplicationPage()) {
+        const targetUrl = smartRecruitersApplicationUrl(
+          window.location.href,
+          [...document.querySelectorAll<HTMLAnchorElement>('a[href]')].map((link) => link.href),
+        );
+        if (!targetUrl) {
+          chrome.runtime.sendMessage({
+            type: 'JOB_DETECTED',
+            payload: { title: job.title, company: job.company, url: window.location.href },
+          });
+          return;
+        }
+        chrome.runtime.sendMessage(
+          { type: 'CLAIM_HANDOFF', url: window.location.href },
+          (response: { armed?: boolean; applicationId?: string } | undefined) => {
+            if (chrome.runtime.lastError || !response?.armed || !response.applicationId) {
+              chrome.runtime.sendMessage({
+                type: 'JOB_DETECTED',
+                payload: { title: job.title, company: job.company, url: window.location.href },
+              });
+              return;
+            }
+            chrome.runtime.sendMessage({
+              type: 'CONTINUE_SMARTRECRUITERS_HANDOFF',
+              targetUrl,
+              applicationId: response.applicationId,
+            }, (continued: { ok?: boolean } | undefined) => {
+              if (continued?.ok) window.location.assign(targetUrl);
+            });
+          },
+        );
+        return;
+      }
 
       // Watch what the student types by hand, but only on a real application form. Idempotent and
       // self-latching: it stops for good the first time the backend says onboarding is complete,

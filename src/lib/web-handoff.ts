@@ -66,6 +66,44 @@ export function handoffMatches(armedKey: string, pageKey: string): boolean {
   return pageKey.startsWith(`${armedKey}/`) || armedKey.startsWith(`${pageKey}/`);
 }
 
+const SMARTRECRUITERS_ONE_CLICK_PATH = /^\/oneclick-ui\/company\/[a-z0-9._-]+\/publication\/[0-9a-f-]{36}\/?$/i;
+
+/**
+ * Resolve the application-form link exposed by a SmartRecruiters posting without trusting an
+ * arbitrary page link. The public posting and one-click form use unrelated paths, so ordinary
+ * prefix handoff matching cannot bridge them.
+ */
+export function smartRecruitersApplicationUrl(pageUrl: string, hrefs: readonly string[]): string | null {
+  let page: URL;
+  try {
+    page = new URL(pageUrl);
+  } catch {
+    return null;
+  }
+  if (page.protocol !== 'https:' || page.hostname !== 'jobs.smartrecruiters.com') return null;
+  const postingCompany = page.pathname.split('/').filter(Boolean)[0]?.toLowerCase();
+  if (!postingCompany) return null;
+  for (const href of hrefs) {
+    try {
+      const candidate = new URL(href, page);
+      if (candidate.protocol !== 'https:' || candidate.hostname !== page.hostname) continue;
+      if (!SMARTRECRUITERS_ONE_CLICK_PATH.test(candidate.pathname)) continue;
+      const formCompany = candidate.pathname.match(/^\/oneclick-ui\/company\/([^/]+)\//i)?.[1]?.toLowerCase();
+      if (formCompany !== postingCompany) continue;
+      candidate.search = '';
+      candidate.hash = '';
+      return candidate.toString();
+    } catch {
+      // Ignore malformed employer-page links and keep looking for the exact application route.
+    }
+  }
+  return null;
+}
+
+export function smartRecruitersContinuationAllowed(sourceUrl: string, targetUrl: string): boolean {
+  return smartRecruitersApplicationUrl(sourceUrl, [targetUrl]) === targetUrl;
+}
+
 /** Drop armings that have aged out. Called on every read so the store cannot grow without bound. */
 export function pruneArmed(entries: readonly ArmedHandoff[], now: number): ArmedHandoff[] {
   return entries.filter((entry) => now - entry.armedAt < ARMED_HANDOFF_TTL_MS);
