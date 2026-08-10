@@ -935,6 +935,7 @@ export default defineBackground(() => {
 
       case 'GET_APPLICATION_HANDOFF_PACKET': {
         const applicationId = String(message.applicationId ?? '');
+        const currentUrl = sender.url ?? '';
         if (!/^[0-9a-f-]{36}$/i.test(applicationId)) {
           sendResponse({ error: 'The saved application packet could not be identified.' });
           return false;
@@ -946,7 +947,11 @@ export default defineBackground(() => {
           }
           try {
             const [packetRes, profileRes, appProfileRes] = await Promise.all([
-              timeoutBackendFetch(`/applications/${applicationId}/submission/extension-packet`, {}, token),
+              timeoutBackendFetch(
+                `/applications/${applicationId}/submission/extension-packet?current_url=${encodeURIComponent(currentUrl)}`,
+                {},
+                token,
+              ),
               timeoutBackendFetch('/profile', {}, token),
               timeoutBackendFetch('/profile/application', {}, token),
             ]);

@@ -64,6 +64,7 @@ import {
 import { bullhornEmployerName, contentInitRoute } from '../lib/content-init-routing';
 import { smartRecruitersApplicationUrl } from '../lib/web-handoff';
 import { reviewedQuestionsForHandoff, type HandoffQuestion } from '../lib/handoff-packet';
+import { frozenAnswerForQuestion, replayReviewedAnswers } from '../lib/reviewed-answer-replay';
 import {
   fillWorkdayVerificationCode,
   findWorkdayAccountSubmit,
@@ -1445,6 +1446,7 @@ export default defineContentScript({
           return;
         }
         const { profile, applicationProfile, resume } = result;
+        const frozenHandoffQuestions = handoffApplicationId ? reviewedQuestionsForHandoff(resume) : [];
         const applicantEmail = applicantEmailForGeneratedPacket(resume, profile.email);
         if (!applicantEmail) {
           if (statusEl) statusEl.textContent = 'Litos could not preserve one email across the resume and application, so nothing was filled.';
@@ -1517,8 +1519,11 @@ export default defineContentScript({
               // The posting's structured salary range (R-031), when the background resolved one.
               postingCompensation: result.posting_compensation ?? null,
               signal,
-              draftAnswer: (question: string) =>
-                new Promise<string | null>((resolve) => {
+              draftAnswer: (question: string) => {
+                if (handoffApplicationId) {
+                  return Promise.resolve(frozenAnswerForQuestion(frozenHandoffQuestions, question));
+                }
+                return new Promise<string | null>((resolve) => {
                   if (signal.aborted) {
                     resolve(null);
                     return;
@@ -1546,7 +1551,8 @@ export default defineContentScript({
                     (r: { answer?: string | null } | undefined) =>
                       finish(signal.aborted ? null : (r?.answer ?? null)),
                   );
-                }),
+                });
+              },
               // Streamed progress: instant fields report immediately, then each essay updates
               // the count as its own draft call resolves, instead of the status text sitting on
               // "Filling the application..." until every essay in the form is done.
@@ -1576,6 +1582,13 @@ export default defineContentScript({
         // resume as a skip, this entry is the WHY.
         if (!resumeBlob) {
           fillResult.skipped_reasons.push(resumeFetchSkipReason);
+        }
+        if (handoffApplicationId && frozenHandoffQuestions.length > 0) {
+          const replay = replayReviewedAnswers(document, frozenHandoffQuestions);
+          for (const questionId of replay.failed) {
+            const question = frozenHandoffQuestions.find((item) => item.id === questionId);
+            if (question) fillResult.skipped_reasons.push(`saved answer: ${question.question}`);
+          }
         }
 
         const autoSubmitOn = await serverAutoSubmitEnabled();
@@ -1686,7 +1699,7 @@ export default defineContentScript({
         if (finalSubmitBtn) armManualSubmissionTracking(finalSubmitBtn, resume.resume_id, statusEl, fillResult.ats_name);
 
         const dashboardQuestions: HandoffQuestion[] = [
-          ...reviewedQuestionsForHandoff(resume),
+          ...frozenHandoffQuestions,
           ...draftedQuestions,
           ...selectNeedsYouReasons(fillResult.skipped_reasons, 20).map((reason, index) => ({
             id: `required-${index + 1}`,

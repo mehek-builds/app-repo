@@ -12,6 +12,12 @@ describe('SmartRecruiters exact packet attended handoff', () => {
     expect(background).toMatch(/resume\.resume_id !== applicationId \|\| resume\.application\?\.id !== applicationId/);
     expect(content).toMatch(/reviewedQuestionsForHandoff\(resume\)/);
     expect(content).toMatch(/applicantEmailForGeneratedPacket\(resume, profile\.email\)/);
+    expect(background).toMatch(/extension-packet\?current_url=\$\{encodeURIComponent\(currentUrl\)\}/);
+  });
+
+  it('replays frozen answers and never redrafts an attended packet question', () => {
+    expect(content).toMatch(/if \(handoffApplicationId\) \{[\s\S]*?frozenAnswerForQuestion\(frozenHandoffQuestions, question\)/);
+    expect(content).toMatch(/replayReviewedAnswers\(document, frozenHandoffQuestions\)/);
   });
 
   it('uses the same exact-packet loader for non-SmartRecruiters armed forms', () => {
