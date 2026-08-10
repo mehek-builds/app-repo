@@ -122,6 +122,25 @@ describe('detectChallenge', () => {
     expect(state.provider).toBe('hcaptcha');
   });
 
+  it('holds a SmartRecruiters manual handoff until its open-shadow hCaptcha token is populated', () => {
+    mount('<form><spl-input id="human-check"></spl-input><button type="submit">Submit</button></form>');
+    const host = document.querySelector('spl-input')!;
+    const shadow = host.attachShadow({ mode: 'open' });
+    shadow.innerHTML = `
+      <div class="h-captcha" data-sitekey="abc"></div>
+      <textarea name="h-captcha-response"></textarea>
+    `;
+    const challenge = shadow.querySelector('.h-captcha') as HTMLElement;
+    challenge.getBoundingClientRect = () => ({
+      width: 303, height: 78, top: 0, left: 0, right: 303, bottom: 78,
+      x: 0, y: 0, toJSON: () => ({}),
+    }) as DOMRect;
+
+    expect(detectChallenge()).toEqual({ waiting: true, provider: 'hcaptcha' });
+    (shadow.querySelector('[name="h-captcha-response"]') as HTMLTextAreaElement).value = 'human-solved-token';
+    expect(detectChallenge()).toEqual({ waiting: false, provider: 'unknown' });
+  });
+
   it('identifies Cloudflare Turnstile', () => {
     mount(`
       <form>

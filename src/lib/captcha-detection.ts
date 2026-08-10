@@ -106,14 +106,42 @@ function isReallyVisible(element: Element): boolean {
   return !isInsideCollapsedRegion(element);
 }
 
+/** Document order across the light DOM and every reachable open shadow root. SmartRecruiters
+ *  renders both factual controls and hCaptcha response fields under `spl-*` shadow hosts, so a
+ *  root-only query would authorize the exact form while the human check was still empty. */
+function rootsAcrossOpenShadow(root: ParentNode): ParentNode[] {
+  const roots: ParentNode[] = [root];
+  for (let index = 0; index < roots.length; index += 1) {
+    for (const element of roots[index].querySelectorAll('*')) {
+      if (element.shadowRoot && !roots.includes(element.shadowRoot)) roots.push(element.shadowRoot);
+    }
+  }
+  return roots;
+}
+
+function queryAcrossRoots(root: ParentNode, selector: string): Element[] {
+  return rootsAcrossOpenShadow(root).flatMap((candidate) => [...candidate.querySelectorAll(selector)]);
+}
+
+function closestAcrossRoots(element: Element, selector: string): Element | null {
+  let current: Element | null = element;
+  while (current) {
+    const match = current.closest(selector);
+    if (match) return match;
+    const root = current.getRootNode();
+    current = root instanceof ShadowRoot ? root.host : null;
+  }
+  return null;
+}
+
 function tokens(root: ParentNode): string[] {
-  return [...root.querySelectorAll(RESPONSE_SELECTOR)]
+  return queryAcrossRoots(root, RESPONSE_SELECTOR)
     .map((field) => (field as HTMLInputElement | HTMLTextAreaElement).value ?? '');
 }
 
 function visibleChallengeCount(root: ParentNode): number {
-  return [...root.querySelectorAll(CHALLENGE_SELECTOR)].filter((node) => (
-    node.closest(`.${BADGE_CLASS}`) === null && isReallyVisible(node)
+  return queryAcrossRoots(root, CHALLENGE_SELECTOR).filter((node) => (
+    closestAcrossRoots(node, `.${BADGE_CLASS}`) === null && isReallyVisible(node)
   )).length;
 }
 
@@ -130,11 +158,11 @@ export function snapshotRequiresAttention(responseTokens: string[], challengeCou
 
 export function identifyProvider(root: ParentNode = document): CaptchaProvider {
   for (const marker of PROVIDER_MARKERS) {
-    if (root.querySelector(marker.selector) === null) continue;
+    if (queryAcrossRoots(root, marker.selector).length === 0) continue;
     if (marker.provider !== 'recaptcha_v2') return marker.provider;
     // Same split the badge exclusion uses: an interactive widget lives outside the badge, so a page
     // whose only reCAPTCHA markup is the badge is v3 and is asking nothing of anyone.
-    return root.querySelector(INTERACTIVE_RECAPTCHA_SELECTOR) === null ? 'recaptcha_v3' : 'recaptcha_v2';
+    return queryAcrossRoots(root, INTERACTIVE_RECAPTCHA_SELECTOR).length === 0 ? 'recaptcha_v3' : 'recaptcha_v2';
   }
   return 'unknown';
 }
@@ -172,13 +200,28 @@ export function watchForChallenge(
     observer.disconnect();
     if (timer !== undefined) clearTimeout(timer);
   };
+  const observed = new Set<Node>();
+  const observe = (node: Node) => {
+    if (observed.has(node)) return;
+    observed.add(node);
+    observer.observe(node, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'class', 'style'] });
+  };
+  const observeOpenRoots = () => {
+    observe(target);
+    for (const candidate of rootsAcrossOpenShadow(root)) {
+      if (candidate instanceof Node) observe(candidate);
+    }
+  };
   const observer = new MutationObserver(() => {
     const state = detectChallenge(root);
-    if (!state.waiting) return;
+    if (!state.waiting) {
+      observeOpenRoots();
+      return;
+    }
     stop();
     onChallenge(state);
   });
-  observer.observe(target, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'class', 'style'] });
+  observeOpenRoots();
 
   // Bounded. An observer left attached to a job board's form outlives the fill it belonged to and
   // keeps running on every DOM change the page makes for as long as the tab is open.
@@ -220,7 +263,7 @@ export function waitForChallengeCleared(
    * the right direction to fail: the application waits for a human instead of lying to one. */
   const cleared = (): boolean => {
     if (detectChallenge(root).waiting) return false;
-    return [...root.querySelectorAll(RESPONSE_SELECTOR)]
+    return queryAcrossRoots(root, RESPONSE_SELECTOR)
       .some((field) => ((field as HTMLInputElement | HTMLTextAreaElement).value ?? '').trim().length > 0);
   };
 

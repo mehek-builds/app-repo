@@ -2,6 +2,25 @@
 
 All notable changes to the Litos extension are documented here.
 
+## [0.5.10] - 2026-08-10
+
+### Added
+- SmartRecruiters one-click forms are included in the published Chrome manifest and use the exact
+  reviewed application packet during an attended handoff.
+- The attended flow binds the current employer, publication URL, reviewed answers, and exact PDF
+  before a user-initiated submission can start.
+
+### Fixed
+- A stale packet, changed job URL, failed answer replay, changed resume attachment, or concurrent
+  dashboard action now stops before submission.
+- Release checks now reject ATS manifest changes that reuse the base branch's version, and verify
+  the built Chrome artifact carries its package version and the SmartRecruiters content-script
+  match.
+
+### Release note
+- The public store already used the number 0.5.9 before the SmartRecruiters handoff work merged.
+  This release uses a new number so Chrome can distinguish and install the reviewed artifact.
+
 ## [0.5.9] - 2026-07-31
 
 ### Added
