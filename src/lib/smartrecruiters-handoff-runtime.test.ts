@@ -20,6 +20,13 @@ describe('SmartRecruiters exact packet attended handoff', () => {
     expect(content).toMatch(/replayReviewedAnswers\(document, frozenHandoffQuestions\)/);
   });
 
+  it('does not touch a form when the backend rejects the authoritative current URL', () => {
+    const rejectedPacketGuard = content.indexOf('if (!result || result.error || !result.profile || !result.applicationProfile || !result.resume)');
+    const adapterFill = content.indexOf('fillResult = await withInactivityTimeout');
+    expect(rejectedPacketGuard).toBeGreaterThan(-1);
+    expect(adapterFill).toBeGreaterThan(rejectedPacketGuard);
+  });
+
   it('uses the same exact-packet loader for non-SmartRecruiters armed forms', () => {
     const claim = content.slice(content.indexOf("{ type: 'CLAIM_HANDOFF'"));
     expect(claim).toMatch(/handoffApplicationId = response\.applicationId[\s\S]*?yesBtn\.click\(\)/);
