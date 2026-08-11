@@ -150,8 +150,15 @@ export async function clearAll(): Promise<void> {
     const session = chrome.storage.session;
     if (session) {
       const stored = await session.get(null);
-      const packetKeys = Object.keys(stored).filter((key) => key.startsWith('litos_packet_applicant_identity:'));
-      if (packetKeys.length) await session.remove(packetKeys);
+      const userScopedSessionKeys = Object.keys(stored).filter((key) =>
+        key.startsWith('litos_packet_applicant_identity:')
+        || key.startsWith('litos_gated_attended_continuation:')
+        || key.startsWith('litos_pending_extension_submission:')
+        || key === 'litos_armed_handoffs'
+        || key === 'litos_extension_handoff_packet_bindings'
+        || key === 'litos_application_tabs'
+        || key === 'lastDetectedJob');
+      if (userScopedSessionKeys.length) await session.remove(userScopedSessionKeys);
     }
   });
 }

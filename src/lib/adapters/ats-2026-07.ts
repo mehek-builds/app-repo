@@ -2,6 +2,7 @@ import type { AutofillResult } from '../types';
 import { fillField, isHoneypotField, splitName } from './shared/dom';
 import { fillGenericApplication, type GenericFillParams, type GenericProviderPolicy } from './generic';
 import { browserApplicationCapability } from './browser-application-capabilities';
+import { inspectGatedAttendedStage } from '../gated-attended-ats';
 
 // Adapters for the ATS platforms captured on 2026-07-29 (vault:
 // litos-ats-dom-capture-2026-07-29.md). Every selector here came off a real rendered form; none was
@@ -23,7 +24,7 @@ import { browserApplicationCapability } from './browser-application-capabilities
 type FieldKey = 'fullName' | 'firstName' | 'lastName' | 'email' | 'confirmEmail' | 'phone' | 'city' | 'linkedin' | 'portfolio';
 
 interface AtsSpec {
-  readonly id: 'smartrecruiters' | 'rippling' | 'breezy' | 'bamboohr' | 'recruitee' | 'teamtailor' | 'personio' | 'pinpoint' | 'comeet' | 'zoho_recruit' | 'bullhorn' | 'jazzhr';
+  readonly id: 'smartrecruiters' | 'jobvite' | 'icims' | 'rippling' | 'breezy' | 'bamboohr' | 'recruitee' | 'teamtailor' | 'personio' | 'pinpoint' | 'comeet' | 'zoho_recruit' | 'bullhorn' | 'jazzhr';
   readonly host: (hostname: string) => boolean;
   readonly isApplicationPath: (pathname: string, rawSearch: string, hash: string, hostname?: string) => boolean;
   /** Selectors for the fields the profile can answer factually. Absent keys are simply not filled. */
@@ -65,6 +66,8 @@ const AUTO_SUBMIT_CAPABILITIES = {
   pinpoint: 'never',
   comeet: 'never',
   smartrecruiters: 'never',
+  jobvite: 'never',
+  icims: 'never',
 } as const satisfies Record<string, 'conditional' | 'never'>;
 
 export const ATS_SPECS: readonly AtsSpec[] = [
@@ -107,6 +110,26 @@ export const ATS_SPECS: readonly AtsSpec[] = [
     autoSubmit: AUTO_SUBMIT_CAPABILITIES.smartrecruiters,
     ceiling:
       'SmartRecruiters uses a multi-step application. Litos filled the factual fields on this page and left every later question, confirmation, and send action to you.',
+  },
+  {
+    id: 'jobvite',
+    host: (h) => h === 'jobs.jobvite.com',
+    isApplicationPath: (p) => /^\/[a-z0-9._-]+\/job\/[a-z0-9]+(?:\/apply)?\/?$/i.test(p),
+    fields: {},
+    jd: 'main, [data-testid*="job-description"], [class*="job-description"]',
+    autoSubmit: AUTO_SUBMIT_CAPABILITIES.jobvite,
+    genericPolicy: { provider: 'jobvite', forbidConsentWrites: true, forbidHumanDecisionWrites: true },
+    ceiling: 'Jobvite requires you to review the final form and click its send button yourself.',
+  },
+  {
+    id: 'icims',
+    host: (h) => /^(?!(?:www|community|login|api)\.)[a-z0-9-]+\.icims\.com$/i.test(h),
+    isApplicationPath: (p) => /^\/jobs\/\d+\/[a-z0-9%._~-]+\/(?:job|login)\/?$/i.test(p),
+    fields: {},
+    jd: 'main, #job-description, [class*="job-description"]',
+    autoSubmit: AUTO_SUBMIT_CAPABILITIES.icims,
+    genericPolicy: { provider: 'icims', forbidConsentWrites: true, forbidHumanDecisionWrites: true },
+    ceiling: 'iCIMS requires you to review the final form and click its send button yourself.',
   },
   {
     id: 'zoho_recruit',
@@ -310,12 +333,10 @@ export const ATS_SPECS: readonly AtsSpec[] = [
   },
   {
     id: 'bamboohr',
-    host: (h) => h === 'mpathic2.bamboohr.com' || h === 'prentkeromich.bamboohr.com',
+    host: (h) => /^(?!(?:www|app|api|support)\.)[a-z0-9-]+\.bamboohr\.com$/i.test(h),
     // Numeric job id. Excludes www.bamboohr.com/careers/application, which is BambooHR's OWN careers
     // page and runs on Greenhouse, and the /careers/{department}-team marketing routes.
-    isApplicationPath: (p, _search, _hash, host) =>
-      (host === 'mpathic2.bamboohr.com' && /^\/careers\/99\/?$/.test(p))
-      || (host === 'prentkeromich.bamboohr.com' && /^\/careers\/480\/?$/.test(p)),
+    isApplicationPath: (p) => /^\/careers\/\d+\/?$/.test(p),
     // ids are FabricTextField-<n>, sequential and render-dependent, so everything matches on name.
     fields: {
       firstName: 'input[name="firstName"]',
@@ -352,7 +373,11 @@ export function specForCurrentPage(): AtsSpec | null {
 
 export function isAtsApplicationPage(): boolean {
   const spec = specForCurrentPage();
-  return spec ? spec.isApplicationPath(window.location.pathname, window.location.search, window.location.hash, window.location.hostname) : false;
+  if (!spec?.isApplicationPath(window.location.pathname, window.location.search, window.location.hash, window.location.hostname)) return false;
+  if (spec.id === 'jobvite' || spec.id === 'icims') {
+    return inspectGatedAttendedStage(window.location.href)?.stage === 'application';
+  }
+  return true;
 }
 
 export function atsCanAutoSubmit(atsName: string): boolean {

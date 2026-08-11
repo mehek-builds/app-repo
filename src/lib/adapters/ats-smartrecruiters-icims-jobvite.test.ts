@@ -210,3 +210,78 @@ describe('programmatic submit is denied at every exported entrance', () => {
     expect(clicks).toBe(0);
   });
 });
+
+describe('Jobvite and iCIMS live resume targeting', () => {
+  const profile: Profile = {
+    full_name: 'Mehek Mandal',
+    email: 'applicant@litos.email',
+    experience: [],
+    skills: [],
+    school: 'USC',
+    grad_year: 2028,
+  };
+  const applicationProfile: ApplicationProfile = {};
+
+  beforeEach(() => {
+    document.body.innerHTML = '';
+    at('https://jobs.jobvite.com/worldfirst/job/oknrAfws/apply');
+    (globalThis as unknown as { CSS: { escape: (value: string) => string } }).CSS = { escape: (value) => value };
+    class FakeDataTransfer {
+      files: File[] = [];
+      items = { add: (file: File) => { this.files.push(file); } };
+    }
+    (globalThis as unknown as Record<string, unknown>).DataTransfer = FakeDataTransfer;
+    Object.defineProperty(HTMLInputElement.prototype, 'files', {
+      configurable: true,
+      get(this: HTMLInputElement) { return (this as unknown as Record<string, unknown>).__files ?? null; },
+      set(this: HTMLInputElement, value: unknown) { (this as unknown as Record<string, unknown>).__files = value; },
+    });
+  });
+
+  function makeVisible(input: HTMLInputElement): void {
+    input.getBoundingClientRect = () => ({
+      x: 0, y: 0, top: 0, left: 0, right: 200, bottom: 24, width: 200, height: 24,
+      toJSON: () => ({}),
+    });
+  }
+
+  it('attaches only to one visible semantic resume input, never a hidden stale input', async () => {
+    document.body.innerHTML = `
+      <div hidden><label>Resume<input id="stale" type="file"></label></div>
+      <label>Resume<input id="live" type="file"></label>
+      <label>Email<input id="email" type="email"></label>`;
+    const live = document.querySelector<HTMLInputElement>('#live')!;
+    const email = document.querySelector<HTMLInputElement>('#email')!;
+    makeVisible(live);
+    makeVisible(email);
+    const result = await fillAtsApplication({
+      fullName: 'Mehek Mandal',
+      email: 'applicant@litos.email',
+      profile,
+      applicationProfile,
+      resumeBlob: new Blob(['exact'], { type: 'application/pdf' }),
+      resumeFileName: 'resume.pdf',
+    });
+    expect(document.querySelector<HTMLInputElement>('#stale')?.files?.length ?? 0).toBe(0);
+    expect(live.files?.length).toBe(1);
+    expect(result.skipped_reasons).not.toContain('resume: no file input found on this form');
+  });
+
+  it('refuses a cover-letter-only upload control', async () => {
+    document.body.innerHTML = `
+      <label>Cover letter<input id="cover" type="file"></label>
+      <label>Email<input id="email" type="email"></label>`;
+    makeVisible(document.querySelector<HTMLInputElement>('#cover')!);
+    makeVisible(document.querySelector<HTMLInputElement>('#email')!);
+    const result = await fillAtsApplication({
+      fullName: 'Mehek Mandal',
+      email: 'applicant@litos.email',
+      profile,
+      applicationProfile,
+      resumeBlob: new Blob(['exact'], { type: 'application/pdf' }),
+      resumeFileName: 'resume.pdf',
+    });
+    expect(document.querySelector<HTMLInputElement>('#cover')?.files?.length ?? 0).toBe(0);
+    expect(result.skipped_reasons).toContain('resume: no file input found on this form');
+  });
+});

@@ -90,6 +90,12 @@ describe('extension auth storage', () => {
   it('clears every tab packet identity on logout without touching unrelated session state', async () => {
     sessionValues['litos_packet_applicant_identity:4'] = { userId: 'user-a' };
     sessionValues['litos_packet_applicant_identity:9'] = { userId: 'user-a' };
+    sessionValues['litos_gated_attended_continuation:4:0'] = { applicationId: 'app-a' };
+    sessionValues['litos_pending_extension_submission:4'] = { applicationId: 'app-a' };
+    sessionValues.litos_armed_handoffs = [{ applicationId: 'app-a' }];
+    sessionValues.litos_extension_handoff_packet_bindings = { 'app-a': {} };
+    sessionValues.litos_application_tabs = { 'app-a': 4 };
+    sessionValues.lastDetectedJob = { title: 'Old owner job' };
     sessionValues.unrelated = true;
     await storage.clearAll();
     expect(sessionValues).toEqual({ unrelated: true });

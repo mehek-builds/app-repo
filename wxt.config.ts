@@ -22,9 +22,7 @@ export default defineConfig({
       matches: [
         'https://trylitos.com/*',
         'https://www.trylitos.com/*',
-        'https://role-quick-website.vercel.app/*',
-        'http://localhost/*',
-        'http://localhost:*/*',
+        ...(command === 'serve' ? ['http://localhost/*', 'http://localhost:*/*'] : []),
       ],
     },
   }),

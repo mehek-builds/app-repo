@@ -28,17 +28,19 @@ import {
   claimArmed,
   continueSmartRecruitersHandoff,
   applicationFormIdentityKey,
+  pruneArmed,
   decideAdoption,
   type AdoptionOutcome,
   type ArmedHandoff,
 } from '../lib/web-handoff';
+import { gatedAttendedIdentity, newArmingSupersedesContinuation, validGatedAccountNavigationProof } from '../lib/gated-attended-ats';
 import { validHandoffVersion } from '../lib/handoff-packet';
 import { automaticSubmissionEnabled, groundedDraftAnswer } from '../lib/auto-submit-consent';
 import { backendFetch } from '../lib/backend-fetch';
 import { flushAnalyticsQueue, trackExtensionEvent } from '../lib/analytics';
 import { clearStall, readStalls, recordStall } from '../lib/captcha-stalls';
 import { badgeState } from '../lib/badge';
-import { applicantEmailForGeneratedPacket, atsNameForPortalUrl } from '../lib/applicant-email';
+import { applicantEmailForGeneratedPacket, atsNameForPortalUrl, resumeContactEmailForProfile } from '../lib/applicant-email';
 import {
   clearPacketApplicantIdentity,
   packetIdentityMatchesCurrentRoute,
@@ -46,6 +48,9 @@ import {
   readPacketApplicantIdentity,
   storePacketApplicantIdentity,
 } from '../lib/packet-applicant-identity';
+import { KeyedMutationQueue, persistOneShotTransition } from '../lib/keyed-mutation-queue';
+import { frozenApplicantFillData } from '../lib/handoff-applicant-snapshot';
+import { packetAuditForResume } from '../lib/handoff-packet-audit';
 
 // Latched off once the backend reports onboarding complete. Service-worker memory is fine for
 // this: the worst case on a restart is one wasted 403, which re-latches it immediately.
@@ -56,12 +61,28 @@ type PendingExtensionSubmission = {
   claimId: string;
   startedAt: number;
   frameId: number;
+  packetVersion: string;
+  auditDigest: string;
+  strictReceipt?: { family: 'jobvite' | 'icims'; startedUrl: string };
 };
 
 const PENDING_SUBMISSIONS_KEY = 'litos_pending_extension_submission';
 const PENDING_SUBMISSION_MAX_AGE_MS = 5 * 60_000;
 const HANDOFF_PACKET_BINDINGS_KEY = 'litos_extension_handoff_packet_bindings';
+const GATED_ATTENDED_CONTINUATION_PREFIX = 'litos_gated_attended_continuation';
+const GATED_ATTENDED_CONTINUATION_TTL_MS = 60 * 60_000;
+const GATED_ATTENDED_ACCOUNT_PROOF_TTL_MS = 5 * 60_000;
 const dashboardSubmissionsInFlight = new Set<string>();
+const gatedPreparationsInFlight = new Set<string>();
+const gatedContinuationMutations = new KeyedMutationQueue();
+const armedHandoffMutations = new KeyedMutationQueue();
+const handoffPacketBindingMutations = new KeyedMutationQueue();
+const pendingSubmissionMutations = new KeyedMutationQueue();
+const applicationTabMutations = new KeyedMutationQueue();
+const ARMED_HANDOFF_MUTATION_KEY = 'armed-handoffs';
+const HANDOFF_PACKET_BINDING_MUTATION_KEY = 'handoff-packet-bindings';
+const PENDING_SUBMISSION_MUTATION_KEY = 'pending-submissions';
+const APPLICATION_TAB_MUTATION_KEY = 'application-tabs';
 
 type HandoffPacketBinding = {
   applicationId: string;
@@ -69,17 +90,126 @@ type HandoffPacketBinding = {
   frameId: number;
   currentUrl: string;
   handoffVersion: string;
+  packetVersion: string;
+  auditDigest: string;
+  pdfSha256: string;
+  pdfSizeBytes: number;
 };
+
+type GatedAttendedContinuation = {
+  applicationId: string;
+  tabId: number;
+  frameId: number;
+  identity: string;
+  preparedAt: number;
+  handoffVersion: string;
+  applicantEmail: string;
+  accountLoginProofAt?: number;
+  accountLoginProofDocumentId?: string;
+  securityCodeProofAt?: number;
+  securityCodeProofDocumentId?: string;
+};
+
+function gatedContinuationKey(tabId: number, frameId: number): string {
+  return `${GATED_ATTENDED_CONTINUATION_PREFIX}:${tabId}:${frameId}`;
+}
+
+function withGatedContinuationMutation<T>(key: string, operation: () => Promise<T>): Promise<T> {
+  return gatedContinuationMutations.run(key, operation);
+}
+
+async function gatedAttendedContinuation(tabId: number, frameId: number): Promise<GatedAttendedContinuation | null> {
+  const key = gatedContinuationKey(tabId, frameId);
+  const stored = await chrome.storage.session.get(key);
+  return (stored[key] as GatedAttendedContinuation | undefined) ?? null;
+}
+
+async function storeGatedAttendedContinuation(continuation: GatedAttendedContinuation): Promise<void> {
+  const key = gatedContinuationKey(continuation.tabId, continuation.frameId);
+  await withGatedContinuationMutation(key, () => chrome.storage.session.set({ [key]: continuation }));
+}
+
+function consumeArmedAndStoreGatedContinuation(
+  continuation: GatedAttendedContinuation,
+  authEpoch: number,
+): Promise<void> {
+  return armedHandoffMutations.run(ARMED_HANDOFF_MUTATION_KEY, async () => {
+    assertCurrentAuthEpoch(authEpoch);
+    const latest = pruneArmed(await readArmedHandoffs(), Date.now());
+    const latestIndex = latest.findIndex((entry) => entry.applicationId === continuation.applicationId
+      && gatedAttendedIdentity(entry.key)?.key === continuation.identity);
+    if (latestIndex < 0) throw new Error('The attended application request expired before it could be prepared.');
+    const before = [...latest];
+    latest.splice(latestIndex, 1);
+    await persistOneShotTransition({
+      before,
+      after: latest,
+      persistSource: writeArmedHandoffs,
+      persistDestination: () => storeGatedAttendedContinuation(continuation),
+    });
+    if (!authEpochIsCurrent(authEpoch)) {
+      await withGatedContinuationMutation(
+        gatedContinuationKey(continuation.tabId, continuation.frameId),
+        () => chrome.storage.session.remove(gatedContinuationKey(continuation.tabId, continuation.frameId)),
+      );
+      assertCurrentAuthEpoch(authEpoch);
+    }
+  });
+}
+
+async function claimGatedAttendedContinuation(
+  tabId: number,
+  frameId: number,
+  currentUrl: string,
+  currentDocumentId?: string,
+): Promise<GatedAttendedContinuation | null> {
+  const identity = gatedAttendedIdentity(currentUrl);
+  if (!identity) return null;
+  const key = gatedContinuationKey(tabId, frameId);
+  return withGatedContinuationMutation(key, async () => {
+    const continuation = await gatedAttendedContinuation(tabId, frameId);
+    if (!continuation) return null;
+    await chrome.storage.session.remove(key);
+    const now = Date.now();
+    const accountProofValid = validGatedAccountNavigationProof({
+      family: identity.family,
+      loginProofAt: continuation.accountLoginProofAt,
+      loginProofDocumentId: continuation.accountLoginProofDocumentId,
+      securityProofAt: continuation.securityCodeProofAt,
+      securityProofDocumentId: continuation.securityCodeProofDocumentId,
+      currentDocumentId,
+      now,
+      ttlMs: GATED_ATTENDED_ACCOUNT_PROOF_TTL_MS,
+    });
+    return continuation.identity === identity.key
+      && now - continuation.preparedAt <= GATED_ATTENDED_CONTINUATION_TTL_MS
+      && accountProofValid
+      ? continuation
+      : null;
+  });
+}
 
 async function handoffPacketBindings(): Promise<Record<string, HandoffPacketBinding>> {
   const stored = await chrome.storage.session.get(HANDOFF_PACKET_BINDINGS_KEY);
   return (stored[HANDOFF_PACKET_BINDINGS_KEY] ?? {}) as Record<string, HandoffPacketBinding>;
 }
 
-async function storeHandoffPacketBinding(binding: HandoffPacketBinding): Promise<void> {
-  const bindings = await handoffPacketBindings();
-  await chrome.storage.session.set({
-    [HANDOFF_PACKET_BINDINGS_KEY]: { ...bindings, [binding.applicationId]: binding },
+function assertCurrentAuthEpoch(epoch: number): void {
+  if (!authEpochIsCurrent(epoch)) throw new Error('The Litos account changed while this application was being prepared.');
+}
+
+async function storeHandoffPacketBinding(binding: HandoffPacketBinding, authEpoch?: number): Promise<void> {
+  await handoffPacketBindingMutations.run(HANDOFF_PACKET_BINDING_MUTATION_KEY, async () => {
+    if (authEpoch !== undefined) assertCurrentAuthEpoch(authEpoch);
+    const bindings = await handoffPacketBindings();
+    if (authEpoch !== undefined) assertCurrentAuthEpoch(authEpoch);
+    await chrome.storage.session.set({
+      [HANDOFF_PACKET_BINDINGS_KEY]: { ...bindings, [binding.applicationId]: binding },
+    });
+    if (authEpoch !== undefined && !authEpochIsCurrent(authEpoch)) {
+      await chrome.storage.session.remove(HANDOFF_PACKET_BINDINGS_KEY);
+      assertCurrentAuthEpoch(authEpoch);
+    }
   });
 }
 
@@ -90,6 +220,8 @@ async function handoffPacketBinding(
 ): Promise<HandoffPacketBinding | null> {
   const binding = (await handoffPacketBindings())[applicationId];
   return binding?.tabId === tabId && binding.frameId === frameId && validHandoffVersion(binding.handoffVersion)
+    && validHandoffVersion(binding.packetVersion) && validHandoffVersion(binding.auditDigest)
+    && validHandoffVersion(binding.pdfSha256) && Number.isSafeInteger(binding.pdfSizeBytes) && binding.pdfSizeBytes > 0
     ? binding
     : null;
 }
@@ -101,6 +233,7 @@ async function fetchAndBindHandoffPacket(input: {
   frameId: number;
   token: string;
   publishBinding?: boolean;
+  authEpoch?: number;
 }): Promise<GeneratedResume> {
   const packetRes = await timeoutBackendFetch(
     `/applications/${input.applicationId}/submission/extension-packet?current_url=${encodeURIComponent(input.currentUrl)}`,
@@ -109,11 +242,16 @@ async function fetchAndBindHandoffPacket(input: {
   );
   if (!packetRes.ok) throw new Error(`The saved application packet is not available (${packetRes.status}).`);
   const resume = await packetRes.json() as GeneratedResume;
+  if (input.authEpoch !== undefined) assertCurrentAuthEpoch(input.authEpoch);
   if (resume.resume_id !== input.applicationId || resume.application?.id !== input.applicationId) {
     throw new Error('The downloaded resume does not belong to this application packet.');
   }
   if (!validHandoffVersion(resume.handoff_version)) {
     throw new Error('The saved application packet has no immutable handoff version.');
+  }
+  const audit = packetAuditForResume(resume);
+  if (!audit) {
+    throw new Error('The saved application packet has no complete current audit.');
   }
   if (input.publishBinding !== false) {
     await storeHandoffPacketBinding({
@@ -122,7 +260,11 @@ async function fetchAndBindHandoffPacket(input: {
       frameId: input.frameId,
       currentUrl: input.currentUrl,
       handoffVersion: resume.handoff_version,
-    });
+      packetVersion: audit.packet_version,
+      auditDigest: audit.audit_digest,
+      pdfSha256: audit.bindings.pdf.sha256,
+      pdfSizeBytes: audit.bindings.pdf.sizeBytes,
+    }, input.authEpoch);
   }
   return resume;
 }
@@ -137,13 +279,23 @@ async function pendingSubmission(tabId: number): Promise<PendingExtensionSubmiss
   return (stored[key] as PendingExtensionSubmission | undefined) ?? null;
 }
 
-async function setPendingSubmission(tabId: number, pending: PendingExtensionSubmission | null) {
-  const key = pendingSubmissionKey(tabId);
-  if (pending) await chrome.storage.session.set({ [key]: pending });
-  else await chrome.storage.session.remove(key);
+async function setPendingSubmission(tabId: number, pending: PendingExtensionSubmission | null, authEpoch?: number) {
+  await pendingSubmissionMutations.run(PENDING_SUBMISSION_MUTATION_KEY, async () => {
+    if (authEpoch !== undefined) assertCurrentAuthEpoch(authEpoch);
+    const key = pendingSubmissionKey(tabId);
+    if (pending) await chrome.storage.session.set({ [key]: pending });
+    else await chrome.storage.session.remove(key);
+    if (authEpoch !== undefined && !authEpochIsCurrent(authEpoch)) {
+      await chrome.storage.session.remove(key);
+      assertCurrentAuthEpoch(authEpoch);
+    }
+  });
 }
 
 async function postExtensionOutcome(pending: PendingExtensionSubmission, outcome: 'confirmed' | 'failed' | 'unknown' | 'cancelled', finalUrl: string, confirmationText?: string) {
+  if (!validHandoffVersion(pending.packetVersion) || !validHandoffVersion(pending.auditDigest)) {
+    throw new Error('The audited application packet is no longer available. Nothing was recorded.');
+  }
   const token = await getStoredToken();
   if (!token) throw new Error('Sign in to Litos again before updating this application.');
   const response = await timeoutBackendFetch(`/applications/${pending.applicationId}/submission/extension-outcome`, {
@@ -330,6 +482,8 @@ async function adoptWebSession(incomingToken: string): Promise<{ ok: boolean; ou
   }
 
   try {
+    await clearStoredSession();
+    await clearApplicationRuntimeState();
     await setToken(incoming);
     if (incomingProfile) await setProfile(incomingProfile);
     return { ok: true, outcome };
@@ -339,13 +493,38 @@ async function adoptWebSession(incomingToken: string): Promise<{ ok: boolean; ou
 }
 
 async function readArmedHandoffs(): Promise<ArmedHandoff[]> {
-  const stored = await chrome.storage.session.get(ARMED_HANDOFF_KEY).catch(() => ({}) as Record<string, unknown>);
+  const stored = await chrome.storage.session.get(ARMED_HANDOFF_KEY);
   const value = stored?.[ARMED_HANDOFF_KEY];
   return Array.isArray(value) ? (value as ArmedHandoff[]) : [];
 }
 
 async function writeArmedHandoffs(entries: ArmedHandoff[]): Promise<void> {
-  await chrome.storage.session.set({ [ARMED_HANDOFF_KEY]: entries }).catch(() => {});
+  await chrome.storage.session.set({ [ARMED_HANDOFF_KEY]: entries });
+}
+
+async function clearApplicationRuntimeState(): Promise<void> {
+  await armedHandoffMutations.run(ARMED_HANDOFF_MUTATION_KEY, () => chrome.storage.session.remove(ARMED_HANDOFF_KEY));
+  const stored = await chrome.storage.session.get(null);
+  const continuationKeys = Object.keys(stored).filter((key) => key.startsWith(`${GATED_ATTENDED_CONTINUATION_PREFIX}:`));
+  await Promise.all(continuationKeys.map((key) =>
+    withGatedContinuationMutation(key, () => chrome.storage.session.remove(key))));
+  const otherKeys = Object.keys(stored).filter((key) => key === 'lastDetectedJob');
+  if (otherKeys.length) await chrome.storage.session.remove(otherKeys);
+  await handoffPacketBindingMutations.run(
+    HANDOFF_PACKET_BINDING_MUTATION_KEY,
+    () => chrome.storage.session.remove(HANDOFF_PACKET_BINDINGS_KEY),
+  );
+  await pendingSubmissionMutations.run(PENDING_SUBMISSION_MUTATION_KEY, async () => {
+    const pendingKeys = Object.keys(await chrome.storage.session.get(null))
+      .filter((key) => key.startsWith(`${PENDING_SUBMISSIONS_KEY}:`));
+    if (pendingKeys.length) await chrome.storage.session.remove(pendingKeys);
+  });
+  await applicationTabMutations.run(
+    APPLICATION_TAB_MUTATION_KEY,
+    () => chrome.storage.session.remove('litos_application_tabs'),
+  );
+  dashboardSubmissionsInFlight.clear();
+  gatedPreparationsInFlight.clear();
 }
 
 // ─── Transient model-capacity retry (live QA 2026-07-16, R-003) ──────────────
@@ -381,6 +560,9 @@ function sleep(ms: number): Promise<void> {
 // Must satisfy the /draft route's user_profile schema, so we fall back to a valid empty
 // profile when the user hasn't uploaded a resume yet (otherwise /draft 400s).
 interface UserProfile {
+  full_name?: string;
+  email?: string;
+  resume_email?: string;
   experience: Array<{ company: string; title: string; start: string; end: string; description: string }>;
   skills: string[];
   school: string;
@@ -528,8 +710,12 @@ async function generateResumeAndProfile(
     timeoutBackendFetch('/profile', {}, token),
     timeoutBackendFetch('/profile/application', {}, token),
   ]);
-  const profile: UserProfile & { full_name?: string; email?: string } = profileRes.ok ? await profileRes.json() : EMPTY_PROFILE;
+  const profile: UserProfile = profileRes.ok ? await profileRes.json() : EMPTY_PROFILE;
   const applicationProfile: ApplicationProfile = appProfileRes.ok ? await appProfileRes.json() : {};
+  const resumeEmail = resumeContactEmailForProfile(profile);
+  if (!resumeEmail) {
+    throw new Error('Add and verify the personal email printed on your resume before generating this application.');
+  }
 
   // Only the resume POST retries. The profile reads above are cheap, already done, and unaffected
   // by a model overload; re-running them per attempt would add round trips to a backend that is
@@ -546,7 +732,7 @@ async function generateResumeAndProfile(
         jd_text: jdText,
         contact: {
           full_name: profile.full_name || 'Applicant',
-          email: profile.email,
+          email: resumeEmail,
           linkedin_url: applicationProfile.linkedin_url,
           github_url: applicationProfile.github_url,
           portfolio_url: applicationProfile.portfolio_url,
@@ -727,18 +913,22 @@ export default defineBackground(() => {
       }
 
       case 'EXTENSION_SUBMISSION_START': {
+        const submissionAuthEpoch = currentAuthEpoch();
         Promise.all([getStoredToken(), Promise.resolve(sender.tab?.id)])
           .then(async ([token, tabId]) => {
             if (!token || tabId === undefined) throw new Error('Litos could not identify this application tab.');
+            assertCurrentAuthEpoch(submissionAuthEpoch);
             const applicationId = String(message.payload?.applicationId ?? '');
             const frameId = sender.frameId ?? 0;
             const binding = await handoffPacketBinding(applicationId, tabId, frameId);
+            assertCurrentAuthEpoch(submissionAuthEpoch);
             if (!binding) throw new Error('Reload this saved application before submitting from Chrome.');
             const currentUrl = sender.url ?? '';
             if (!currentUrl) throw new Error('Litos could not verify the current application page.');
             const authorization = message.payload?.authorization === 'user_initiated'
               ? 'user_initiated'
               : 'standing_consent';
+            assertCurrentAuthEpoch(submissionAuthEpoch);
             const response = await timeoutBackendFetch(`/applications/${applicationId}/submission/extension-start`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -749,9 +939,21 @@ export default defineBackground(() => {
               }),
             }, token);
             const body = await response.json().catch(() => null) as { claim_id?: string; error?: string; already_submitted?: boolean } | null;
+            assertCurrentAuthEpoch(submissionAuthEpoch);
             if (!response.ok || !body?.claim_id) throw new Error(body?.error ?? 'Litos could not reserve this application.');
-            const pending = { applicationId, claimId: body.claim_id, startedAt: Date.now(), frameId: sender.frameId ?? 0 };
-            await setPendingSubmission(tabId, pending);
+            const gatedIdentity = gatedAttendedIdentity(currentUrl);
+            const pending: PendingExtensionSubmission = {
+              applicationId,
+              claimId: body.claim_id,
+              startedAt: Date.now(),
+              frameId: sender.frameId ?? 0,
+              packetVersion: binding.packetVersion,
+              auditDigest: binding.auditDigest,
+              ...(gatedIdentity ? { strictReceipt: { family: gatedIdentity.family, startedUrl: currentUrl } } : {}),
+            };
+            assertCurrentAuthEpoch(submissionAuthEpoch);
+            await setPendingSubmission(tabId, pending, submissionAuthEpoch);
+            assertCurrentAuthEpoch(submissionAuthEpoch);
             void trackExtensionEvent('application_submission_requested', { authorization });
             sendResponse({ ok: true, claimId: body.claim_id });
           })
@@ -882,10 +1084,10 @@ export default defineBackground(() => {
             if (!result.resume || !result.profile) {
               throw new Error('Litos did not return a complete application packet. Nothing was filled. Try again.');
             }
-            const packetEmail = applicantEmailForGeneratedPacket(result.resume, result.profile.email);
+            const packetEmail = applicantEmailForGeneratedPacket(result.resume);
             const applicationId = result.resume.application?.id;
             if (!packetEmail || !applicationId || tabId === undefined || typeof url !== 'string') {
-              throw new Error('Litos could not preserve one email across this application, so nothing was filled. Try again.');
+              throw new Error('Litos could not verify the tracked application routing email, so nothing was filled. Try again.');
             }
             const routeResponse = await timeoutBackendFetch('/application-email', {}, token);
             const route = routeResponse.ok
@@ -1011,6 +1213,7 @@ export default defineBackground(() => {
       }
 
       case 'GET_APPLICATION_HANDOFF_PACKET': {
+        const packetAuthEpoch = currentAuthEpoch();
         const applicationId = String(message.applicationId ?? '');
         const currentUrl = sender.url ?? '';
         const tabId = sender.tab?.id;
@@ -1026,14 +1229,31 @@ export default defineBackground(() => {
           }
           try {
             if (tabId === undefined) throw new Error('The application tab is no longer available.');
-            const [resume, profileRes, appProfileRes] = await Promise.all([
-              fetchAndBindHandoffPacket({ applicationId, currentUrl, tabId, frameId, token }),
-              timeoutBackendFetch('/profile', {}, token),
-              timeoutBackendFetch('/profile/application', {}, token),
-            ]);
-            const profile: Profile = profileRes.ok ? await profileRes.json() : EMPTY_PROFILE;
-            const applicationProfile: ApplicationProfile = appProfileRes.ok ? await appProfileRes.json() : {};
-            sendResponse({ profile, applicationProfile, resume });
+            const resume = await fetchAndBindHandoffPacket({
+              applicationId,
+              currentUrl,
+              tabId,
+              frameId,
+              token,
+              publishBinding: false,
+              authEpoch: packetAuthEpoch,
+            });
+            assertCurrentAuthEpoch(packetAuthEpoch);
+            const frozen = frozenApplicantFillData(resume);
+            if (!frozen) throw new Error('The saved application packet has no complete frozen applicant data.');
+            await storeHandoffPacketBinding({
+              applicationId,
+              tabId,
+              frameId,
+              currentUrl,
+              handoffVersion: resume.handoff_version!,
+              packetVersion: resume.packet_audit!.packet_version,
+              auditDigest: resume.packet_audit!.audit_digest,
+              pdfSha256: resume.packet_audit!.bindings.pdf.sha256,
+              pdfSizeBytes: resume.packet_audit!.bindings.pdf.sizeBytes,
+            }, packetAuthEpoch);
+            assertCurrentAuthEpoch(packetAuthEpoch);
+            sendResponse({ ...frozen, resume });
           } catch (error) {
             sendResponse({ error: error instanceof Error ? error.message : 'The saved application packet could not be loaded.' });
           }
@@ -1049,6 +1269,7 @@ export default defineBackground(() => {
         const operationAuthEpoch = currentAuthEpoch();
         getStoredToken().then(async (token) => {
           if (!token) throw new Error(NOT_SIGNED_IN_MESSAGE);
+          assertCurrentAuthEpoch(operationAuthEpoch);
           const tabId = sender.tab?.id;
           const portalUrl = sender.tab?.url;
           if (tabId === undefined || !portalUrl) throw new Error('The Workday account tab is unavailable.');
@@ -1186,7 +1407,33 @@ export default defineBackground(() => {
         return false;
       }
 
+      case 'APPLICATION_PACKET_REVIEW_REQUIRED': {
+        const reviewAuthEpoch = currentAuthEpoch();
+        const payload = message.payload as {
+          applicationId?: string;
+        };
+        getStoredToken().then(async (token) => {
+          if (!token) throw new Error(NOT_SIGNED_IN_MESSAGE);
+          const applicationId = String(payload.applicationId ?? '');
+          if (!/^[0-9a-f-]{36}$/i.test(applicationId) || !sender.url) {
+            throw new Error('The saved application packet could not be identified.');
+          }
+          assertCurrentAuthEpoch(reviewAuthEpoch);
+          await chrome.tabs.create({
+            url: `https://trylitos.com/dashboard/applications?application=${encodeURIComponent(applicationId)}`,
+            active: true,
+          });
+          assertCurrentAuthEpoch(reviewAuthEpoch);
+          sendResponse({ ok: true });
+        }).catch((error) => sendResponse({
+          ok: false,
+          error: error instanceof Error ? error.message : 'The exact packet review could not open.',
+        }));
+        return true;
+      }
+
       case 'APPLICATION_REVIEW_READY': {
+        const reviewAuthEpoch = currentAuthEpoch();
         const tabId = sender.tab?.id;
         getStoredToken().then(async (token) => {
           if (!token || tabId === undefined) {
@@ -1203,6 +1450,7 @@ export default defineBackground(() => {
             skippedReasons: string[];
           };
           try {
+            assertCurrentAuthEpoch(reviewAuthEpoch);
             const frameId = sender.frameId ?? 0;
             const existingHandoffBinding = await handoffPacketBinding(payload.applicationId, tabId, frameId);
             if (payload.attendedHandoff === true && !existingHandoffBinding) throw new Error('Reload this saved application before reviewing it from Chrome.');
@@ -1220,6 +1468,7 @@ export default defineBackground(() => {
                   skipped_reasons: payload.skippedReasons,
                 }),
               }, token);
+              assertCurrentAuthEpoch(reviewAuthEpoch);
               if (!res.ok) throw new Error(`review handoff failed (${res.status})`);
             }
             const currentUrl = sender.url ?? '';
@@ -1232,30 +1481,42 @@ export default defineBackground(() => {
                 tabId,
                 frameId,
                 token,
+                authEpoch: reviewAuthEpoch,
               });
+            assertCurrentAuthEpoch(reviewAuthEpoch);
             const handoffBinding = await handoffPacketBinding(payload.applicationId, tabId, frameId);
             if (!handoffBinding) throw new Error('The exact application packet binding was not saved.');
-            const stored = await chrome.storage.session.get('litos_application_tabs');
-            const tabs = (stored.litos_application_tabs ?? {}) as Record<string, number | {
-              tabId: number;
-              frameId: number;
-              currentUrl?: string;
-              handoffVersion?: string;
-              attendedHandoff?: boolean;
-            }>;
-            await chrome.storage.session.set({
-              litos_application_tabs: {
-                ...tabs,
-                [payload.applicationId]: {
-                  tabId,
-                  frameId,
-                  currentUrl: handoffBinding.currentUrl,
-                  handoffVersion: handoffBinding.handoffVersion,
-                  attendedHandoff: payload.attendedHandoff === true,
+            await applicationTabMutations.run(APPLICATION_TAB_MUTATION_KEY, async () => {
+              assertCurrentAuthEpoch(reviewAuthEpoch);
+              const stored = await chrome.storage.session.get('litos_application_tabs');
+              assertCurrentAuthEpoch(reviewAuthEpoch);
+              const tabs = (stored.litos_application_tabs ?? {}) as Record<string, number | {
+                tabId: number;
+                frameId: number;
+                currentUrl?: string;
+                handoffVersion?: string;
+                attendedHandoff?: boolean;
+              }>;
+              await chrome.storage.session.set({
+                litos_application_tabs: {
+                  ...tabs,
+                  [payload.applicationId]: {
+                    tabId,
+                    frameId,
+                    currentUrl: handoffBinding.currentUrl,
+                    handoffVersion: handoffBinding.handoffVersion,
+                    attendedHandoff: payload.attendedHandoff === true,
+                  },
                 },
-              },
+              });
+              if (!authEpochIsCurrent(reviewAuthEpoch)) {
+                await chrome.storage.session.remove('litos_application_tabs');
+                assertCurrentAuthEpoch(reviewAuthEpoch);
+              }
             });
+            assertCurrentAuthEpoch(reviewAuthEpoch);
             if (payload.openDashboard !== false) {
+              assertCurrentAuthEpoch(reviewAuthEpoch);
               await chrome.tabs.create({
                 url: `https://trylitos.com/dashboard/applications?application=${encodeURIComponent(payload.applicationId)}`,
                 active: true,
@@ -1280,6 +1541,181 @@ export default defineBackground(() => {
         return true; // async: see the convention note above - only async branches return true.
       }
 
+      case 'PREPARE_GATED_ATTENDED_HANDOFF': {
+        const preparationAuthEpoch = currentAuthEpoch();
+        const currentUrl = sender.url ?? '';
+        const currentIdentity = gatedAttendedIdentity(currentUrl);
+        const tabId = sender.tab?.id;
+        const frameId = sender.frameId ?? 0;
+        if (!currentIdentity || tabId === undefined) {
+          sendResponse({ ok: false, error: 'This is not an exact supported Jobvite or iCIMS application route.' });
+          return false;
+        }
+        getStoredToken().then(async (token) => {
+          if (!token) throw new Error(NOT_SIGNED_IN_MESSAGE);
+          assertCurrentAuthEpoch(preparationAuthEpoch);
+          const armed = await armedHandoffMutations.run(ARMED_HANDOFF_MUTATION_KEY, async () => {
+            const entries = pruneArmed(await readArmedHandoffs(), Date.now());
+            return entries.find((entry) => {
+              const armedIdentity = gatedAttendedIdentity(entry.key);
+              return Boolean(entry.applicationId && armedIdentity?.family === currentIdentity.family && armedIdentity.key === currentIdentity.key);
+            }) ?? null;
+          });
+          const existing = await gatedAttendedContinuation(tabId, frameId);
+          if (
+            existing
+            && existing.identity === currentIdentity.key
+            && Date.now() - existing.preparedAt <= GATED_ATTENDED_CONTINUATION_TTL_MS
+            && !newArmingSupersedesContinuation(existing.applicationId, armed?.applicationId)
+          ) {
+            assertCurrentAuthEpoch(preparationAuthEpoch);
+            sendResponse({
+              ok: true,
+              applicationId: existing.applicationId,
+              email: existing.applicantEmail,
+              handoffVersion: existing.handoffVersion,
+            });
+            return;
+          }
+          if (existing && newArmingSupersedesContinuation(existing.applicationId, armed?.applicationId)) {
+            await withGatedContinuationMutation(gatedContinuationKey(tabId, frameId), () =>
+              chrome.storage.session.remove(gatedContinuationKey(tabId, frameId)));
+          }
+          const preparationKey = `${tabId}:${frameId}:${currentIdentity.key}`;
+          if (gatedPreparationsInFlight.has(preparationKey)) throw new Error('This exact application is already being prepared.');
+          gatedPreparationsInFlight.add(preparationKey);
+          try {
+            const claimed = armed;
+            if (!claimed?.applicationId) throw new Error('Open this exact application from your Litos Tracker before continuing.');
+            const applicationId = claimed.applicationId;
+            const resume = await fetchAndBindHandoffPacket({
+              applicationId,
+              currentUrl,
+              tabId,
+              frameId,
+              token,
+              publishBinding: false,
+              authEpoch: preparationAuthEpoch,
+            });
+            const email = applicantEmailForGeneratedPacket(resume);
+            if (!email) throw new Error('The saved application packet has no verified applicant email.');
+            assertCurrentAuthEpoch(preparationAuthEpoch);
+            await consumeArmedAndStoreGatedContinuation({
+              applicationId,
+              tabId,
+              frameId,
+              identity: currentIdentity.key,
+              preparedAt: Date.now(),
+              handoffVersion: resume.handoff_version!,
+              applicantEmail: email,
+            }, preparationAuthEpoch);
+            assertCurrentAuthEpoch(preparationAuthEpoch);
+            sendResponse({ ok: true, applicationId, email, handoffVersion: resume.handoff_version });
+          } finally {
+            gatedPreparationsInFlight.delete(preparationKey);
+          }
+        }).catch((error) => sendResponse({
+          ok: false,
+          error: error instanceof Error ? error.message : 'The exact attended application could not be prepared.',
+        }));
+        return true;
+      }
+
+      case 'CLAIM_GATED_ATTENDED_CONTINUATION': {
+        const claimAuthEpoch = currentAuthEpoch();
+        const currentUrl = sender.url ?? '';
+        const tabId = sender.tab?.id;
+        const frameId = sender.frameId ?? 0;
+        if (tabId === undefined) {
+          sendResponse({ armed: false });
+          return false;
+        }
+        Promise.all([
+          getStoredToken(),
+          claimGatedAttendedContinuation(tabId, frameId, currentUrl, sender.documentId),
+        ])
+          .then(([token, continuation]) => {
+            if (!token) throw new Error(NOT_SIGNED_IN_MESSAGE);
+            assertCurrentAuthEpoch(claimAuthEpoch);
+            sendResponse({
+            armed: Boolean(continuation),
+            applicationId: continuation?.applicationId,
+            handoffVersion: continuation?.handoffVersion,
+            applicantEmail: continuation?.applicantEmail,
+            });
+          })
+          .catch(() => sendResponse({ armed: false }));
+        return true;
+      }
+
+      case 'PROVE_GATED_ATTENDED_ACCOUNT': {
+        const proofAuthEpoch = currentAuthEpoch();
+        const currentUrl = sender.url ?? '';
+        const identity = gatedAttendedIdentity(currentUrl);
+        const tabId = sender.tab?.id;
+        const frameId = sender.frameId ?? 0;
+        const proofKind = message.proofKind === 'security_code' ? 'security_code' : 'login_email';
+        const email = String(message.email ?? '').trim().toLowerCase();
+        const proofDocumentId = sender.documentId;
+        if (!identity || identity.family !== 'icims' || tabId === undefined || !proofDocumentId) {
+          sendResponse({ ok: false });
+          return false;
+        }
+        const key = gatedContinuationKey(tabId, frameId);
+        withGatedContinuationMutation(key, async () => {
+          const continuation = await gatedAttendedContinuation(tabId, frameId);
+          if (
+            !continuation
+            || continuation.identity !== identity.key
+            || (proofKind === 'login_email' && continuation.applicantEmail.trim().toLowerCase() !== email)
+            || (proofKind === 'security_code' && !validGatedAccountNavigationProof({
+              family: 'icims',
+              loginProofAt: continuation.accountLoginProofAt,
+              loginProofDocumentId: continuation.accountLoginProofDocumentId,
+              currentDocumentId: proofDocumentId,
+              now: Date.now(),
+              ttlMs: GATED_ATTENDED_ACCOUNT_PROOF_TTL_MS,
+            }))
+            || Date.now() - continuation.preparedAt > GATED_ATTENDED_CONTINUATION_TTL_MS
+            || !authEpochIsCurrent(proofAuthEpoch)
+          ) throw new Error('The exact iCIMS account proof no longer matches this application.');
+          const proofAt = Date.now();
+          await chrome.storage.session.set({
+            [key]: proofKind === 'login_email'
+              ? {
+                ...continuation,
+                accountLoginProofAt: proofAt,
+                accountLoginProofDocumentId: proofDocumentId,
+                securityCodeProofAt: undefined,
+                securityCodeProofDocumentId: undefined,
+              }
+              : {
+                ...continuation,
+                securityCodeProofAt: proofAt,
+                securityCodeProofDocumentId: proofDocumentId,
+              },
+          });
+          if (!authEpochIsCurrent(proofAuthEpoch)) {
+            await chrome.storage.session.remove(key);
+            assertCurrentAuthEpoch(proofAuthEpoch);
+          }
+        }).then(() => sendResponse({ ok: true })).catch(() => sendResponse({ ok: false }));
+        return true;
+      }
+
+      case 'INVALIDATE_GATED_ATTENDED_CONTINUATION': {
+        const tabId = sender.tab?.id;
+        const frameId = sender.frameId ?? 0;
+        if (tabId === undefined) {
+          sendResponse({ ok: false });
+          return false;
+        }
+        withGatedContinuationMutation(gatedContinuationKey(tabId, frameId), async () => {
+          await chrome.storage.session.remove(gatedContinuationKey(tabId, frameId));
+        }).then(() => sendResponse({ ok: true })).catch(() => sendResponse({ ok: false }));
+        return true;
+      }
+
       // "Did the applicant arrive here by clicking Finish this one?" Answered once and then
       // forgotten (claimArmed removes the entry), so a later visit to the same posting is an
       // ordinary visit and the card asks before touching anything.
@@ -1293,8 +1729,8 @@ export default defineBackground(() => {
           typeof message.url === 'string' ? message.url : '',
           sender.tab?.url ?? '',
         ].filter(Boolean);
-        readArmedHandoffs()
-          .then(async (entries) => {
+        armedHandoffMutations.run(ARMED_HANDOFF_MUTATION_KEY, async () => {
+            const entries = await readArmedHandoffs();
             let pool = entries;
             let hit: ReturnType<typeof claimArmed>['claimed'] = null;
             for (const candidate of candidates) {
@@ -1306,8 +1742,9 @@ export default defineBackground(() => {
               }
             }
             if (pool.length !== entries.length) await writeArmedHandoffs(pool);
-            sendResponse({ armed: Boolean(hit), applicationId: hit?.applicationId });
+            return { armed: Boolean(hit), applicationId: hit?.applicationId };
           })
+          .then(sendResponse)
           .catch(() => sendResponse({ armed: false }));
         return true;
       }
@@ -1315,12 +1752,13 @@ export default defineBackground(() => {
       case 'CONTINUE_SMARTRECRUITERS_HANDOFF': {
         const sourceUrl = sender.tab?.url ?? '';
         const targetUrl = String(message.targetUrl ?? '');
-        readArmedHandoffs()
-          .then(async (entries) => {
+        armedHandoffMutations.run(ARMED_HANDOFF_MUTATION_KEY, async () => {
+            const entries = await readArmedHandoffs();
             const continued = continueSmartRecruitersHandoff(entries, sourceUrl, targetUrl, Date.now());
             await writeArmedHandoffs(continued.remaining);
-            sendResponse({ ok: Boolean(continued.applicationId) });
+            return { ok: Boolean(continued.applicationId) };
           })
+          .then(sendResponse)
           .catch(() => sendResponse({ ok: false }));
         return true;
       }
@@ -1341,8 +1779,7 @@ export default defineBackground(() => {
     const allowed =
       origin === 'https://trylitos.com' ||
       origin === 'https://www.trylitos.com' ||
-      origin === 'https://role-quick-website.vercel.app' ||
-      /^http:\/\/localhost(?::\d+)?$/.test(origin);
+      (import.meta.env.DEV && /^http:\/\/localhost(?::\d+)?$/.test(origin));
     if (!allowed) {
       sendResponse({ error: 'This page is not allowed to control Litos.' });
       return false;
@@ -1373,7 +1810,7 @@ export default defineBackground(() => {
     if (message?.type === 'LITOS_CLEAR_SESSION') {
       // Signing out on the website signs out the extension. One product, one account: the
       // alternative is an extension quietly applying as whoever was signed in last week.
-      clearStoredSession()
+      Promise.all([clearStoredSession(), clearApplicationRuntimeState()])
         .then(() => sendResponse({ ok: true }))
         .catch(() => sendResponse({ ok: false, error: 'Litos could not clear the extension session. Nothing changed in the popup.' }));
       return true;
@@ -1388,18 +1825,20 @@ export default defineBackground(() => {
           url: item.url as string,
           applicationId: typeof item.applicationId === 'string' ? item.applicationId : undefined,
         }));
-      readArmedHandoffs()
-        .then(async (existing) => {
+      armedHandoffMutations.run(ARMED_HANDOFF_MUTATION_KEY, async () => {
+          const existing = await readArmedHandoffs();
           const next = armHandoffs(existing, incoming, Date.now());
           await writeArmedHandoffs(next);
-          sendResponse({ ok: true, armed: next.length });
+          return { ok: true, armed: next.length };
         })
+        .then(sendResponse)
         .catch(() => sendResponse({ ok: false }));
       return true;
     }
 
     if (message?.type !== 'LITOS_SUBMIT_APPLICATION') return false;
 
+    const dashboardAuthEpoch = currentAuthEpoch();
     const applicationId = String(message.applicationId ?? '');
     if (dashboardSubmissionsInFlight.has(applicationId)) {
       sendResponse({ error: 'This application is already being prepared for submission.' });
@@ -1408,6 +1847,7 @@ export default defineBackground(() => {
     dashboardSubmissionsInFlight.add(applicationId);
     Promise.all([getStoredToken(), chrome.storage.session.get('litos_application_tabs')])
       .then(async ([token, stored]) => {
+        assertCurrentAuthEpoch(dashboardAuthEpoch);
         const storedTarget = ((stored.litos_application_tabs ?? {}) as Record<string, number | {
           tabId: number;
           frameId: number;
@@ -1421,6 +1861,7 @@ export default defineBackground(() => {
         const livePage = await chrome.tabs.sendMessage(tabId, {
           type: 'GET_CURRENT_APPLICATION_URL',
         }, { frameId }) as { url?: string };
+        assertCurrentAuthEpoch(dashboardAuthEpoch);
         const currentUrl = livePage?.url ?? '';
         if (!currentUrl) throw new Error('Litos could not verify the current application page.');
         const exactResume = await fetchAndBindHandoffPacket({
@@ -1430,15 +1871,20 @@ export default defineBackground(() => {
           frameId,
           token,
           publishBinding: false,
+          authEpoch: dashboardAuthEpoch,
         });
+        assertCurrentAuthEpoch(dashboardAuthEpoch);
+        assertCurrentAuthEpoch(dashboardAuthEpoch);
         const prepared = await chrome.tabs.sendMessage(tabId, {
           type: 'PREPARE_SUBMISSION_FROM_DASHBOARD',
           payload: { applicationId, resume: exactResume, expectedUrl: currentUrl },
         }, { frameId }) as { ok?: boolean; error?: string };
+        assertCurrentAuthEpoch(dashboardAuthEpoch);
         if (!prepared?.ok) throw new Error(prepared?.error ?? 'The saved answers could not be replayed on the company form.');
         const verifiedPage = await chrome.tabs.sendMessage(tabId, {
           type: 'GET_CURRENT_APPLICATION_URL',
         }, { frameId }) as { url?: string };
+        assertCurrentAuthEpoch(dashboardAuthEpoch);
         const verifiedCurrentUrl = verifiedPage?.url ?? '';
         const fetchedPageKey = applicationFormIdentityKey(currentUrl);
         const verifiedPageKey = applicationFormIdentityKey(verifiedCurrentUrl);
@@ -1455,8 +1901,14 @@ export default defineBackground(() => {
           frameId,
           token,
           publishBinding: false,
+          authEpoch: dashboardAuthEpoch,
         });
-        if (verifiedResume.handoff_version !== exactResume.handoff_version) {
+        assertCurrentAuthEpoch(dashboardAuthEpoch);
+        if (verifiedResume.handoff_version !== exactResume.handoff_version
+          || verifiedResume.packet_audit?.packet_version !== exactResume.packet_audit?.packet_version
+          || verifiedResume.packet_audit?.audit_digest !== exactResume.packet_audit?.audit_digest
+          || verifiedResume.packet_audit?.bindings.pdf.sha256 !== exactResume.packet_audit?.bindings.pdf.sha256
+          || verifiedResume.packet_audit?.bindings.pdf.sizeBytes !== exactResume.packet_audit?.bindings.pdf.sizeBytes) {
           throw new Error('The saved application changed while it was being replayed. Nothing was sent.');
         }
         await storeHandoffPacketBinding({
@@ -1465,7 +1917,12 @@ export default defineBackground(() => {
           frameId,
           currentUrl: verifiedCurrentUrl,
           handoffVersion: exactResume.handoff_version!,
-        });
+          packetVersion: exactResume.packet_audit!.packet_version,
+          auditDigest: exactResume.packet_audit!.audit_digest,
+          pdfSha256: exactResume.packet_audit!.bindings.pdf.sha256,
+          pdfSizeBytes: exactResume.packet_audit!.bindings.pdf.sizeBytes,
+        }, dashboardAuthEpoch);
+        assertCurrentAuthEpoch(dashboardAuthEpoch);
         const startResponse = await timeoutBackendFetch(`/applications/${applicationId}/submission/extension-start`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1476,20 +1933,32 @@ export default defineBackground(() => {
           }),
         }, token);
         const started = await startResponse.json().catch(() => null) as { claim_id?: string; error?: string } | null;
+        assertCurrentAuthEpoch(dashboardAuthEpoch);
         if (!startResponse.ok || !started?.claim_id) throw new Error(started?.error ?? 'Could not reserve this application.');
-        const pending = { applicationId, claimId: started.claim_id, startedAt: Date.now(), frameId };
-        await setPendingSubmission(tabId, pending);
+        const pending: PendingExtensionSubmission = {
+          applicationId,
+          claimId: started.claim_id,
+          startedAt: Date.now(),
+          frameId,
+          packetVersion: exactResume.packet_audit!.packet_version,
+          auditDigest: exactResume.packet_audit!.audit_digest,
+        };
+        await setPendingSubmission(tabId, pending, dashboardAuthEpoch);
+        assertCurrentAuthEpoch(dashboardAuthEpoch);
         try {
+          assertCurrentAuthEpoch(dashboardAuthEpoch);
           const result = await chrome.tabs.sendMessage(tabId, {
             type: 'SUBMIT_FROM_DASHBOARD',
             payload: { applicationId, questions: [] },
           }, { frameId }) as { ok?: boolean; clicked?: boolean; error?: string; finalUrl?: string; confirmationText?: string };
+          assertCurrentAuthEpoch(dashboardAuthEpoch);
           await postExtensionOutcome(
             pending,
             result?.ok ? 'confirmed' : result?.clicked ? 'unknown' : 'cancelled',
             result?.finalUrl ?? sender.url ?? 'https://trylitos.com',
             result?.confirmationText ?? result?.error,
           );
+          assertCurrentAuthEpoch(dashboardAuthEpoch);
           await setPendingSubmission(tabId, null);
           if (!result?.ok) {
             sendResponse({ error: result?.error ?? 'The company never confirmed it arrived.' });

@@ -11,14 +11,16 @@ describe('SmartRecruiters exact packet attended handoff', () => {
     expect(background).toMatch(/fetchAndBindHandoffPacket[\s\S]*?\/applications\/\$\{input\.applicationId\}\/submission\/extension-packet/);
     expect(background).toMatch(/resume\.resume_id !== input\.applicationId \|\| resume\.application\?\.id !== input\.applicationId/);
     expect(content).toMatch(/reviewedQuestionsForHandoff\(resume\)/);
-    expect(content).toMatch(/applicantEmailForGeneratedPacket\(resume, profile\.email\)/);
+    expect(content).toMatch(/applicantEmailForGeneratedPacket\(resume\)/);
+    expect(background).toMatch(/const resumeEmail = resumeContactEmailForProfile\(profile\)[\s\S]*?if \(!resumeEmail\)[\s\S]*?contact: \{[\s\S]*?email: resumeEmail/);
+    expect(background).not.toMatch(/contact: \{[\s\S]{0,200}?email: profile\.email/);
     expect(background).toMatch(/extension-packet\?current_url=\$\{encodeURIComponent\(input\.currentUrl\)\}/);
   });
 
   it('replays frozen answers and never redrafts an attended packet question', () => {
     expect(content).toMatch(/if \(handoffApplicationId\) \{[\s\S]*?frozenAnswerForQuestion\(frozenHandoffQuestions, question\)/);
-    expect(content).toMatch(/replayReviewedAnswers\(document, frozenHandoffQuestions\)/);
-    expect(content).toMatch(/reviewedAnswersMatch\(document, frozenHandoffQuestions\)\.failed\.length/);
+    expect(content).toMatch(/replayReviewedAnswers\(document, frozenHandoffQuestions, replayOptions\)/);
+    expect(content).toMatch(/reviewedAnswersMatch\(document, frozenHandoffQuestions, replayOptions\)\.failed\.length/);
     expect(content).toMatch(/armManualSubmissionTracking\([^;]*handoffSubmissionGuard, Boolean\(handoffApplicationId\)\)/);
     expect(content).toMatch(/submitFromDashboard = async[\s\S]*?handoffSubmissionGuard\(\)/);
   });
@@ -48,7 +50,7 @@ describe('SmartRecruiters exact packet attended handoff', () => {
     expect(background).toMatch(/case 'EXTENSION_SUBMISSION_START'[\s\S]*?handoff_version: binding\.handoffVersion[\s\S]*?current_url: currentUrl/);
     const dashboardStart = background.slice(background.indexOf("if (message?.type !== 'LITOS_SUBMIT_APPLICATION')"));
     expect(dashboardStart).toMatch(/fetchAndBindHandoffPacket[\s\S]*?PREPARE_SUBMISSION_FROM_DASHBOARD[\s\S]*?handoff_version: exactResume\.handoff_version[\s\S]*?current_url: verifiedCurrentUrl/);
-    expect(content).toMatch(/fetchResumeBlob\(exactResume\.resume_url\)[\s\S]*?resumeBlob: exactBlob[\s\S]*?replayReviewedAnswers\(document, frozenHandoffQuestions\)/);
+    expect(content).toMatch(/fetchResumeBlob\(exactResume\.resume_url\)[\s\S]*?resumeBlob: exactBlob[\s\S]*?replayReviewedAnswers\(document, frozenHandoffQuestions, replayOptions\)/);
     expect(content).toMatch(/skippedReasonsNeedReview\(refill\.skipped_reasons[\s\S]*?company form changed and now needs another answer/);
   });
 

@@ -1684,7 +1684,7 @@ async function fillTextField(
   return true;
 }
 
-function findResumeFileInput(preferred?: string): HTMLInputElement | null {
+function findResumeFileInput(preferred?: string, strictSemantic = false): HTMLInputElement | null {
   // An exact selector captured off the real form beats the heuristic below, and on some platforms
   // the heuristic cannot work at all. Rippling is the proof: its two file inputs (resume and cover
   // letter) have no name, no id, no aria-label and no placeholder, and both sit next to the same
@@ -1696,10 +1696,11 @@ function findResumeFileInput(preferred?: string): HTMLInputElement | null {
   // for every adapter on every site, to fix a problem only the caller has the real answer to.
   if (preferred) {
     const exact = document.querySelector<HTMLInputElement>(preferred);
-    if (exact) return exact;
+    if (exact && (!strictSemantic || (!exact.disabled && isVisible(exact) && !isHoneypotField(exact)))) return exact;
   }
   const fileInputs = [...document.querySelectorAll<HTMLInputElement>('input[type="file"]')].filter(
-    (el) => !el.closest('[id*="litos"]'),
+    (el) => !el.closest('[id*="litos"]')
+      && (!strictSemantic || (!el.disabled && isVisible(el) && !isHoneypotField(el))),
   );
   if (fileInputs.length === 0) return null;
   const scored = fileInputs.map((el) => {
@@ -1708,6 +1709,10 @@ function findResumeFileInput(preferred?: string): HTMLInputElement | null {
     if (/resume|\bcv\b|curriculum/.test(ctx)) return { el, score: 2 };
     return { el, score: 0 };
   });
+  if (strictSemantic) {
+    const semantic = scored.filter(({ score }) => score === 2);
+    return semantic.length === 1 ? semantic[0].el : null;
+  }
   scored.sort((a, b) => b.score - a.score);
   return scored[0].score >= 0 ? scored[0].el : null;
 }
@@ -1735,7 +1740,7 @@ export interface GenericFillParams {
 }
 
 export interface GenericProviderPolicy {
-  provider: 'recruitee' | 'teamtailor' | 'personio' | 'pinpoint' | 'comeet' | 'zoho_recruit' | 'bullhorn';
+  provider: 'recruitee' | 'teamtailor' | 'personio' | 'pinpoint' | 'comeet' | 'zoho_recruit' | 'bullhorn' | 'jobvite' | 'icims';
   forbidConsentWrites?: true;
   neverFillSelectors?: readonly string[];
   reviewReason?: string;
@@ -1804,7 +1809,7 @@ const CHAIN_EMAIL = /e-?mail/;
 const CHAIN_CITY = /\bcity\b|\blocation\b/;
 // R-039's third-party population: labels where her value would land in a field about someone
 // else ("Manager's email", "Reference contact"). Observed, never yet guarded.
-const R039_THIRD_PARTY = /manager|referr|reference|supervisor|emergency|previous\s+employer/;
+const R039_THIRD_PARTY = /manager|reference|referrer|recommender|supervisor|emergency\s+contact|previous\s+employer|other\s+person/;
 
 export async function fillGenericApplication(params: GenericFillParams): Promise<AutofillResult> {
   const { fullName, email, applicationProfile: ap, resumeBlob, resumeFileName, draftAnswer } = params;
@@ -1927,15 +1932,14 @@ export async function fillGenericApplication(params: GenericFillParams): Promise
     // third-party note is observation only (R-030 doctrine) - it changes nothing about the fill.
     const cityVetoed = CHAIN_CITY.test(id) && isLocationCommitmentQuestion(id);
     if (cityVetoed) noteR039Candidate('veto', id);
-    if (
-      R039_THIRD_PARTY.test(id) &&
-      (CHAIN_FIRST_NAME.test(id) ||
-        CHAIN_LAST_NAME.test(id) ||
-        CHAIN_FULL_NAME.test(id) ||
-        CHAIN_EMAIL.test(id) ||
-        CHAIN_CITY.test(id))
-    )
+    const thirdPartyIdentity = R039_THIRD_PARTY.test(id);
+    if (thirdPartyIdentity)
       noteR039Candidate('third-party', id);
+    if (thirdPartyIdentity) {
+      fields_skipped++;
+      skipped_reasons.push(`another person's identity left for you to enter: "${short(id)}"`);
+      continue;
+    }
     let value =
       type === 'email' ? email :
       type === 'tel' ? ap.phone :
@@ -2318,7 +2322,8 @@ export async function fillGenericApplication(params: GenericFillParams): Promise
 
   // ── Resume file ──
   if (resumeBlob && resumeFileName) {
-    const input = findResumeFileInput(params.resumeSelector);
+    const strictResume = params.providerPolicy?.provider === 'jobvite' || params.providerPolicy?.provider === 'icims';
+    const input = findResumeFileInput(params.resumeSelector, strictResume);
     if (input) {
       await randomDelay();
       const file = new File([resumeBlob], resumeFileName, { type: 'application/pdf' });

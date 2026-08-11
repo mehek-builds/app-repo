@@ -2,6 +2,27 @@
 
 All notable changes to the Litos extension are documented here.
 
+## [0.5.11] - 2026-08-10
+
+### Added
+- Jobvite and iCIMS can continue an exact Tracker-armed application after the applicant completes
+  the employer-owned privacy, account, security-code, or CAPTCHA gate.
+- BambooHR content scripts now cover exact numeric application routes across tenant subdomains
+  while excluding vendor, support, and lookalike hosts.
+- The iCIMS login step uses only the applicant email frozen in the reviewed packet and requires an
+  exact trusted human form submission before the continuation can cross a navigation.
+
+### Safety
+- Both families remain permanently denied automatic and dashboard submission. Legal, consent,
+  attestation, account, CAPTCHA, security-code, and work-authorization controls are never replayed.
+- Packet version, applicant email, job identity, visible resume control, exact PDF, reviewed
+  answers, and terminal employer receipt are rechecked across the attended flow.
+- Production external messaging is limited to the two Litos website origins. Localhost remains
+  available only in development builds.
+- Account changes clear armed applications, continuations, packet bindings, application tabs, and
+  pending submissions, while in-flight attended work checks the current account epoch before it
+  can proceed.
+
 ## [0.5.10] - 2026-08-10
 
 ### Added
