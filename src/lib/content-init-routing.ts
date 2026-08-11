@@ -91,6 +91,7 @@ function isVendorProductOrLoginHost(hostname: string, pathname: string): boolean
     || hostname === 'jobs.personio.com'
     || hostname === 'accounts.zoho.com'
     || (hostname === 'www.zoho.com' && /^\/recruit(?:\/|$)/i.test(pathname))
+    || /^(?:www|app|api|support)\.bamboohr\.com$/i.test(hostname)
     || /(?:^|\.)bullhornstaffing\.com$/i.test(hostname)
     || /^(?:www\.)?bullhorn\.com$/i.test(hostname);
 }
@@ -120,7 +121,14 @@ export function contentInitRoute(
 ): ContentInitRoute {
   const host = location.hostname.toLowerCase();
   if (isVendorProductOrLoginHost(host, location.pathname)) return 'ignore';
-  if (gatedPortalNotice(host, location.pathname, location.search)) return 'gated';
+  if (gatedPortalNotice(host, location.pathname, location.search)) {
+    // Jobvite and iCIMS can expose a real form after the applicant clears the human-owned gate at
+    // the same exact job URL. Their content route therefore remains ATS-owned and lets the live DOM
+    // stage decide whether to show a hold or fill. The other gated families still have no captured
+    // post-gate form and remain notice-only.
+    if (host === 'jobs.jobvite.com' || host.endsWith('.icims.com')) return 'ats';
+    return 'gated';
+  }
   if (host === 'fa007.taleo.net' || host === 'aa270.taleo.net' || host === 'myjobs.adp.com') return 'ignore';
 
   // The manifest must cover SuccessFactors wildcard hosts, but only the exact career route above

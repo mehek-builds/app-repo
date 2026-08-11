@@ -35,6 +35,7 @@ import {
   validationErrorsToReasons,
 } from '../lib/validation-authority';
 import { fetchResumeBlob, resumeFetchSkipReason } from '../lib/resume-fetch';
+import { packetAuditForResume, packetAuditPdfMatches } from '../lib/handoff-packet-audit';
 import { startHarvest } from '../lib/harvest';
 import { withInactivityTimeout } from '../lib/inactivity-timeout';
 import { asSentence } from '../lib/sentence';
@@ -56,6 +57,7 @@ import { mountThinkingOrb } from '../lib/thinking-orb';
 import { derivePortalPassword, portalKeyForHost, currentSaltFingerprint } from '../lib/portal-password';
 import { automaticSubmissionEnabled } from '../lib/auto-submit-consent';
 import { applicantEmailForGeneratedPacket } from '../lib/applicant-email';
+import { frozenApplicantFillData } from '../lib/handoff-applicant-snapshot';
 import {
   WORKDAY_ACCOUNT_PROMPT_BODY,
   WORKDAY_ACCOUNT_PROMPT_TITLE,
@@ -66,6 +68,19 @@ import { applicationFormIdentityKey, smartRecruitersApplicationUrl } from '../li
 import { reviewedQuestionsForHandoff, validHandoffVersion, type HandoffQuestion } from '../lib/handoff-packet';
 import { frozenAnswerForQuestion, replayReviewedAnswers, reviewedAnswersMatch } from '../lib/reviewed-answer-replay';
 import { manualSubmissionPreflightError } from '../lib/manual-submission-preflight';
+import {
+  exactGatedAttendedReceipt,
+  fillFrozenIcimsLoginEmail,
+  frozenIcimsLoginEmailState,
+  guardFrozenIcimsLoginIntent,
+  guardTrustedSecurityCodeIntent,
+  gatedReviewedAnswerControlAllowed,
+  gatedStageCanPrepare,
+  applicantOwnedEmailInputs,
+  gatedStageNotice,
+  inspectGatedAttendedStage,
+  type GatedAttendedFamily,
+} from '../lib/gated-attended-ats';
 import {
   fillWorkdayVerificationCode,
   findWorkdayAccountSubmit,
@@ -105,8 +120,7 @@ export default defineContentScript({
     // Chrome Web Store shows and puts Litos on pages it has no business seeing. /p/ is Breezy's
     // posting route and /careers/ is BambooHR's; both also cover the JD page, so nothing is lost.
     'https://*.breezy.hr/p/*',
-    'https://mpathic2.bamboohr.com/careers/*',
-    'https://prentkeromich.bamboohr.com/careers/*',
+    'https://*.bamboohr.com/careers/*',
     // Public application routes captured on two unrelated tenants per family on 2026-08-09.
     'https://*.recruitee.com/o/*',
     'https://*.teamtailor.com/jobs/*',
@@ -214,7 +228,11 @@ export default defineContentScript({
         .filter(Boolean);
     }
 
-    function monitorExtensionSubmission(applicationId: string, baselineTexts: ReadonlySet<string> = new Set()) {
+    function monitorExtensionSubmission(
+      applicationId: string,
+      baselineTexts: ReadonlySet<string> = new Set(),
+      strictReceipt?: { family: GatedAttendedFamily; startedUrl: string },
+    ) {
       if (monitoredSubmissionIds.has(applicationId)) return;
       monitoredSubmissionIds.add(applicationId);
       const readText = () => visibleSubmissionOutcomeTexts()
@@ -242,6 +260,19 @@ export default defineContentScript({
       };
       const controller = createSubmissionOutcomeController({
         readText,
+        classify: strictReceipt
+          ? (text) => {
+            const failure = pageSubmissionFailureMessage(text);
+            if (failure) return { kind: 'failure', message: failure };
+            const receipt = exactGatedAttendedReceipt({
+              family: strictReceipt.family,
+              startedUrl: strictReceipt.startedUrl,
+              finalUrl: window.location.href,
+              employerText: text,
+            });
+            return receipt ? { kind: 'confirmed' } : null;
+          }
+          : undefined,
         onStop: () => { clearInterval(interval); observer?.disconnect(); },
         onOutcome: (outcome) => report(outcome.kind === 'failure' ? 'failed' : 'confirmed', outcome.kind === 'failure' ? outcome.message : readText().slice(0, 2000)),
         onUnknown: () => report('unknown'),
@@ -284,6 +315,7 @@ export default defineContentScript({
         reserving = true;
         pendingRecoveryGate.beginLocal(applicationId);
         const baselineTexts = new Set(visibleSubmissionOutcomeTexts());
+        const submissionStartedUrl = window.location.href;
         chrome.runtime.sendMessage({
           type: 'EXTENSION_SUBMISSION_START',
           payload: { applicationId, authorization: 'user_initiated', attendedHandoff },
@@ -333,7 +365,13 @@ export default defineContentScript({
             return;
           }
           submitButton.removeEventListener('click', onClick, true);
-          monitorExtensionSubmission(applicationId, baselineTexts);
+          monitorExtensionSubmission(
+            applicationId,
+            baselineTexts,
+            atsName === 'jobvite' || atsName === 'icims'
+              ? { family: atsName, startedUrl: submissionStartedUrl }
+              : undefined,
+          );
           pendingRecoveryGate.endLocal(applicationId);
         });
       };
@@ -362,10 +400,14 @@ export default defineContentScript({
     const checkPendingSubmission = (attempt = 0) => {
       chrome.runtime.sendMessage(
         { type: 'GET_PENDING_EXTENSION_SUBMISSION' },
-        (response: { pending?: { applicationId?: string; startedAt?: number } | null } | undefined) => {
+        (response: { pending?: { applicationId?: string; startedAt?: number; strictReceipt?: { family: GatedAttendedFamily; startedUrl: string } } | null } | undefined) => {
           const pending = response?.pending;
           if (pending?.applicationId && pendingRecoveryGate.shouldRecover(pending)) {
-            monitorExtensionSubmission(pending.applicationId);
+            monitorExtensionSubmission(
+              pending.applicationId,
+              new Set(),
+              pending.strictReceipt,
+            );
           } else if (attempt < 60) {
             window.setTimeout(() => checkPendingSubmission(attempt + 1), 500);
           }
@@ -1318,7 +1360,14 @@ export default defineContentScript({
 
     // Shared by every ATS adapter: generate the JD-tailored resume, then run that adapter's
     // client-side fill-and-stop. Only the JD-extraction and fill functions differ per ATS.
-    function injectResumeFillCard(title: string, company: string, extractJdText: () => string, fill: FillFn) {
+    function injectResumeFillCard(
+      title: string,
+      company: string,
+      extractJdText: () => string,
+      fill: FillFn,
+      initialHandoffApplicationId?: string,
+      expectedGatePacket?: { handoffVersion: string; applicantEmail: string },
+    ) {
       if (document.getElementById('litos-resume-card')) return;
       // Resume preparation and outreach are one application workflow, not two competing prompts.
       // Keep only the active resume task visible. Outreach can return after submission.
@@ -1349,8 +1398,8 @@ export default defineContentScript({
         statusElement: statusEl,
         announcerElement: announcerEl,
       });
-      let handoffApplicationId: string | null = null;
-      let handoffFormUrl: string | null = null;
+      let handoffApplicationId: string | null = initialHandoffApplicationId ?? null;
+      let handoffFormUrl: string | null = initialHandoffApplicationId ? window.location.href : null;
 
       // Must stay longer than the background's WHOLE budget so its descriptive error surfaces
       // first; this is only the backstop for the worse case where the service worker is torn down
@@ -1394,6 +1443,11 @@ export default defineContentScript({
               // instead of letting `undefined` fall through as a fake success.
               if (chrome.runtime.lastError || !result) {
                 done({ error: chrome.runtime.lastError?.message || 'Litos could not finish. Fill this form in yourself.' });
+              } else if (expectedGatePacket && (
+                result.resume?.handoff_version !== expectedGatePacket.handoffVersion
+                || applicantEmailForGeneratedPacket(result.resume) !== expectedGatePacket.applicantEmail
+              )) {
+                done({ error: 'The saved application changed while you cleared the company gate. Return to your Litos Tracker and prepare it again.' });
               } else {
                 done(result);
               }
@@ -1479,7 +1533,12 @@ export default defineContentScript({
         }
         const { profile, applicationProfile, resume } = result;
         const parsedHandoffQuestions = handoffApplicationId ? reviewedQuestionsForHandoff(resume) : [];
-        if (handoffApplicationId && (!validHandoffVersion(resume.handoff_version) || parsedHandoffQuestions === null)) {
+        const initialPacketAudit = handoffApplicationId ? packetAuditForResume(resume) : null;
+        if (handoffApplicationId && (
+          !validHandoffVersion(resume.handoff_version)
+          || parsedHandoffQuestions === null
+          || !initialPacketAudit
+        )) {
           if (statusEl) statusEl.textContent = 'The saved application packet is incomplete, so Litos did not touch this form.';
           generationController.announce('The saved application packet needs to be prepared again.');
           if (yesBtn) {
@@ -1491,9 +1550,11 @@ export default defineContentScript({
         let frozenHandoffQuestions = parsedHandoffQuestions ?? [];
         let exactSubmissionReady = false;
         let frozenAnswerReplayFailed = false;
-        const applicantEmail = applicantEmailForGeneratedPacket(resume, profile.email);
+        let activePacketVersion = initialPacketAudit?.packet_version ?? '';
+        let activeAuditDigest = initialPacketAudit?.audit_digest ?? '';
+        const applicantEmail = applicantEmailForGeneratedPacket(resume);
         if (!applicantEmail) {
-          if (statusEl) statusEl.textContent = 'Litos could not preserve one email across the resume and application, so nothing was filled.';
+          if (statusEl) statusEl.textContent = 'Litos could not verify the separate resume contact and tracked application routing emails, so nothing was filled.';
           generationController.announce('The application email did not save. Try again.');
           if (yesBtn) {
             yesBtn.disabled = false;
@@ -1512,6 +1573,28 @@ export default defineContentScript({
           return;
         }
 
+        if (!handoffApplicationId) {
+          const reviewResult = await new Promise<{ ok?: boolean; error?: string }>((resolve) => {
+            chrome.runtime.sendMessage({
+              type: 'APPLICATION_PACKET_REVIEW_REQUIRED',
+              payload: {
+                applicationId: resume.resume_id,
+              },
+            }, (response: { ok?: boolean; error?: string } | undefined) => {
+              resolve(response ?? { error: chrome.runtime.lastError?.message ?? 'The packet review could not open.' });
+            });
+          });
+          if (statusEl) statusEl.textContent = reviewResult.ok
+            ? 'Review and acknowledge the exact packet in Litos, then reopen this application from your Tracker. This form was not changed.'
+            : `${reviewResult.error ?? 'The exact packet review could not open.'} This form was not changed.`;
+          generationController.announce(reviewResult.ok
+            ? 'Review the exact packet in Litos before filling this application.'
+            : 'The exact packet review could not open. Nothing was filled.');
+          if (yesBtn) yesBtn.style.display = 'none';
+          if (noBtn) noBtn.style.display = 'none';
+          return;
+        }
+
         if (statusEl) statusEl.textContent = `${buildResumeReviewSummary(resume.quality)} Preparing your dashboard review...`;
         if (yesBtn) yesBtn.style.display = 'none';
         if (noBtn) noBtn.style.display = 'none';
@@ -1525,6 +1608,19 @@ export default defineContentScript({
         // resumeFetchSkipReason. The fill itself still runs either way: a missing resume must
         // not cost the student the forty other fields the adapter can fill.
         const resumeBlob = (await fetchResumeBlob(result.resume.resume_url)) ?? undefined;
+        if (handoffApplicationId && (
+          !resumeBlob
+          || !initialPacketAudit
+          || !(await packetAuditPdfMatches(resumeBlob, initialPacketAudit))
+        )) {
+          if (statusEl) statusEl.textContent = 'The downloaded resume does not match the exact audited packet, so Litos did not touch this form.';
+          generationController.announce('The audited application packet changed. Reload it from Litos.');
+          if (yesBtn) {
+            yesBtn.disabled = false;
+            yesBtn.textContent = 'Retry';
+          }
+          return;
+        }
 
         // Safety net: a stuck field (an unexpected widget, a listener that never fires) must
         // never leave the student staring at "Filling the application..." forever. This is an
@@ -1627,6 +1723,9 @@ export default defineContentScript({
         if (!resumeBlob) {
           fillResult.skipped_reasons.push(resumeFetchSkipReason);
         }
+        const replayOptions = fillResult.ats_name === 'jobvite' || fillResult.ats_name === 'icims'
+          ? { allowControl: gatedReviewedAnswerControlAllowed }
+          : undefined;
         type AttachedResumeEvidence = { input: HTMLInputElement; file: File; digest: string };
         const fileInputsAcrossOpenRoots = (): HTMLInputElement[] => {
           const roots: Array<Document | ShadowRoot> = [document];
@@ -1647,9 +1746,8 @@ export default defineContentScript({
           return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
         };
         const resumeFileInputs = (): HTMLInputElement[] => {
-          const inputs = fileInputsAcrossOpenRoots();
-          if (inputs.length === 1) return inputs;
-          return inputs.filter((input) => {
+          const inputs = fileInputsAcrossOpenRoots().filter((input) => input.isConnected && !input.disabled && isElementVisible(input));
+          const semantic = inputs.filter((input) => {
             const container = input.closest('label, [data-test], fieldset');
             const text = [
               input.name,
@@ -1662,6 +1760,11 @@ export default defineContentScript({
             ].join(' ').toLowerCase();
             return /\b(resume|résumé|cv)\b/.test(text) && !/cover\s*letter|portfolio/.test(text);
           });
+          if (fillResult.ats_name === 'jobvite' || fillResult.ats_name === 'icims') {
+            return semantic.length === 1 ? semantic : [];
+          }
+          if (inputs.length === 1) return inputs;
+          return semantic;
         };
         const exactAttachment = async (blob: Blob, fileName: string): Promise<AttachedResumeEvidence | null> => {
           const expectedDigest = await sha256(blob);
@@ -1675,15 +1778,19 @@ export default defineContentScript({
         };
         let exactAttachedResume: AttachedResumeEvidence | null = null;
         if (handoffApplicationId) {
-          const replay = replayReviewedAnswers(document, frozenHandoffQuestions);
+          const replay = replayReviewedAnswers(document, frozenHandoffQuestions, replayOptions);
           frozenAnswerReplayFailed = replay.failed.length > 0;
+          for (const questionId of replay.denied ?? []) {
+            const question = frozenHandoffQuestions.find((item) => item.id === questionId);
+            if (question) fillResult.skipped_reasons.push(`human-owned answer left for you: ${question.question}`);
+          }
           for (const questionId of replay.failed) {
             const question = frozenHandoffQuestions.find((item) => item.id === questionId);
             if (question) fillResult.skipped_reasons.push(`saved answer: ${question.question}`);
           }
           exactAttachedResume = resumeBlob ? await exactAttachment(resumeBlob, resume.file_name) : null;
           exactSubmissionReady = Boolean(exactAttachedResume) && !frozenAnswerReplayFailed
-            && reviewedAnswersMatch(document, frozenHandoffQuestions).failed.length === 0;
+            && reviewedAnswersMatch(document, frozenHandoffQuestions, replayOptions).failed.length === 0;
         }
         const sameApplicationPage = (expected: string, current: string): boolean => {
           const expectedKey = applicationFormIdentityKey(expected);
@@ -1707,26 +1814,35 @@ export default defineContentScript({
             || exactResume.application?.id !== resume.resume_id
             || !validHandoffVersion(exactResume.handoff_version)
           ) return 'The saved application packet no longer matches this form. Nothing was sent.';
+          const exactAudit = packetAuditForResume(exactResume);
+          if (!exactAudit) return 'The saved application packet has no complete current audit. Nothing was sent.';
           const exactQuestions = reviewedQuestionsForHandoff(exactResume);
           if (exactQuestions === null) return 'The saved reviewed answers are incomplete. Nothing was sent.';
+          const exactFillData = frozenApplicantFillData(exactResume);
+          if (!exactFillData) return 'The saved application packet has no complete frozen applicant data. Nothing was sent.';
+          const exactApplicantEmail = applicantEmailForGeneratedPacket(exactResume);
+          if (!exactApplicantEmail) return 'The saved application packet has no frozen applicant email. Nothing was sent.';
           if (handoffFormUrl && !sameApplicationPage(handoffFormUrl, window.location.href)) {
             return 'The company form changed after the exact packet was loaded. Return to Litos and retry it.';
           }
           const exactBlob = await fetchResumeBlob(exactResume.resume_url);
           if (!exactBlob) return 'The exact reviewed resume could not be downloaded. Nothing was sent.';
+          if (!(await packetAuditPdfMatches(exactBlob, exactAudit))) {
+            return 'The exact reviewed resume does not match the audited packet. Nothing was sent.';
+          }
           if (!sameApplicationPage(expectedUrl, window.location.href)) {
             return 'The company form changed while the exact resume was downloading. Nothing was sent.';
           }
           let refill: AutofillResult;
           try {
             refill = await withInactivityTimeout((reportProgress, signal) => fill({
-              fullName: profile.full_name ?? '',
-              email: applicantEmail,
-              profile,
-              applicationProfile: fillApplicationProfile,
+              fullName: exactFillData.profile.full_name ?? '',
+              email: exactApplicantEmail,
+              profile: exactFillData.profile,
+              applicationProfile: exactFillData.applicationProfile,
               resumeBlob: exactBlob,
               resumeFileName: exactResume.file_name,
-              eeo: (fillApplicationProfile.eeo_prefs as Record<string, string> | undefined) ?? {},
+              eeo: (exactFillData.applicationProfile.eeo_prefs as Record<string, string> | undefined) ?? {},
               postingCompensation: result.posting_compensation ?? null,
               signal,
               onProgress: () => reportProgress(),
@@ -1756,11 +1872,13 @@ export default defineContentScript({
             return 'The company form changed while the exact packet was being verified. Nothing was sent.';
           }
           frozenHandoffQuestions = exactQuestions;
-          const replay = replayReviewedAnswers(document, frozenHandoffQuestions);
+          const replay = replayReviewedAnswers(document, frozenHandoffQuestions, replayOptions);
           frozenAnswerReplayFailed = replay.failed.length > 0
-            || reviewedAnswersMatch(document, frozenHandoffQuestions).failed.length > 0;
+            || reviewedAnswersMatch(document, frozenHandoffQuestions, replayOptions).failed.length > 0;
           if (frozenAnswerReplayFailed) return 'A saved reviewed answer could not be replayed exactly. Nothing was sent.';
           handoffFormUrl = expectedUrl;
+          activePacketVersion = exactAudit.packet_version;
+          activeAuditDigest = exactAudit.audit_digest;
           exactSubmissionReady = true;
           return null;
         };
@@ -1771,11 +1889,27 @@ export default defineContentScript({
           return run.catch(() => 'The exact application packet could not be verified. Nothing was sent.');
         };
         prepareSubmissionFromDashboard = adoptAuthoritativePacket;
+        const exactApplicantEmailError = (): string | null => {
+          if (!expectedGatePacket) return null;
+          const inputs = applicantOwnedEmailInputs(document);
+          if (inputs.length !== 1) return 'The employer form does not show one exact applicant email field. Nothing was sent.';
+          const expectedEmail = expectedGatePacket.applicantEmail.trim().toLowerCase();
+          return inputs[0].value.trim().toLowerCase() === expectedEmail
+            ? null
+            : 'The employer form email no longer matches the exact saved application email. Nothing was sent.';
+        };
         const handoffSubmissionGuard = (): string | null => {
           if (!exactSubmissionReady) return 'Litos has not verified the exact reviewed packet yet. Nothing was sent.';
+          if (!validHandoffVersion(activePacketVersion) || !validHandoffVersion(activeAuditDigest)) {
+            return 'The exact packet audit is no longer available. Nothing was sent.';
+          }
           if (
             !exactAttachedResume
             || !exactAttachedResume.input.isConnected
+            || exactAttachedResume.input.disabled
+            || !isElementVisible(exactAttachedResume.input)
+            || !resumeFileInputs().includes(exactAttachedResume.input)
+            || !exactAttachedResume.digest
             || !Array.from(exactAttachedResume.input.files ?? []).includes(exactAttachedResume.file)
           ) {
             return 'The exact reviewed resume was removed or replaced. Nothing was sent.';
@@ -1783,9 +1917,11 @@ export default defineContentScript({
           if (!handoffFormUrl || !sameApplicationPage(handoffFormUrl, window.location.href)) {
             return 'The company form changed after the exact packet was loaded. Return to Litos and retry it.';
           }
-          if (frozenAnswerReplayFailed || reviewedAnswersMatch(document, frozenHandoffQuestions).failed.length > 0) {
+          if (frozenAnswerReplayFailed || reviewedAnswersMatch(document, frozenHandoffQuestions, replayOptions).failed.length > 0) {
             return 'A saved reviewed answer could not be replayed exactly. Nothing was sent.';
           }
+          const emailError = exactApplicantEmailError();
+          if (emailError) return emailError;
           return null;
         };
 
@@ -2009,7 +2145,7 @@ export default defineContentScript({
        * second entrance into it is a second thing to keep in step. Nothing here submits anything;
        * auto-submit remains behind its own separate opt-in.
        */
-      chrome.runtime.sendMessage(
+      if (!initialHandoffApplicationId) chrome.runtime.sendMessage(
         { type: 'CLAIM_HANDOFF', url: window.location.href },
         (response: { armed?: boolean; applicationId?: string } | undefined) => {
           if (chrome.runtime.lastError || !response?.armed) return;
@@ -2023,6 +2159,12 @@ export default defineContentScript({
           yesBtn.click();
         },
       );
+      else {
+        const yesBtn = card.querySelector<HTMLButtonElement>('#wp-resume-yes');
+        const heading = card.querySelector<HTMLElement>('#wp-resume-heading');
+        if (heading) heading.textContent = 'Finishing this application';
+        if (yesBtn && !yesBtn.disabled) yesBtn.click();
+      }
     }
 
     const AUTO_SUBMIT_COUNTDOWN_SECONDS = 15;
@@ -2696,9 +2838,146 @@ export default defineContentScript({
       document.body.appendChild(note);
     }
 
+    const preparedGatedStages = new Set<string>();
+    const initializedGatedApplications = new Set<string>();
+    const gatedStageRetryCounts = new Map<string, number>();
+    const retryGatedStage = (
+      stage: NonNullable<ReturnType<typeof inspectGatedAttendedStage>>,
+      retry: () => void,
+    ): void => {
+      const key = `${stage.identity}:${stage.stage}`;
+      const count = gatedStageRetryCounts.get(key) ?? 0;
+      if (count >= 3) return;
+      gatedStageRetryCounts.set(key, count + 1);
+      window.setTimeout(() => {
+        const current = inspectGatedAttendedStage(window.location.href);
+        if (current?.identity === stage.identity && current.stage === stage.stage) retry();
+      }, 2_000);
+    };
+
+    function prepareGatedAttendedStage(stage: NonNullable<ReturnType<typeof inspectGatedAttendedStage>>): void {
+      injectGatedPortalNotice(gatedStageNotice(stage.stage));
+      const preparationKey = `${stage.identity}:${stage.stage}`;
+      if (preparedGatedStages.has(preparationKey)) return;
+      preparedGatedStages.add(preparationKey);
+      chrome.runtime.sendMessage(
+        { type: 'PREPARE_GATED_ATTENDED_HANDOFF' },
+        (response: { ok?: boolean; email?: string; handoffVersion?: string; error?: string } | undefined) => {
+          if (chrome.runtime.lastError || !response?.ok) {
+            preparedGatedStages.delete(preparationKey);
+            const note = document.getElementById('litos-gated-note');
+            if (note) note.textContent = response?.error ?? 'Litos could not verify this exact saved application. Return to your Tracker and try again.';
+            retryGatedStage(stage, () => prepareGatedAttendedStage(stage));
+            return;
+          }
+          gatedStageRetryCounts.delete(preparationKey);
+          if (stage.family === 'icims' && stage.stage === 'security_code') {
+            const guarded = guardTrustedSecurityCodeIntent({
+              onTrustedSubmit: () => chrome.runtime.sendMessage({
+                type: 'PROVE_GATED_ATTENDED_ACCOUNT',
+                proofKind: 'security_code',
+              }),
+            });
+            if (!guarded) chrome.runtime.sendMessage({ type: 'INVALIDATE_GATED_ATTENDED_CONTINUATION' });
+            return;
+          }
+          if (stage.family === 'icims' && response.email) {
+            const invalidate = () => chrome.runtime.sendMessage({ type: 'INVALIDATE_GATED_ATTENDED_CONTINUATION' });
+            const bindAccountProof = () => guardFrozenIcimsLoginIntent({
+              email: response.email!,
+              onInvalid: invalidate,
+              onTrustedSubmit: () => chrome.runtime.sendMessage({
+                type: 'PROVE_GATED_ATTENDED_ACCOUNT',
+                proofKind: 'login_email',
+                email: response.email,
+              }),
+            });
+            const before = frozenIcimsLoginEmailState(response.email);
+            if (before === 'mismatch' || before === 'ambiguous') {
+              invalidate();
+              const note = document.getElementById('litos-gated-note');
+              if (note) note.textContent = 'This iCIMS page contains a different account email than the saved application. Return to your Litos Tracker and reopen the exact application.';
+              return;
+            }
+            if (before === 'match' && !bindAccountProof()) invalidate();
+            if (before === 'empty') void fillFrozenIcimsLoginEmail(response.email).then((filled) => {
+              const after = frozenIcimsLoginEmailState(response.email!);
+              if (!filled || after !== 'match' || !bindAccountProof()) {
+                invalidate();
+                return;
+              }
+              const note = document.getElementById('litos-gated-note');
+              if (note) note.textContent = `${gatedStageNotice(stage.stage)} Litos placed the exact saved application email in the email box.`;
+            });
+          }
+        },
+      );
+    }
+
+    function initializeGatedAttendedApplication(stage: NonNullable<ReturnType<typeof inspectGatedAttendedStage>>): void {
+      if (initializedGatedApplications.has(stage.identity)) return;
+      initializedGatedApplications.add(stage.identity);
+      chrome.runtime.sendMessage(
+        { type: 'PREPARE_GATED_ATTENDED_HANDOFF' },
+        (prepared: { ok?: boolean; applicationId?: string; handoffVersion?: string; email?: string; error?: string } | undefined) => {
+          if (
+            chrome.runtime.lastError
+            || !prepared?.ok
+            || !prepared.applicationId
+            || !validHandoffVersion(prepared.handoffVersion)
+            || !prepared.email
+          ) {
+            initializedGatedApplications.delete(stage.identity);
+            injectGatedPortalNotice(prepared?.error ?? 'Open this exact application from your Litos Tracker so the saved packet can be verified before anything is filled.');
+            retryGatedStage(stage, () => initializeGatedAttendedApplication(stage));
+            return;
+          }
+          const claimContinuation = () => chrome.runtime.sendMessage(
+            { type: 'CLAIM_GATED_ATTENDED_CONTINUATION' },
+            (claimed: { armed?: boolean; applicationId?: string; handoffVersion?: string; applicantEmail?: string } | undefined) => {
+              if (
+                chrome.runtime.lastError
+                || !claimed?.armed
+                || claimed.applicationId !== prepared.applicationId
+                || claimed.handoffVersion !== prepared.handoffVersion
+                || claimed.applicantEmail !== prepared.email
+              ) {
+                initializedGatedApplications.delete(stage.identity);
+                injectGatedPortalNotice('The exact saved application changed before the form could be opened. Return to your Litos Tracker and retry it.');
+                retryGatedStage(stage, () => initializeGatedAttendedApplication(stage));
+                return;
+              }
+              gatedStageRetryCounts.delete(`${stage.identity}:${stage.stage}`);
+              const job = getJobDetails() ?? getGenericJobDetails();
+              document.getElementById('litos-gated-note')?.remove();
+              startHarvest();
+              injectActionCard(job.title, job.company, window.location.href);
+              watchSubmitButton(job.title, job.company, window.location.href);
+              injectResumeFillCard(
+                job.title,
+                job.company,
+                extractAtsJdText,
+                fillAtsApplication,
+                claimed.applicationId,
+                { handoffVersion: claimed.handoffVersion!, applicantEmail: claimed.applicantEmail! },
+              );
+            },
+          );
+          claimContinuation();
+        },
+      );
+    }
+
     function init() {
       const h = window.location.hostname;
       const route = contentInitRoute(window.location);
+
+      const gatedAttendedStage = inspectGatedAttendedStage(window.location.href);
+      if (gatedAttendedStage) {
+        if (gatedAttendedStage.stage === 'application') initializeGatedAttendedApplication(gatedAttendedStage);
+        else if (gatedStageCanPrepare(gatedAttendedStage.stage)) prepareGatedAttendedStage(gatedAttendedStage);
+        return;
+      }
 
       // Checked before every other branch. These hosts are in KNOWN_ATS_HOSTS so they do not fall
       // through to genericInit, but they have no adapter, so without this they would reach
@@ -2850,10 +3129,17 @@ export default defineContentScript({
 
     // Re-run on SPA navigation
     let lastUrl = location.href;
+    let lastGatedStage = (() => {
+      const stage = inspectGatedAttendedStage(location.href);
+      return stage ? `${stage.identity}:${stage.stage}` : '';
+    })();
     new MutationObserver(() => {
       const currentUrl = location.href;
+      const stage = inspectGatedAttendedStage(currentUrl);
+      const currentGatedStage = stage ? `${stage.identity}:${stage.stage}` : '';
       if (currentUrl !== lastUrl) {
         lastUrl = currentUrl;
+        lastGatedStage = currentGatedStage;
         // A navigation must kill any pending auto-submit countdown: the button it anchored to is
         // about to be torn down, and firing after the page changed could submit the wrong form.
         activeAutoSubmitCancel?.();
@@ -2864,6 +3150,13 @@ export default defineContentScript({
         document.getElementById('litos-resume-card')?.remove();
         document.getElementById('litos-account-card')?.remove();
         document.getElementById('litos-start-card')?.remove();
+        setTimeout(init, NAV_RECHECK_DELAY_MS);
+      } else if (currentGatedStage && currentGatedStage !== lastGatedStage) {
+        lastGatedStage = currentGatedStage;
+        activeAutoSubmitCancel?.();
+        cardInjected = false;
+        document.getElementById('litos-gated-note')?.remove();
+        document.getElementById('litos-resume-card')?.remove();
         setTimeout(init, NAV_RECHECK_DELAY_MS);
       }
     }).observe(document.body, { childList: true, subtree: true });

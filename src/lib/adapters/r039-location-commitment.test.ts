@@ -25,8 +25,14 @@ const FAIRE_RAW =
 
 const profile = {} as Profile;
 const ap: ApplicationProfile = {
+  phone: '+971500000000',
   address_city: 'Dubai',
+  address_state: 'Dubai',
+  address_zip: '00000',
   address_country: 'United Arab Emirates',
+  linkedin_url: 'https://linkedin.com/in/mehek',
+  github_url: 'https://github.com/mehek',
+  portfolio_url: 'https://mehek.example',
 } as ApplicationProfile;
 
 // The generic adapter's candidateInputs() gates on isVisible(), which reads a layout box jsdom
@@ -37,13 +43,13 @@ const RECT = {
 } as DOMRect;
 
 let seq = 0;
-function genericField(labelText: string): HTMLInputElement {
+function genericField(labelText: string, type = 'text'): HTMLInputElement {
   const id = `field-${++seq}`;
   const label = document.createElement('label');
   label.htmlFor = id;
   label.textContent = labelText;
   const el = document.createElement('input');
-  el.type = 'text';
+  el.type = type;
   el.id = id;
   el.getBoundingClientRect = () => RECT;
   document.body.append(label, el);
@@ -81,15 +87,34 @@ describe('R-039 veto through the generic identity chain', () => {
     expect(drainR030CandidateLabels().filter((l) => l.startsWith('r039-'))).toEqual([]);
   });
 
-  it("a third-party label is RECORDED but the fill is unchanged (observation only, R-030 doctrine)", async () => {
+  it("leaves a third-party email untouched and records the refusal", async () => {
     const el = genericField("Manager's email");
     await runGeneric(ap);
-    // Today's behavior: the bare e-?mail matcher fills her email. That is R-039's still-open
-    // shape - the point of this test is that instrumenting it did NOT quietly become a guard.
-    // When a real guard is designed off the recorded labels, THIS assertion is the one to flip.
-    expect(el.value).toBe('mehekman@usc.edu');
+    expect(el.value).toBe('');
     const labels = drainR030CandidateLabels();
     expect(labels.some((l) => l.startsWith('r039-third-party:') && /manager/.test(l))).toBe(true);
+  });
+
+  it.each([
+    ["Reference name", 'text'],
+    ["Reference email", 'email'],
+    ["Manager phone", 'tel'],
+    ["Emergency contact city", 'text'],
+    ["Supervisor postal address", 'text'],
+    ["Recommender LinkedIn", 'url'],
+    ["Other person's website", 'url'],
+  ])('never substitutes applicant identity for %s', async (label, type) => {
+      const el = genericField(label, type);
+      await runGeneric(ap);
+      expect(el.value).toBe('');
+      expect(drainR030CandidateLabels().some((item) => item.startsWith('r039-third-party:'))).toBe(true);
+    });
+
+  it('still allows the applicant referral-source question', async () => {
+    const el = genericField('How were you referred to this role?');
+    await runGeneric({ ...ap, referral_source_default: 'Company website' });
+    expect(drainR030CandidateLabels().filter((item) => item.startsWith('r039-third-party:'))).toEqual([]);
+    expect(el.value).not.toBe('mehekman@usc.edu');
   });
 });
 

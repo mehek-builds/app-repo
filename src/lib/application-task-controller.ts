@@ -15,6 +15,7 @@ export function createSubmissionOutcomeController(options: {
   onStop: () => void;
   timeoutMs?: number;
   debounceMs?: number;
+  classify?: (text: string) => SubmissionOutcome;
 }) {
   let finished = false;
   let debounceTimer: TimerHandle | null = null;
@@ -31,7 +32,7 @@ export function createSubmissionOutcomeController(options: {
   };
   const scan = (): boolean => {
     if (finished) return false;
-    const outcome = classifySubmissionOutcome(options.readText());
+    const outcome = (options.classify ?? classifySubmissionOutcome)(options.readText());
     if (!outcome) return false;
     finished = true;
     teardown();

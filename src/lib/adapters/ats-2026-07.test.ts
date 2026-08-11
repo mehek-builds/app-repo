@@ -44,6 +44,7 @@ describe('host rules reject the login and marketing pages that share these host 
     ['https://zinier.breezy.hr/p/7eefd4d49b75-platform-support-engineer-l1/apply', 'breezy'],
     ['https://recruiting.breezy.hr/p/05c7fcbfad27-welding-engineer/apply', 'breezy'],
     ['https://prentkeromich.bamboohr.com/careers/480', 'bamboohr'],
+    ['https://acme-studio.bamboohr.com/careers/7312', 'bamboohr'],
   ])('claims the real application page %s as %s', (url, id) => {
     at(url);
     expect(specForCurrentPage()?.id).toBe(id);
@@ -144,10 +145,11 @@ describe('the platforms with no safe form to fill', () => {
     }
   });
 
-  it('has no adapter at all for any of them', () => {
-    // The point of the tier: recognise and explain, never a fill that silently does nothing.
+  it('keeps an adapter disabled for every family without a measured post-gate form', () => {
+    // Jobvite and iCIMS now expose a measured post-gate attended path. The remaining families
+    // stay recognition-only until their real form is captured and reviewed.
     const ids = ATS_SPECS.map((s) => s.id);
-    for (const gated of ['jobvite', 'icims', 'oraclecloud', 'ultipro', 'avature']) {
+    for (const gated of ['oraclecloud', 'ultipro', 'avature']) {
       expect(ids).not.toContain(gated);
     }
   });
@@ -157,8 +159,9 @@ describe('exact Bamboo, UKG, and Oracle route boundaries', () => {
   it.each([
     'https://mpathic2.bamboohr.com/careers/99evil',
     'https://mpathic2.bamboohr.com/careers/99/admin',
-    'https://mpathic2.bamboohr.com/careers/480',
-    'https://acme.bamboohr.com/careers/99',
+    'https://www.bamboohr.com/careers/99',
+    'https://app.bamboohr.com/careers/99',
+    'https://acme.bamboohr.com/careers/application',
     'https://enterpriseplatform.dell.com/hcmUI/CandidateExperience/en/sites/careers/login',
     'https://enterpriseplatform.dell.com/hcmUI/CandidateExperience/en/sites/careers/job/admin',
     'https://enterpriseplatform.dell.com/hcmUI/CandidateExperience/en/sites/careers/job/295586/payroll',
@@ -187,9 +190,17 @@ describe('exact Bamboo, UKG, and Oracle route boundaries', () => {
     expect(gatedPortalNotice(parsed.hostname, parsed.pathname, parsed.search)).toBeNull();
   });
 
+  it('does not grant BambooHR capabilities to a suffix-lookalike host', () => {
+    const parsed = new URL('https://evilbamboohr.com/careers/99');
+    expect(contentInitRoute(parsed)).not.toBe('ats');
+    expect(gatedPortalNotice(parsed.hostname, parsed.pathname, parsed.search)).toBeNull();
+    expect(ATS_SPECS.find((spec) => spec.id === 'bamboohr')?.host(parsed.hostname)).toBe(false);
+  });
+
   it.each([
     'https://mpathic2.bamboohr.com/careers/99',
     'https://mpathic2.bamboohr.com/careers/99/',
+    'https://acme-studio.bamboohr.com/careers/7312',
   ])('accepts exact Bamboo numeric route %s', (raw) => {
     const parsed = new URL(raw);
     expect(contentInitRoute({ hostname: parsed.hostname, pathname: parsed.pathname, search: parsed.search, hash: parsed.hash })).toBe('ats');

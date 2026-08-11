@@ -63,7 +63,7 @@ describe('applicationFormIdentityKey', () => {
     ['Ashby', 'https://jobs.ashbyhq.com/acme/one/application', 'https://jobs.ashbyhq.com/acme/one/application', 'https://jobs.ashbyhq.com/acme/two/application'],
     ['Workday', 'https://acme.wd5.myworkdayjobs.com/en-US/jobs/job/one/apply', 'https://acme.wd5.myworkdayjobs.com/en-US/jobs/job/one/apply', 'https://acme.wd5.myworkdayjobs.com/en-US/jobs/job/two/apply'],
     ['SmartRecruiters', 'https://jobs.smartrecruiters.com/oneclick-ui/company/Acme/publication/123e4567-e89b-12d3-a456-426614174000?dcr_ci=Acme', 'https://jobs.smartrecruiters.com/oneclick-ui/company/Acme/publication/123e4567-e89b-12d3-a456-426614174000?utm_source=x', 'https://jobs.smartrecruiters.com/oneclick-ui/company/Acme/publication/223e4567-e89b-12d3-a456-426614174999'],
-    ['iCIMS', 'https://careers-acme.icims.com/jobs/123/job?mobile=true', 'https://careers-acme.icims.com/jobs/123/job?utm_source=x', 'https://careers-acme.icims.com/jobs/456/job'],
+    ['iCIMS', 'https://careers-acme.icims.com/jobs/123/software-engineer/job?mobile=true', 'https://careers-acme.icims.com/jobs/123/software-engineer/login?utm_source=x', 'https://careers-acme.icims.com/jobs/456/software-engineer/job'],
     ['Jobvite', 'https://jobs.jobvite.com/acme/job/one/apply?source=a', 'https://jobs.jobvite.com/acme/job/one?source=b', 'https://jobs.jobvite.com/acme/job/two'],
     ['Personio', 'https://acme.jobs.personio.com/job/123/apply?language=en', 'https://acme.jobs.personio.com/job/123?language=de', 'https://acme.jobs.personio.com/job/456'],
     ['Recruitee', 'https://acme.recruitee.com/o/one/c/new?source=a', 'https://acme.recruitee.com/o/one?source=b', 'https://acme.recruitee.com/o/two'],

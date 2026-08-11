@@ -145,6 +145,10 @@ function replayOne(root: Document, question: HandoffQuestion): boolean {
   return control.value === question.answer;
 }
 
+export type ReviewedAnswerReplayOptions = {
+  allowControl?: (control: Element, question: HandoffQuestion) => boolean;
+};
+
 function answerMatches(root: Document, question: HandoffQuestion): boolean {
   if (!question.answer.trim()) return false;
   const [control] = controlsForQuestion(root, question);
@@ -174,23 +178,37 @@ function answerMatches(root: Document, question: HandoffQuestion): boolean {
 export function replayReviewedAnswers(
   root: Document,
   questions: readonly HandoffQuestion[],
-): { applied: string[]; failed: string[] } {
+  options: ReviewedAnswerReplayOptions = {},
+): { applied: string[]; failed: string[]; denied?: string[] } {
   const applied: string[] = [];
   const failed: string[] = [];
+  const denied: string[] = [];
   for (const question of questions) {
+    const [control] = controlsForQuestion(root, question);
+    if (control && options.allowControl && !options.allowControl(control, question)) {
+      denied.push(question.id);
+      continue;
+    }
     (replayOne(root, question) ? applied : failed).push(question.id);
   }
-  return { applied, failed };
+  return { applied, failed, ...(denied.length > 0 ? { denied } : {}) };
 }
 
 export function reviewedAnswersMatch(
   root: Document,
   questions: readonly HandoffQuestion[],
-): { matched: string[]; failed: string[] } {
+  options: ReviewedAnswerReplayOptions = {},
+): { matched: string[]; failed: string[]; denied?: string[] } {
   const matched: string[] = [];
   const failed: string[] = [];
+  const denied: string[] = [];
   for (const question of questions) {
+    const [control] = controlsForQuestion(root, question);
+    if (control && options.allowControl && !options.allowControl(control, question)) {
+      denied.push(question.id);
+      continue;
+    }
     (answerMatches(root, question) ? matched : failed).push(question.id);
   }
-  return { matched, failed };
+  return { matched, failed, ...(denied.length > 0 ? { denied } : {}) };
 }

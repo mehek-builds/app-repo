@@ -85,11 +85,9 @@ export function applicationFormIdentityKey(raw: string): string | null {
       url.hash = '';
       return url.toString();
     }
-    if (host.includes('jobvite.com')) {
-      url.pathname = path.replace(/\/apply$/i, '');
-      url.search = '';
-      url.hash = '';
-      return url.toString();
+    if (host === 'jobs.jobvite.com') {
+      const match = /^\/([a-z0-9._-]+)\/job\/([a-z0-9]+)(?:\/apply)?(?:\/(?:confirmation|thank-you|submitted|application-submitted))?$/i.exec(path);
+      return match ? `${url.origin}/${match[1]}/job/${match[2]}` : null;
     }
     if (host.includes('recruitee.com')) {
       url.pathname = path.replace(/\/c\/new$/i, '');
@@ -103,7 +101,11 @@ export function applicationFormIdentityKey(raw: string): string | null {
       url.hash = '';
       return url.toString();
     }
-    if (host.includes('smartrecruiters.com') || host.includes('icims.com') || host.includes('zohorecruit.')) return clearNoise();
+    if (/^(?!(?:www|community|login|api)\.)[a-z0-9-]+\.icims\.com$/i.test(host)) {
+      const match = /^\/jobs\/(\d+)\/[a-z0-9%._~-]+\/(?:job|login)(?:\/(?:confirmation|thank-you|submitted|application-submitted))?$/i.exec(path);
+      return match ? `${url.origin}/jobs/${match[1]}` : null;
+    }
+    if (host.includes('smartrecruiters.com') || host.includes('zohorecruit.')) return clearNoise();
     if (host.includes('applytojob.com') || host.includes('bamboohr.com') || host.includes('oraclecloud.com')) return clearNoise();
     if (host.includes('greenhouse.io')) {
       const token = url.searchParams.get('token');

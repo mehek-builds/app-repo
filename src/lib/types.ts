@@ -169,7 +169,76 @@ export interface GeneratedResume {
     id: string;
     spec: unknown;
   };
+  /** Structured applicant facts frozen by the backend and included in handoff_version. */
+  applicant_snapshot?: {
+    profile: Profile;
+    application_profile: ApplicationProfile;
+  };
+  /** Server-owned, immutable evidence that every reviewed packet component is current. */
+  packet_audit?: PacketAudit;
   quality: ResumeQuality;
+}
+
+export interface PacketAuditEvidencePointer {
+  source: 'resume_spec' | 'applicant_snapshot';
+  path: string;
+  sha256: string;
+  quote: string;
+}
+
+export interface PacketAuditTerm {
+  text: string;
+  key: string;
+  start: number;
+  end: number;
+  clauseIndex: number;
+  evidence?: PacketAuditEvidencePointer;
+}
+
+export interface PacketAuditHighlightTerm extends PacketAuditTerm {
+  tone: 'covered' | 'missing' | 'edited';
+}
+
+export interface PacketAuditClause {
+  text: string;
+  start: number;
+  end: number;
+  verdict: 'covered' | 'missing' | 'unscoreable';
+  evidence?: PacketAuditEvidencePointer[];
+  highlight_terms: PacketAuditHighlightTerm[];
+}
+
+export interface PacketAudit {
+  version: 'packet_audit_v1';
+  status: 'passed';
+  complete: true;
+  degraded: false;
+  rejectedCount: 0;
+  bindings: {
+    ownerSha256: string;
+    applicationId: string;
+    jdSha256: string;
+    specSha256: string;
+    jobContextSha256: string;
+    questionsSha256: string;
+    applicantSnapshotSha256: string;
+    resumeContactEmailSha256: string;
+    applicantEmailSha256: string;
+    pdf: { objectKey: string; sha256: string; sizeBytes: number };
+  };
+  packet_version: string;
+  identities: {
+    resume_email: string;
+    applicant_email: string;
+  };
+  clauses: PacketAuditClause[];
+  editedTerms: string[];
+  terms: {
+    covered: PacketAuditTerm[];
+    missing: PacketAuditTerm[];
+    edited: PacketAuditTerm[];
+  };
+  audit_digest: string;
 }
 
 export interface ResumeQuality {
