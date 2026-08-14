@@ -1,3 +1,5 @@
+import { CAPTCHA_STALLS_KEY } from './storage-keys';
+
 /**
  * The applicant's own stall list, kept in extension storage.
  *
@@ -36,7 +38,7 @@ export type CaptchaStall = {
   stalledAt: string;
 };
 
-const KEY = 'captcha_stalls';
+const KEY = CAPTCHA_STALLS_KEY;
 
 /**
  * Bounded so a pathological loop cannot grow storage without limit.

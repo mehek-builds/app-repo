@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   ARMED_HANDOFF_TTL_MS,
   applicationFormIdentityKey,
+  armedHandoffMode,
   armHandoffs,
   claimArmed,
   decideAdoption,
@@ -115,6 +116,18 @@ describe('SmartRecruiters handoff continuation', () => {
     expect(claimArmed(continued.remaining, form, NOW + 2).claimed?.applicationId).toBe('packet-seeka');
   });
 
+  it('preserves a dashboard Free fill mode across the posting-to-form continuation', () => {
+    const armed = armHandoffs([], [{
+      url: posting,
+      applicationId: 'packet-seeka',
+      mode: 'free_fill',
+    }], NOW);
+    const continued = continueSmartRecruitersHandoff(armed, posting, form, NOW + 1);
+    const claimed = claimArmed(continued.remaining, form, NOW + 2).claimed;
+    expect(claimed?.applicationId).toBe('packet-seeka');
+    expect(claimed && armedHandoffMode(claimed)).toBe('free_fill');
+  });
+
   it('does not continue a different posting or accept an unarmed caller-selected packet', () => {
     const otherPosting = 'https://jobs.smartrecruiters.com/SeekaTechnology/744000063648999-another-role';
     const armed = armHandoffs([], [{ url: posting, applicationId: 'packet-seeka' }], NOW);
@@ -165,6 +178,31 @@ describe('claimArmed', () => {
 
   it('does not claim once the arming has aged out', () => {
     expect(claimArmed(armed, 'https://jobs.lever.co/palantir/9e40/apply', NOW + ARMED_HANDOFF_TTL_MS + 1).claimed).toBeNull();
+  });
+
+  it('hands a dashboard Free fill out once without converting it to a packet', () => {
+    const freeFill = armHandoffs([], [{
+      url: 'https://jobs.lever.co/palantir/9e40',
+      applicationId: 'app-free',
+      mode: 'free_fill',
+    }], NOW);
+    const first = claimArmed(freeFill, 'https://jobs.lever.co/palantir/9e40/apply', NOW + 1);
+    expect(first.claimed?.applicationId).toBe('app-free');
+    expect(first.claimed && armedHandoffMode(first.claimed)).toBe('free_fill');
+    expect(claimArmed(first.remaining, 'https://jobs.lever.co/palantir/9e40', NOW + 2).claimed).toBeNull();
+  });
+
+  it('does not cross query-bound applications that share one embed path', () => {
+    const freeFill = armHandoffs([], [{
+      url: 'https://job-boards.greenhouse.io/embed/job_app?for=acme&token=one',
+      applicationId: 'app-free',
+      mode: 'free_fill',
+    }], NOW);
+    expect(claimArmed(
+      freeFill,
+      'https://job-boards.greenhouse.io/embed/job_app?for=acme&token=two',
+      NOW + 1,
+    ).claimed).toBeNull();
   });
 });
 

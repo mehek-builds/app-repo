@@ -30,8 +30,14 @@ export const ARMED_HANDOFF_TTL_MS = 60 * 60 * 1000;
 
 export interface ArmedHandoff {
   key: string;
+  identityKey?: string;
   applicationId?: string;
+  mode?: 'packet' | 'free_fill';
   armedAt: number;
+}
+
+export function armedHandoffMode(entry: ArmedHandoff): 'packet' | 'free_fill' {
+  return entry.mode === 'free_fill' ? 'free_fill' : 'packet';
 }
 
 /**
@@ -215,7 +221,11 @@ export function continueSmartRecruitersHandoff(
     applicationId: claimed.claimed.applicationId,
     remaining: armHandoffs(
       claimed.remaining,
-      [{ url: targetUrl, applicationId: claimed.claimed.applicationId }],
+      [{
+        url: targetUrl,
+        applicationId: claimed.claimed.applicationId,
+        mode: armedHandoffMode(claimed.claimed),
+      }],
       now,
     ),
   };
@@ -228,7 +238,7 @@ export function pruneArmed(entries: readonly ArmedHandoff[], now: number): Armed
 
 export function armHandoffs(
   existing: readonly ArmedHandoff[],
-  incoming: readonly { url: string; applicationId?: string }[],
+  incoming: readonly { url: string; applicationId?: string; mode?: 'packet' | 'free_fill' }[],
   now: number,
 ): ArmedHandoff[] {
   const next = pruneArmed(existing, now);
@@ -236,7 +246,13 @@ export function armHandoffs(
     const key = handoffKey(item.url);
     if (!key) continue;
     const at = next.findIndex((entry) => entry.key === key);
-    const record: ArmedHandoff = { key, applicationId: item.applicationId, armedAt: now };
+    const record: ArmedHandoff = {
+      key,
+      identityKey: applicationFormIdentityKey(item.url) ?? undefined,
+      applicationId: item.applicationId,
+      mode: item.mode === 'free_fill' ? 'free_fill' : 'packet',
+      armedAt: now,
+    };
     if (at === -1) next.push(record);
     else next[at] = record;
   }
@@ -255,7 +271,16 @@ export function claimArmed(
   const live = pruneArmed(entries, now);
   const pageKey = handoffKey(pageUrl);
   if (!pageKey) return { claimed: null, remaining: live };
-  const index = live.findIndex((entry) => handoffMatches(entry.key, pageKey));
+  const pageIdentityKey = applicationFormIdentityKey(pageUrl);
+  const index = live.findIndex((entry) => {
+    if (entry.identityKey && pageIdentityKey) {
+      if (entry.identityKey === pageIdentityKey) return true;
+      // Equal reduced paths with unequal form identities usually mean query-bound applications,
+      // such as two Greenhouse embeds that differ only by token. Never cross that boundary.
+      if (entry.key === pageKey) return false;
+    }
+    return handoffMatches(entry.key, pageKey);
+  });
   if (index === -1) return { claimed: null, remaining: live };
   const claimed = live[index];
   return { claimed, remaining: [...live.slice(0, index), ...live.slice(index + 1)] };

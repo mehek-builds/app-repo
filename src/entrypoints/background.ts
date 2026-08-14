@@ -14,6 +14,7 @@ import {
   recordPendingPortalAccount,
   currentAuthEpoch,
   authEpochIsCurrent,
+  completeAuthSessionClear,
   pendingPortalAccountClaimIsCurrent,
 } from '../lib/storage';
 import { overloadWaitMs, overloadBudgetRemains, RESUME_OVERLOAD_BUDGET_MS } from '../lib/overload';
@@ -21,9 +22,10 @@ import { overloadWaitMs, overloadBudgetRemains, RESUME_OVERLOAD_BUDGET_MS } from
 // import does not pull the DOM-adjacent adapter graph into the service worker bundle.
 import { parseAshbyPostingRef, selectPostingCompensation, type PostingCompensation } from '../lib/adapters/salary';
 import { PRODUCT_NAME, type ProductMeta } from '../lib/product';
-import type { ApplicationProfile, GeneratedResume, Profile } from '../lib/types';
+import type { ApplicationProfile, GeneratedResume, PendingDraft, Profile } from '../lib/types';
 import {
   ARMED_HANDOFF_KEY,
+  armedHandoffMode,
   armHandoffs,
   claimArmed,
   continueSmartRecruitersHandoff,
@@ -37,6 +39,7 @@ import { gatedAttendedIdentity, newArmingSupersedesContinuation, validGatedAccou
 import { validHandoffVersion } from '../lib/handoff-packet';
 import { automaticSubmissionEnabled, groundedDraftAnswer } from '../lib/auto-submit-consent';
 import { backendFetch } from '../lib/backend-fetch';
+import { API_BASE } from '../lib/config';
 import { flushAnalyticsQueue, trackExtensionEvent } from '../lib/analytics';
 import { clearStall, readStalls, recordStall } from '../lib/captcha-stalls';
 import { badgeState } from '../lib/badge';
@@ -51,6 +54,55 @@ import {
 import { KeyedMutationQueue, persistOneShotTransition } from '../lib/keyed-mutation-queue';
 import { frozenApplicantFillData } from '../lib/handoff-applicant-snapshot';
 import { packetAuditForResume } from '../lib/handoff-packet-audit';
+import {
+  cacheEntitlements,
+  clearCachedEntitlements,
+  featureEnabled,
+  parseEntitlementSnapshot,
+  type EntitlementSnapshotV2,
+  type LitosFeatureId,
+} from '../lib/entitlements';
+import {
+  apiErrorFromResponse,
+  isLitosApiError,
+  LitosApiError,
+  serializeLitosApiError,
+} from '../lib/api-error';
+import { createSessionClearMessageHandler } from '../lib/session-clear';
+import { needsAutomaticSubmissionEntitlement } from '../lib/submission-entitlement';
+import { settleOutreachDraftBatch, type OutreachDraftFailure } from '../lib/outreach-draft-batch';
+import { derivedOperationId } from '../lib/operation-id';
+import {
+  checkoutReturnMismatch,
+  parsePendingExtensionCheckout,
+  verifiedServerCheckoutExpiry,
+  type ServerExtensionCheckoutOffer,
+} from '../lib/extension-checkout';
+import {
+  parsePendingExtensionPremiumAction,
+  premiumActionFeatureForTrigger,
+  premiumRetryPortalMatches,
+  sanitizeExtensionPremiumAction,
+  serverPremiumActionMatches,
+  verifiedServerPremiumActionExpiry,
+  type ExtensionPremiumActionContext,
+  type PendingExtensionPremiumAction,
+  type ServerPremiumAction,
+} from '../lib/extension-premium-action';
+import {
+  freeFillPortalMatches,
+  FreeFillHandoffRequestError,
+  isValidFreeFillApplicationId,
+  prepareFreeFillHandoff,
+} from '../lib/free-fill-handoff';
+import {
+  bindFreeSubmissionOutcome,
+  FREE_SUBMISSION_OUTCOME_TIMEOUT_MS,
+  FREE_SUBMISSION_MONITOR_TTL_MS,
+  freeSubmissionMonitorDisposition,
+  freeSubmissionNavigationMatches,
+  type PendingFreeSubmissionMonitor,
+} from '../lib/free-submission-monitor';
 
 // Latched off once the backend reports onboarding complete. Service-worker memory is fine for
 // this: the worst case on a restart is one wasted 403, which re-latches it immediately.
@@ -79,10 +131,72 @@ const armedHandoffMutations = new KeyedMutationQueue();
 const handoffPacketBindingMutations = new KeyedMutationQueue();
 const pendingSubmissionMutations = new KeyedMutationQueue();
 const applicationTabMutations = new KeyedMutationQueue();
+const freeSubmissionMonitorMutations = new KeyedMutationQueue();
+const freeSubmissionMonitorStartsInFlight = new Map<number, number>();
 const ARMED_HANDOFF_MUTATION_KEY = 'armed-handoffs';
 const HANDOFF_PACKET_BINDING_MUTATION_KEY = 'handoff-packet-bindings';
 const PENDING_SUBMISSION_MUTATION_KEY = 'pending-submissions';
 const APPLICATION_TAB_MUTATION_KEY = 'application-tabs';
+const FREE_SUBMISSION_MONITOR_PREFIX = 'litos_pending_free_submission';
+const PENDING_PREMIUM_ACTION_KEY = 'litos_pending_premium_action';
+const PENDING_PREMIUM_RETRY_FOCUS_KEY = 'litos_pending_premium_retry_focus';
+const PREMIUM_RETRY_FOCUS_TTL_MS = 5 * 60_000;
+
+type PendingPremiumRetryFocus = {
+  actionNonce: string;
+  accountId: string;
+  featureKey: PendingExtensionPremiumAction['feature_key'];
+  portalUrl: string;
+  tabId: number;
+  createdAt: number;
+};
+
+function beginFreeSubmissionMonitorStart(tabId: number): void {
+  freeSubmissionMonitorStartsInFlight.set(
+    tabId,
+    (freeSubmissionMonitorStartsInFlight.get(tabId) ?? 0) + 1,
+  );
+}
+
+function endFreeSubmissionMonitorStart(tabId: number): void {
+  const remaining = (freeSubmissionMonitorStartsInFlight.get(tabId) ?? 1) - 1;
+  if (remaining > 0) freeSubmissionMonitorStartsInFlight.set(tabId, remaining);
+  else freeSubmissionMonitorStartsInFlight.delete(tabId);
+}
+
+async function refreshEntitlementSnapshot(
+  token: string,
+  expectedAuthEpoch = currentAuthEpoch(),
+): Promise<EntitlementSnapshotV2> {
+  assertCurrentAuthEpoch(expectedAuthEpoch);
+  const response = await timeoutBackendFetch('/billing/state', { cache: 'no-store' }, token);
+  assertCurrentAuthEpoch(expectedAuthEpoch);
+  if (!response.ok) throw await apiErrorFromResponse(response);
+  const snapshot = parseEntitlementSnapshot(await response.json());
+  assertCurrentAuthEpoch(expectedAuthEpoch);
+  await cacheEntitlements(snapshot);
+  if (!authEpochIsCurrent(expectedAuthEpoch)) {
+    await clearCachedEntitlements().catch(() => undefined);
+    assertCurrentAuthEpoch(expectedAuthEpoch);
+  }
+  return snapshot;
+}
+
+async function requireFeature(token: string, feature: LitosFeatureId): Promise<EntitlementSnapshotV2> {
+  const snapshot = await refreshEntitlementSnapshot(token);
+  if (!featureEnabled(snapshot, feature)) {
+    throw new LitosApiError(402, {
+      error: feature === 'automatic_submission'
+        ? 'Automatic submission is included in the Litos+ trial and paid plans.'
+        : 'This action needs Litos+.',
+      code: 'feature_locked',
+      feature_id: feature,
+      entitlement_revision: snapshot.revision,
+      retryable: false,
+    });
+  }
+  return snapshot;
+}
 
 type HandoffPacketBinding = {
   applicationId: string;
@@ -292,6 +406,274 @@ async function setPendingSubmission(tabId: number, pending: PendingExtensionSubm
   });
 }
 
+function freeSubmissionMonitorKey(tabId: number, frameId: number): string {
+  return `${FREE_SUBMISSION_MONITOR_PREFIX}:${tabId}:${frameId}`;
+}
+
+function safeFreeSubmissionUrl(value: unknown): string | null {
+  if (typeof value !== 'string' || value.length > 2048) return null;
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== 'https:' || parsed.username || parsed.password) return null;
+    const normalized = parsed.toString();
+    return normalized.length <= 2048 ? normalized : null;
+  } catch {
+    return null;
+  }
+}
+
+function validPremiumActionNonce(value: unknown): value is string {
+  return typeof value === 'string' && value.length >= 20 && value.length <= 200;
+}
+
+async function pendingExtensionPremiumAction(): Promise<PendingExtensionPremiumAction | null> {
+  const stored = await chrome.storage.session.get(PENDING_PREMIUM_ACTION_KEY);
+  return parsePendingExtensionPremiumAction(stored[PENDING_PREMIUM_ACTION_KEY]);
+}
+
+async function storeExtensionPremiumAction(
+  pending: PendingExtensionPremiumAction,
+  authEpoch: number,
+): Promise<void> {
+  assertCurrentAuthEpoch(authEpoch);
+  await chrome.storage.session.set({ [PENDING_PREMIUM_ACTION_KEY]: pending });
+  if (!authEpochIsCurrent(authEpoch)) {
+    await chrome.storage.session.remove(PENDING_PREMIUM_ACTION_KEY);
+    assertCurrentAuthEpoch(authEpoch);
+  }
+}
+
+async function readServerPremiumAction(
+  token: string,
+  actionNonce: string,
+  authEpoch: number,
+): Promise<(ServerPremiumAction & { offer_id?: unknown })> {
+  assertCurrentAuthEpoch(authEpoch);
+  const response = await timeoutBackendFetch(
+    `/billing/actions/${encodeURIComponent(actionNonce)}`,
+    { cache: 'no-store' },
+    token,
+  );
+  assertCurrentAuthEpoch(authEpoch);
+  if (!response.ok) throw await apiErrorFromResponse(response);
+  return await response.json() as ServerPremiumAction & { offer_id?: unknown };
+}
+
+async function readServerCheckoutOffer(
+  token: string,
+  offerId: string,
+  authEpoch: number,
+): Promise<ServerExtensionCheckoutOffer> {
+  assertCurrentAuthEpoch(authEpoch);
+  const response = await timeoutBackendFetch(
+    `/billing/offers/${encodeURIComponent(offerId)}`,
+    { cache: 'no-store' },
+    token,
+  );
+  assertCurrentAuthEpoch(authEpoch);
+  if (!response.ok) throw await apiErrorFromResponse(response);
+  return await response.json() as ServerExtensionCheckoutOffer;
+}
+
+async function storeVerifiedPremiumActionExpiry(
+  pending: PendingExtensionPremiumAction,
+  server: ServerPremiumAction | null,
+  allowedStates: readonly string[],
+  authEpoch: number,
+): Promise<PendingExtensionPremiumAction | null> {
+  const expiresAt = verifiedServerPremiumActionExpiry(pending, server, allowedStates);
+  if (expiresAt === null) return null;
+  const verified = { ...pending, expires_at: expiresAt };
+  await storeExtensionPremiumAction(verified, authEpoch);
+  return verified;
+}
+
+async function createExtensionPremiumAction(
+  token: string,
+  accountId: string,
+  context: ExtensionPremiumActionContext,
+  authEpoch: number,
+): Promise<PendingExtensionPremiumAction> {
+  const idempotencyKey = crypto.randomUUID();
+  assertCurrentAuthEpoch(authEpoch);
+  const response = await timeoutBackendFetch('/billing/actions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      feature_key: context.feature_key,
+      ...(context.application_id ? { application_id: context.application_id } : {}),
+      ...(context.job_id ? { job_id: context.job_id } : {}),
+      ...(context.contact_id ? { contact_id: context.contact_id } : {}),
+      return_route: '/billing/return?surface=extension',
+      idempotency_key: idempotencyKey,
+    }),
+  }, token);
+  assertCurrentAuthEpoch(authEpoch);
+  if (!response.ok) throw await apiErrorFromResponse(response);
+  const body = await response.json().catch(() => null) as {
+    action_nonce?: unknown;
+    offer_id?: unknown;
+    feature_key?: unknown;
+    return_route?: unknown;
+    expires_at?: unknown;
+  } | null;
+  const expiresAt = typeof body?.expires_at === 'string' ? Date.parse(body.expires_at) : NaN;
+  if (
+    !validPremiumActionNonce(body?.action_nonce)
+    || body?.offer_id !== null
+    || body?.feature_key !== context.feature_key
+    || body?.return_route !== '/billing/return?surface=extension'
+    || !Number.isFinite(expiresAt)
+    || expiresAt <= Date.now()
+  ) throw new Error('Litos could not bind this checkout to the action you were taking.');
+  const pending: PendingExtensionPremiumAction = {
+    ...context,
+    action_nonce: body.action_nonce,
+    account_id: accountId,
+    return_route: body.return_route,
+    created_at: Date.now(),
+    expires_at: expiresAt,
+  };
+  await storeExtensionPremiumAction(pending, authEpoch);
+  return pending;
+}
+
+function parsePendingPremiumRetryFocus(value: unknown): PendingPremiumRetryFocus | null {
+  if (!value || typeof value !== 'object') return null;
+  const candidate = value as Record<string, unknown>;
+  if (
+    !validPremiumActionNonce(candidate.actionNonce)
+    || typeof candidate.accountId !== 'string'
+    || !candidate.accountId
+    || !premiumActionFeatureForTrigger(candidate.featureKey)
+    || typeof candidate.portalUrl !== 'string'
+    || !safeFreeSubmissionUrl(candidate.portalUrl)
+    || typeof candidate.tabId !== 'number'
+    || !Number.isInteger(candidate.tabId)
+    || typeof candidate.createdAt !== 'number'
+    || !Number.isFinite(candidate.createdAt)
+  ) return null;
+  return candidate as PendingPremiumRetryFocus;
+}
+
+async function restoreExtensionPremiumActionControl(
+  pending: PendingExtensionPremiumAction,
+): Promise<void> {
+  if (pending.kind === 'extension_screen') {
+    const retryUrl = new URL(chrome.runtime.getURL('/popup.html'));
+    retryUrl.searchParams.set('retry_action', pending.feature_key);
+    if (pending.feature_key === 'outreach_email_generation') {
+      retryUrl.searchParams.set('action_nonce', pending.action_nonce);
+    }
+    if (pending.screen === 'main' && pending.company && pending.role) {
+      retryUrl.searchParams.set('company', pending.company);
+      retryUrl.searchParams.set('role', pending.role);
+      if (pending.application_id) retryUrl.searchParams.set('application_id', pending.application_id);
+    }
+    await chrome.tabs.create({
+      url: retryUrl.toString(),
+      active: true,
+    });
+    return;
+  }
+  if (!pending.portal_url) throw new Error('The saved employer page is no longer available.');
+  const tabs = await chrome.tabs.query({});
+  let target = tabs.find((tab) =>
+    typeof tab.id === 'number'
+    && typeof tab.url === 'string'
+    && premiumRetryPortalMatches(pending, tab.url));
+  if (!target?.id) {
+    target = await chrome.tabs.create({ url: 'about:blank', active: true });
+  }
+  if (!target.id) throw new Error('The saved employer tab could not be restored.');
+  const focus: PendingPremiumRetryFocus = {
+    actionNonce: pending.action_nonce,
+    accountId: pending.account_id,
+    featureKey: pending.feature_key,
+    portalUrl: pending.portal_url,
+    tabId: target.id,
+    createdAt: Date.now(),
+  };
+  await chrome.storage.session.set({ [PENDING_PREMIUM_RETRY_FOCUS_KEY]: focus });
+  if (target.url === 'about:blank' || !target.url) {
+    await chrome.tabs.update(target.id, { url: pending.portal_url, active: true });
+  } else {
+    await chrome.tabs.update(target.id, { active: true });
+    await chrome.tabs.sendMessage(target.id, {
+      type: 'FOCUS_PREMIUM_RETRY_CONTROL',
+      feature_key: pending.feature_key,
+      action_nonce: pending.action_nonce,
+    }).catch(() => undefined);
+  }
+  if (typeof target.windowId === 'number') {
+    await chrome.windows.update(target.windowId, { focused: true }).catch(() => undefined);
+  }
+}
+
+async function pendingFreeSubmissionMonitor(
+  tabId: number,
+  frameId: number,
+): Promise<PendingFreeSubmissionMonitor | null> {
+  const key = freeSubmissionMonitorKey(tabId, frameId);
+  const stored = await chrome.storage.session.get(key);
+  return (stored[key] as PendingFreeSubmissionMonitor | undefined) ?? null;
+}
+
+async function pendingFreeSubmissionMonitorForTab(
+  tabId: number,
+): Promise<PendingFreeSubmissionMonitor | null> {
+  const stored = await chrome.storage.session.get(null);
+  return Object.entries(stored)
+    .filter(([key]) => key.startsWith(`${FREE_SUBMISSION_MONITOR_PREFIX}:${tabId}:`))
+    .map(([, value]) => value as PendingFreeSubmissionMonitor)
+    .filter((value) => Boolean(value?.eventId && value?.applicationId))
+    .sort((left, right) => right.startedAt - left.startedAt)[0] ?? null;
+}
+
+async function storePendingFreeSubmissionMonitor(pending: PendingFreeSubmissionMonitor): Promise<void> {
+  const key = freeSubmissionMonitorKey(pending.tabId, pending.frameId);
+  await freeSubmissionMonitorMutations.run(key, async () => {
+    assertCurrentAuthEpoch(pending.authEpoch);
+    const existing = await pendingFreeSubmissionMonitor(pending.tabId, pending.frameId);
+    if (existing && existing.eventId !== pending.eventId) {
+      throw new Error('Another Free submission outcome is still being observed in this frame.');
+    }
+    await chrome.storage.session.set({ [key]: pending });
+    if (!authEpochIsCurrent(pending.authEpoch)) {
+      await chrome.storage.session.remove(key);
+      assertCurrentAuthEpoch(pending.authEpoch);
+    }
+  });
+}
+
+async function clearPendingFreeSubmissionMonitor(
+  tabId: number,
+  frameId: number,
+  eventId?: string,
+): Promise<void> {
+  const key = freeSubmissionMonitorKey(tabId, frameId);
+  await freeSubmissionMonitorMutations.run(key, async () => {
+    if (eventId) {
+      const current = await pendingFreeSubmissionMonitor(tabId, frameId);
+      if (!current || current.eventId !== eventId) return;
+    }
+    await chrome.storage.session.remove(key);
+  });
+}
+
+async function clearPendingFreeSubmissionMonitorForTabEvent(
+  tabId: number,
+  eventId: string,
+): Promise<void> {
+  const stored = await chrome.storage.session.get(null);
+  const matching = Object.entries(stored)
+    .filter(([key, value]) => key.startsWith(`${FREE_SUBMISSION_MONITOR_PREFIX}:${tabId}:`)
+      && (value as PendingFreeSubmissionMonitor | undefined)?.eventId === eventId)
+    .map(([key]) => key);
+  await Promise.all(matching.map((key) =>
+    freeSubmissionMonitorMutations.run(key, () => chrome.storage.session.remove(key))));
+}
+
 async function postExtensionOutcome(pending: PendingExtensionSubmission, outcome: 'confirmed' | 'failed' | 'unknown' | 'cancelled', finalUrl: string, confirmationText?: string) {
   if (!validHandoffVersion(pending.packetVersion) || !validHandoffVersion(pending.auditDigest)) {
     throw new Error('The audited application packet is no longer available. Nothing was recorded.');
@@ -381,6 +763,67 @@ function timeoutBackendFetch(
   ms = FETCH_TIMEOUT_MS,
 ): Promise<Response> {
   return backendFetch(path, init, { token, timeoutMs: ms });
+}
+
+type FreeFillResume = {
+  artifact_id: string | null;
+  kind: string;
+  source: string;
+  file_name: string;
+  download_url: string;
+  requires_authorization: boolean;
+};
+
+type FreeFillResumePayload = {
+  artifact_id: string | null;
+  file_name: string;
+  resume_url: string;
+};
+
+function bytesToBase64(bytes: Uint8Array): string {
+  const chunks: string[] = [];
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    chunks.push(String.fromCharCode(...bytes.subarray(offset, offset + chunkSize)));
+  }
+  return btoa(chunks.join(''));
+}
+
+const MAX_FREE_FILL_RESUME_BYTES = 10 * 1024 * 1024;
+
+async function freeFillResumePayload(
+  selectedResume: FreeFillResume | null | undefined,
+  token: string,
+): Promise<FreeFillResumePayload | null> {
+  if (!selectedResume?.download_url || !selectedResume.file_name) return null;
+  if (!selectedResume.requires_authorization) {
+    return {
+      artifact_id: selectedResume.artifact_id,
+      file_name: selectedResume.file_name,
+      resume_url: selectedResume.download_url,
+    };
+  }
+
+  const resolved = new URL(selectedResume.download_url, API_BASE);
+  if (resolved.origin !== new URL(API_BASE).origin) return null;
+  const response = await timeoutBackendFetch(
+    `${resolved.pathname}${resolved.search}`,
+    {},
+    token,
+    RESUME_FETCH_TIMEOUT_MS,
+  );
+  if (!response.ok) return null;
+  const contentType = response.headers.get('content-type')?.split(';')[0]?.trim() || 'application/pdf';
+  if (!/^(application\/pdf|application\/octet-stream)$/i.test(contentType)) return null;
+  const contentLength = Number(response.headers.get('content-length'));
+  if (Number.isFinite(contentLength) && contentLength > MAX_FREE_FILL_RESUME_BYTES) return null;
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.byteLength === 0 || bytes.byteLength > MAX_FREE_FILL_RESUME_BYTES) return null;
+  return {
+    artifact_id: selectedResume.artifact_id,
+    file_name: selectedResume.file_name,
+    resume_url: `data:${contentType};base64,${bytesToBase64(bytes)}`,
+  };
 }
 
 type VerifiedWorkdayPacket = {
@@ -482,8 +925,7 @@ async function adoptWebSession(incomingToken: string): Promise<{ ok: boolean; ou
   }
 
   try {
-    await clearStoredSession();
-    await clearApplicationRuntimeState();
+    await clearExtensionAccountSession();
     await setToken(incoming);
     if (incomingProfile) await setProfile(incomingProfile);
     return { ok: true, outcome };
@@ -502,13 +944,42 @@ async function writeArmedHandoffs(entries: ArmedHandoff[]): Promise<void> {
   await chrome.storage.session.set({ [ARMED_HANDOFF_KEY]: entries });
 }
 
+async function ownedFreeFillHandoffData(
+  token: string,
+  applicationId: string,
+  authEpoch: number,
+): Promise<unknown> {
+  assertCurrentAuthEpoch(authEpoch);
+  const response = await timeoutBackendFetch(`/applications/${applicationId}/fill-data`, { cache: 'no-store' }, token);
+  assertCurrentAuthEpoch(authEpoch);
+  if (!response.ok) {
+    if (response.status === 401 || response.status === 403) {
+      throw new FreeFillHandoffRequestError('authentication_required', 'Sign in to Litos in the extension first.');
+    }
+    if (response.status === 404) {
+      throw new FreeFillHandoffRequestError(
+        'application_not_found',
+        'This Tracker application is no longer available to this account.',
+      );
+    }
+    const apiError = await apiErrorFromResponse(response);
+    if (response.status === 409 && String(apiError.body.code) === 'unsafe_portal_url') {
+      throw new FreeFillHandoffRequestError('unsafe_portal_url', 'This application does not have a secure company URL.');
+    }
+    throw new FreeFillHandoffRequestError('handoff_failed', apiError.message);
+  }
+  const data = await response.json().catch(() => null);
+  assertCurrentAuthEpoch(authEpoch);
+  return data;
+}
+
 async function clearApplicationRuntimeState(): Promise<void> {
   await armedHandoffMutations.run(ARMED_HANDOFF_MUTATION_KEY, () => chrome.storage.session.remove(ARMED_HANDOFF_KEY));
   const stored = await chrome.storage.session.get(null);
   const continuationKeys = Object.keys(stored).filter((key) => key.startsWith(`${GATED_ATTENDED_CONTINUATION_PREFIX}:`));
   await Promise.all(continuationKeys.map((key) =>
     withGatedContinuationMutation(key, () => chrome.storage.session.remove(key))));
-  const otherKeys = Object.keys(stored).filter((key) => key === 'lastDetectedJob');
+  const otherKeys = Object.keys(stored).filter((key) => key === 'lastDetectedJob' || key === 'pendingDrafts');
   if (otherKeys.length) await chrome.storage.session.remove(otherKeys);
   await handoffPacketBindingMutations.run(
     HANDOFF_PACKET_BINDING_MUTATION_KEY,
@@ -527,6 +998,21 @@ async function clearApplicationRuntimeState(): Promise<void> {
   gatedPreparationsInFlight.clear();
 }
 
+async function clearExtensionAccountSession(): Promise<void> {
+  await Promise.all([
+    clearStoredSession(),
+    clearApplicationRuntimeState(),
+    chrome.storage.session.remove([
+      'litos_pending_checkout',
+      PENDING_PREMIUM_ACTION_KEY,
+      PENDING_PREMIUM_RETRY_FOCUS_KEY,
+    ]),
+  ]);
+  completeAuthSessionClear();
+}
+
+const respondToClearSessionMessage = createSessionClearMessageHandler(clearExtensionAccountSession);
+
 // ─── Transient model-capacity retry (live QA 2026-07-16, R-003) ──────────────
 // A real Anthropic overload incident hard-failed a whole fill: the card said "Failed to generate
 // resume spec" and the student's only recovery was re-clicking "Yes, fill it" (6+ times on Global
@@ -542,8 +1028,9 @@ async function clearApplicationRuntimeState(): Promise<void> {
 //
 // 150s covers the observed incident (the manual poll that eventually got a 200 took ~2.5 min).
 // The student is never trapped by it: the card stays dismissable throughout and reports each retry,
-// and because generation pre-warms on card hover, most or all of this window is usually spent
-// before they ever click "Yes, fill it".
+// The retry stays visible and cancelable for the entire capacity window. New Free, trial, and
+// original Free accounts start generation only from the named action. Paid accounts may pre-warm
+// from hover when their live entitlement explicitly allows it. Page detection never starts work.
 //
 // Known risk, deliberately accepted: an MV3 service worker can be torn down mid-loop. The pending
 // sendResponse port keeps it alive in practice (and this file already awaits a 60s fetch the same
@@ -579,7 +1066,7 @@ interface ResolvedContact {
     first_name: string;
     last_name: string;
     title: string;
-    persona: string;
+    persona: PendingDraft['contact']['persona'];
     school_match: boolean;
     linkedin_url: string;
     company_domain: string;
@@ -588,18 +1075,44 @@ interface ResolvedContact {
     id: string;
     email: string;
     status: string;
-    tier: string;
+    tier: PendingDraft['contact']['tier'];
     source: string;
     pattern_used: string;
   };
 }
 
-async function resolveAndDraft(title: string, company: string, url: string, token: string) {
+async function resolveAndDraft(
+  title: string,
+  company: string,
+  url: string,
+  token: string,
+  resolveOperationId: string,
+): Promise<{ drafts: PendingDraft[]; failures: OutreachDraftFailure[] }> {
   // Fetch the user's profile first so we can (a) feed their school into contact
   // resolution for alumni matches and (b) ground the drafts. The backend returns the
   // parsed JSON unwrapped, and 404s when no resume has been uploaded yet.
   const profileRes = await timeoutBackendFetch('/profile', {}, token);
   const userProfile: UserProfile = profileRes.ok ? await profileRes.json() : EMPTY_PROFILE;
+  const companyDomain = company.toLowerCase().replace(/\s+/g, '') + '.com';
+  const applicationRes = await timeoutBackendFetch('/applications', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      company,
+      company_domain: companyDomain,
+      role: title,
+      ...(safeFreeSubmissionUrl(url) ? { portal_url: url } : {}),
+      source_surface: 'extension',
+    }),
+  }, token);
+  if (!applicationRes.ok) throw await apiErrorFromResponse(applicationRes);
+  const canonicalApplication = await applicationRes.json().catch(() => null) as {
+    application?: { id?: unknown };
+  } | null;
+  const applicationId = isValidFreeFillApplicationId(canonicalApplication?.application?.id)
+    ? canonicalApplication.application.id.toLowerCase()
+    : null;
+  if (!applicationId) throw new Error('Litos could not save this job before finding contacts.');
 
   // Resolve contacts
   const resolveRes = await timeoutBackendFetch('/resolve', {
@@ -608,11 +1121,13 @@ async function resolveAndDraft(title: string, company: string, url: string, toke
     body: JSON.stringify({
       company,
       role: title,
-      domain: company.toLowerCase().replace(/\s+/g, '') + '.com',
+      domain: companyDomain,
+      application_id: applicationId,
+      operation_id: resolveOperationId,
       ...(userProfile.school ? { user_school: userProfile.school } : {}),
     }),
   }, token);
-  if (!resolveRes.ok) throw new Error('resolve failed');
+  if (!resolveRes.ok) throw await apiErrorFromResponse(resolveRes);
   const { contacts }: { contacts: ResolvedContact[] } = await resolveRes.json();
 
   // We verify all sourced contacts but only draft the best two. For a student, reply
@@ -629,41 +1144,53 @@ async function resolveAndDraft(title: string, company: string, url: string, toke
   const reachable = (contacts ?? [])
     .filter(c => c.email_resolution.tier === 'green' || c.email_resolution.tier === 'amber')
     .sort((a, b) => rank(a.contact.persona) - rank(b.contact.persona));
-  if (reachable.length === 0) return [];
+  if (reachable.length === 0) return { drafts: [], failures: [] };
 
   const top = [reachable[0]];
   const second =
     reachable.find(c => c.contact.persona !== reachable[0].contact.persona) ?? reachable[1];
   if (second) top.push(second);
 
-  const drafts = await Promise.all(top.map(async ({ contact, email_resolution }) => {
+  return settleOutreachDraftBatch(top, async ({ contact, email_resolution }) => {
+    const draftOperationId = await derivedOperationId(resolveOperationId, contact.id);
     const draftRes = await timeoutBackendFetch('/draft', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         contact: {
+          id: contact.id,
           full_name: contact.full_name,
           title: contact.title,
           persona: contact.persona,
           company,
+          company_domain: contact.company_domain,
           school_match: contact.school_match,
           linkedin_url: contact.linkedin_url,
+          ...(email_resolution.email ? { email: email_resolution.email } : {}),
         },
         role: title,
         company,
+        company_domain: contact.company_domain,
+        application_id: applicationId,
+        draft_type: 'first_note',
+        operation_id: draftOperationId,
         user_profile: userProfile,
       }),
     }, token);
-    if (!draftRes.ok) return null;
+    if (!draftRes.ok) throw await apiErrorFromResponse(draftRes);
     const draft = await draftRes.json();
+    const tier = email_resolution.tier === 'green' ? 'green' as const : 'amber' as const;
     return {
-      contact: { ...contact, email: email_resolution.email, tier: email_resolution.tier },
+      contact: {
+        ...contact,
+        email: email_resolution.email,
+        tier,
+        status: tier === 'green' ? 'verified' as const : 'likely' as const,
+      },
       draft,
-      job: { company, role: title, url },
+      job: { application_id: applicationId, company, role: title, domain: companyDomain, url },
     };
-  }));
-
-  return drafts.filter(Boolean);
+  });
 }
 
 // This posting's structured salary range (R-031), when the tab is an Ashby posting whose board
@@ -697,7 +1224,9 @@ async function generateResumeAndProfile(
   role: string,
   jdText: string,
   token: string,
+  operationId: string,
   portalUrl?: string,
+  initiation: 'explicit_click' | 'hover_prewarm' = 'explicit_click',
   // Called before each capacity backoff so the caller can tell the student what is happening.
   // "Tailoring your resume..." sitting frozen for two minutes is indistinguishable from a hang, and
   // a student who thinks it hung fills the form by hand or re-clicks (which is what the live
@@ -705,7 +1234,7 @@ async function generateResumeAndProfile(
   onOverloadRetry?: (attempt: number, waitMs: number) => void,
 ) {
   // The two profile fetches are independent, so run them together instead of one-after-another -
-  // this is on the pre-warm critical path, so a saved round trip is a saved round trip.
+  // this is on the user-started generation path, so a saved round trip is a saved round trip.
   const [profileRes, appProfileRes] = await Promise.all([
     timeoutBackendFetch('/profile', {}, token),
     timeoutBackendFetch('/profile/application', {}, token),
@@ -730,6 +1259,8 @@ async function generateResumeAndProfile(
         company,
         role,
         jd_text: jdText,
+        initiation,
+        operation_id: operationId,
         contact: {
           full_name: profile.full_name || 'Applicant',
           email: resumeEmail,
@@ -752,8 +1283,36 @@ async function generateResumeAndProfile(
       break;
     }
 
-    const body: { error?: string; detail?: string[]; code?: string; retry_after_ms?: number } | null =
+    const body: {
+      error?: string;
+      detail?: string[];
+      code?: string;
+      retry_after_ms?: number;
+      feature_id?: LitosFeatureId;
+      entitlement_revision?: string;
+      quota?: {
+        dimension: string;
+        scope_id: string | null;
+        used: number;
+        limit: number;
+        remaining: number;
+        resets_at: string | null;
+      };
+    } | null =
       await resumeRes.json().catch(() => null);
+
+    if (resumeRes.status === 402) {
+      throw new LitosApiError(402, {
+        error: body?.error || 'Tailoring this resume needs Litos+.',
+        code: body?.code === 'trial_expired' || body?.code === 'quota_exceeded' || body?.code === 'subscription_past_due'
+          ? body.code
+          : 'feature_locked',
+        feature_id: body?.feature_id ?? 'ai_resume_tailoring',
+        entitlement_revision: body?.entitlement_revision,
+        quota: body?.quota,
+        retryable: false,
+      });
+    }
 
     // The one retryable case, and it is retryable only because the SERVER said so. Keying on the
     // explicit code rather than the bare 503 matters: the route returns 503 for "taking too long"
@@ -819,6 +1378,10 @@ export default defineBackground(() => {
     })
     .catch(() => {});
 
+  void getStoredToken()
+    .then((token) => token ? refreshEntitlementSnapshot(token) : null)
+    .catch(() => {});
+
   // QA/dev bootstrap: when built with VITE_QA_TOKEN, seed the session once at install/reload so
   // the extension is signed in without driving the popup UI (which automation can't reach).
   // Seeding on onInstalled (not on every service-worker wake) means sign-out tests and the
@@ -852,6 +1415,9 @@ export default defineBackground(() => {
   // closed before a response was received" once the popup unmounts.
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     switch (message.type) {
+      case 'LITOS_CLEAR_SESSION':
+        return respondToClearSessionMessage(message, sendResponse);
+
       case 'JOB_DETECTED': {
         // Idempotent: content scripts (notably the Workday stage poll) can re-fire this for the
         // same job repeatedly. Skip the storage write, badge update, and popup broadcast when the
@@ -880,6 +1446,710 @@ export default defineBackground(() => {
         return false;
       }
 
+      case 'GET_ENTITLEMENTS': {
+        getStoredToken().then(async (token) => {
+          if (!token) {
+            sendResponse({ error: NOT_SIGNED_IN_MESSAGE });
+            return;
+          }
+          try {
+            sendResponse({ snapshot: await refreshEntitlementSnapshot(token) });
+          } catch (error) {
+            sendResponse({
+              error: error instanceof Error ? error.message : 'Could not check your plan.',
+              ...(isLitosApiError(error) ? { api_error: serializeLitosApiError(error) } : {}),
+            });
+          }
+        });
+        return true;
+      }
+
+      case 'OPEN_BILLING_PORTAL': {
+        getStoredToken().then(async (token) => {
+          if (!token) {
+            sendResponse({ ok: false, error: NOT_SIGNED_IN_MESSAGE });
+            return;
+          }
+          try {
+            const response = await timeoutBackendFetch('/billing/portal', { method: 'POST' }, token);
+            if (!response.ok) throw await apiErrorFromResponse(response);
+            const body = await response.json().catch(() => null) as { provider?: unknown; url?: unknown } | null;
+            if (typeof body?.url !== 'string' || (body.provider !== 'stripe' && body.provider !== 'lemonsqueezy')) {
+              throw new Error('Billing management returned an invalid destination.');
+            }
+            const portal = new URL(body.url);
+            const safeStripe = body.provider === 'stripe'
+              && portal.protocol === 'https:'
+              && portal.hostname === 'billing.stripe.com';
+            const safeLemon = body.provider === 'lemonsqueezy'
+              && portal.protocol === 'https:'
+              && (portal.hostname === 'app.lemonsqueezy.com'
+                || portal.hostname === 'store.lemonsqueezy.com'
+                || portal.hostname.endsWith('.lemonsqueezy.com'))
+              && (portal.pathname.startsWith('/my-orders/') || portal.pathname.startsWith('/billing'));
+            if (!safeStripe && !safeLemon) throw new Error('Billing management returned an unsafe destination.');
+            await chrome.tabs.create({ url: portal.toString() });
+            sendResponse({ ok: true });
+          } catch (error) {
+            sendResponse({ ok: false, error: error instanceof Error ? error.message : 'Billing management could not open.' });
+          }
+        });
+        return true;
+      }
+
+      case 'OPEN_LITOS_PLANS': {
+        const trigger = typeof message.trigger === 'string'
+          ? message.trigger.trim().slice(0, 120)
+          : 'extension_action';
+        const planId = message.plan_id === 'litos_plus_week'
+          || message.plan_id === 'litos_plus_month'
+          || message.plan_id === 'litos_plus_quarter'
+          ? message.plan_id
+          : null;
+        const feature = premiumActionFeatureForTrigger(trigger);
+        const actionContext = sanitizeExtensionPremiumAction(trigger, message.action_context);
+        const plansAuthEpoch = currentAuthEpoch();
+        Promise.resolve().then(async () => {
+          let actionNonce: string | null = null;
+          if (feature) {
+            if (!actionContext) {
+              return {
+                ok: false,
+                error: 'Litos could not preserve the exact action you were taking.',
+                code: 'checkout_action_context_invalid',
+              };
+            }
+            const token = await getStoredToken();
+            if (!token) {
+              return { ok: false, error: NOT_SIGNED_IN_MESSAGE, code: 'authentication_required' };
+            }
+            assertCurrentAuthEpoch(plansAuthEpoch);
+            const owner = await refreshEntitlementSnapshot(token, plansAuthEpoch);
+            assertCurrentAuthEpoch(plansAuthEpoch);
+            const pending = await createExtensionPremiumAction(
+              token,
+              owner.account_id,
+              actionContext,
+              plansAuthEpoch,
+            );
+            actionNonce = pending.action_nonce;
+          }
+          const url = new URL('https://trylitos.com/pricing');
+          url.searchParams.set('surface', 'extension');
+          url.searchParams.set('trigger', trigger);
+          if (planId) url.searchParams.set('plan', planId);
+          if (actionNonce) url.searchParams.set('action_nonce', actionNonce);
+          await chrome.tabs.create({ url: url.toString() });
+          return { ok: true, ...(actionNonce ? { action_nonce: actionNonce } : {}) };
+        })
+          .then(sendResponse)
+          .catch((error) => sendResponse({
+            ok: false,
+            error: error instanceof Error ? error.message : 'Litos+ options could not open.',
+            ...(isLitosApiError(error) ? { code: error.body.code } : {}),
+          }));
+        return true;
+      }
+
+      case 'OPEN_MANUAL_OUTREACH': {
+        const company = typeof message.company === 'string' ? message.company.trim().slice(0, 240) : '';
+        const role = typeof message.role === 'string' ? message.role.trim().slice(0, 240) : '';
+        const url = new URL('https://trylitos.com/dashboard/outreach');
+        url.searchParams.set('intent', 'manual');
+        if (company) url.searchParams.set('company', company);
+        if (role) url.searchParams.set('role', role);
+        chrome.tabs.create({ url: url.toString() })
+          .then(() => sendResponse({ ok: true }))
+          .catch(() => sendResponse({ ok: false, error: 'Manual outreach could not open.' }));
+        return true;
+      }
+
+      case 'CLAIM_PREMIUM_RETRY_FOCUS': {
+        const tabId = sender.tab?.id;
+        const currentUrl = safeFreeSubmissionUrl(sender.url);
+        chrome.storage.session.get([PENDING_PREMIUM_RETRY_FOCUS_KEY, PENDING_PREMIUM_ACTION_KEY])
+          .then(async (stored) => {
+            const focus = parsePendingPremiumRetryFocus(stored[PENDING_PREMIUM_RETRY_FOCUS_KEY]);
+            const action = parsePendingExtensionPremiumAction(stored[PENDING_PREMIUM_ACTION_KEY]);
+            if (!focus || !action) return { ok: false };
+            if (Date.now() - focus.createdAt > PREMIUM_RETRY_FOCUS_TTL_MS) {
+              await chrome.storage.session.remove(PENDING_PREMIUM_RETRY_FOCUS_KEY);
+              return { ok: false };
+            }
+            if (
+              tabId !== focus.tabId
+              || !currentUrl
+              || focus.actionNonce !== action.action_nonce
+              || focus.accountId !== action.account_id
+              || focus.featureKey !== action.feature_key
+              || !premiumRetryPortalMatches(action, currentUrl)
+            ) return { ok: false };
+            return {
+              ok: true,
+              action_nonce: focus.actionNonce,
+              feature_key: focus.featureKey,
+            };
+          })
+          .then(sendResponse)
+          .catch(() => sendResponse({ ok: false }));
+        return true;
+      }
+
+      case 'GET_PREMIUM_RETRY_ACTION_CONTEXT': {
+        const actionNonce = validPremiumActionNonce(message.action_nonce) ? message.action_nonce : '';
+        const popupUrl = chrome.runtime.getURL('/popup.html');
+        if (!actionNonce || typeof sender.url !== 'string' || !sender.url.startsWith(popupUrl)) {
+          sendResponse({ ok: false, error: 'This saved action cannot be opened here.' });
+          return false;
+        }
+        const contextAuthEpoch = currentAuthEpoch();
+        getStoredToken().then(async (token) => {
+          if (!token) return { ok: false, error: NOT_SIGNED_IN_MESSAGE };
+          assertCurrentAuthEpoch(contextAuthEpoch);
+          const snapshot = await refreshEntitlementSnapshot(token, contextAuthEpoch);
+          const pending = await pendingExtensionPremiumAction();
+          assertCurrentAuthEpoch(contextAuthEpoch);
+          if (
+            !pending
+            || pending.action_nonce !== actionNonce
+            || pending.account_id !== snapshot.account_id
+            || pending.kind !== 'extension_screen'
+            || pending.screen !== 'draft'
+            || pending.feature_key !== 'outreach_email_generation'
+            || !pending.consumed_at
+            || !pending.contact_id
+            || !pending.application_id
+            || !pending.contact
+            || !pending.operation_id
+            || !pending.company
+            || !pending.role
+            || !featureEnabled(snapshot, 'outreach_email_generation')
+          ) return { ok: false, error: 'This saved outreach action is no longer available.' };
+          const serverAction = await readServerPremiumAction(token, actionNonce, contextAuthEpoch);
+          const verifiedPending = await storeVerifiedPremiumActionExpiry(
+            pending,
+            serverAction,
+            ['consumed'],
+            contextAuthEpoch,
+          );
+          if (!verifiedPending) {
+            return { ok: false, error: 'Litos could not verify this saved outreach action.' };
+          }
+          assertCurrentAuthEpoch(contextAuthEpoch);
+          return {
+            ok: true,
+            action: {
+              contact: pending.contact,
+              application_id: pending.application_id,
+              job: {
+                application_id: pending.application_id,
+                company: pending.company,
+                role: pending.role,
+                ...(pending.portal_url ? { url: pending.portal_url } : {}),
+              },
+              operation_id: pending.operation_id,
+              draft_type: pending.draft_type ?? 'first_note',
+              draft_subject: pending.draft_subject ?? '',
+              draft_body: pending.draft_body ?? '',
+            },
+          };
+        })
+          .then(sendResponse)
+          .catch((error) => sendResponse({
+            ok: false,
+            error: error instanceof Error ? error.message : 'This saved outreach action could not be restored.',
+          }));
+        return true;
+      }
+
+      case 'COMPLETE_PREMIUM_RETRY_FOCUS': {
+        const tabId = sender.tab?.id;
+        const actionNonce = validPremiumActionNonce(message.action_nonce) ? message.action_nonce : '';
+        chrome.storage.session.get(PENDING_PREMIUM_RETRY_FOCUS_KEY)
+          .then(async (stored) => {
+            const focus = parsePendingPremiumRetryFocus(stored[PENDING_PREMIUM_RETRY_FOCUS_KEY]);
+            if (!focus || focus.tabId !== tabId || focus.actionNonce !== actionNonce) return { ok: false };
+            await chrome.storage.session.remove(PENDING_PREMIUM_RETRY_FOCUS_KEY);
+            return { ok: true };
+          })
+          .then(sendResponse)
+          .catch(() => sendResponse({ ok: false }));
+        return true;
+      }
+
+      case 'GET_FILL_ACCESS': {
+        getStoredToken().then(async (token) => {
+          if (!token) {
+            sendResponse({ can_tailor: false, automatic_submission: false, error: NOT_SIGNED_IN_MESSAGE });
+            return;
+          }
+          try {
+            const snapshot = await refreshEntitlementSnapshot(token);
+            sendResponse({
+              can_tailor: featureEnabled(snapshot, 'ai_resume_tailoring'),
+              can_draft_answers: featureEnabled(snapshot, 'ai_application_answer_generation'),
+              hover_generation: featureEnabled(snapshot, 'hover_generation'),
+              automatic_submission: featureEnabled(snapshot, 'automatic_submission'),
+              snapshot,
+            });
+          } catch {
+            // Plan lookup failure degrades to the Free lane. It must never turn a form fill into
+            // an outage or let stale local state grant a premium generation or submission.
+            sendResponse({ can_tailor: false, can_draft_answers: false, hover_generation: false, automatic_submission: false });
+          }
+        });
+        return true;
+      }
+
+      case 'GET_FREE_FILL_DATA': {
+        const freeFillAuthEpoch = currentAuthEpoch();
+        const payload = message.payload as {
+          application_id?: unknown;
+          company?: unknown;
+          role?: unknown;
+          portal_url?: unknown;
+        } | undefined;
+        if (payload?.application_id !== undefined && !isValidFreeFillApplicationId(payload.application_id)) {
+          sendResponse({ error: 'This Tracker application could not be identified.', code: 'invalid_application' });
+          return false;
+        }
+        const requestedApplicationId = isValidFreeFillApplicationId(payload?.application_id)
+          ? payload.application_id.toLowerCase()
+          : null;
+        const company = typeof payload?.company === 'string' ? payload.company.trim() : '';
+        const role = typeof payload?.role === 'string' ? payload.role.trim() : '';
+        const portalUrl = typeof payload?.portal_url === 'string' ? payload.portal_url : '';
+        getStoredToken().then(async (token) => {
+          if (!token) {
+            sendResponse({ error: NOT_SIGNED_IN_MESSAGE });
+            return;
+          }
+          try {
+            assertCurrentAuthEpoch(freeFillAuthEpoch);
+            const [profileResponse, applicationProfileResponse, postingCompensation] = await Promise.all([
+              timeoutBackendFetch('/profile', {}, token),
+              timeoutBackendFetch('/profile/application', {}, token),
+              fetchAshbyPostingCompensation(portalUrl),
+            ]);
+            assertCurrentAuthEpoch(freeFillAuthEpoch);
+            const profile: UserProfile = profileResponse.ok ? await profileResponse.json() : EMPTY_PROFILE;
+            const applicationProfile: ApplicationProfile = applicationProfileResponse.ok
+              ? await applicationProfileResponse.json()
+              : {};
+            let application: unknown = null;
+            let applicationId: string | null = null;
+            let selectedResume: FreeFillResumePayload | null = null;
+            let resume_error: string | undefined;
+            let tracking_error: string | undefined;
+            if (requestedApplicationId) {
+              const fillData = await ownedFreeFillHandoffData(
+                token,
+                requestedApplicationId,
+                freeFillAuthEpoch,
+              ) as {
+                application_id?: unknown;
+                application?: unknown;
+                portal_url?: unknown;
+                selected_resume?: FreeFillResume | null;
+              } | null;
+              if (
+                typeof fillData?.application_id !== 'string'
+                || fillData.application_id.toLowerCase() !== requestedApplicationId
+              ) throw new Error('Litos could not verify this saved application.');
+              if (!freeFillPortalMatches(fillData.portal_url, portalUrl)) {
+                throw new Error('The company page no longer matches this Tracker application. Nothing was filled.');
+              }
+              application = fillData.application ?? null;
+              applicationId = requestedApplicationId;
+              try {
+                selectedResume = await freeFillResumePayload(fillData.selected_resume, token);
+                assertCurrentAuthEpoch(freeFillAuthEpoch);
+                if (fillData.selected_resume && !selectedResume) {
+                  resume_error = 'Your saved resume could not be attached. Add it yourself before you submit.';
+                }
+              } catch {
+                assertCurrentAuthEpoch(freeFillAuthEpoch);
+                resume_error = 'Your saved resume could not be attached. Add it yourself before you submit.';
+              }
+            } else if (company && role && portalUrl) {
+              const applicationResponse = await timeoutBackendFetch('/applications', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ company, role, portal_url: portalUrl, source: 'extension' }),
+              }, token);
+              assertCurrentAuthEpoch(freeFillAuthEpoch);
+              if (applicationResponse.ok) {
+                application = await applicationResponse.json().catch(() => null);
+                const created = application as { application?: { id?: unknown } } | null;
+                applicationId = typeof created?.application?.id === 'string' ? created.application.id : null;
+                if (applicationId) {
+                  try {
+                    const fillDataResponse = await timeoutBackendFetch(`/applications/${applicationId}/fill-data`, {}, token);
+                    assertCurrentAuthEpoch(freeFillAuthEpoch);
+                    if (fillDataResponse.ok) {
+                      const fillData = await fillDataResponse.json().catch(() => null) as {
+                        selected_resume?: FreeFillResume | null;
+                      } | null;
+                      selectedResume = await freeFillResumePayload(fillData?.selected_resume, token);
+                      if (fillData?.selected_resume && !selectedResume) {
+                        resume_error = 'Your saved resume could not be attached. Add it yourself before you submit.';
+                      }
+                    }
+                  } catch {
+                    resume_error = 'Your saved resume could not be attached. Add it yourself before you submit.';
+                  }
+                }
+              } else tracking_error = 'This fill could not be added to your Tracker yet.';
+            }
+            assertCurrentAuthEpoch(freeFillAuthEpoch);
+            sendResponse({
+              profile,
+              applicationProfile,
+              application,
+              application_id: applicationId,
+              selected_resume: selectedResume,
+              resume_error,
+              tracking_error,
+              posting_compensation: postingCompensation,
+            });
+          } catch (error) {
+            sendResponse({ error: error instanceof Error ? error.message : 'Could not load your saved answers.' });
+          }
+        });
+        return true;
+      }
+
+      case 'RECORD_FREE_FILL_RESULT': {
+        const payload = message.payload as {
+          application_id?: unknown;
+          application_identity?: {
+            company?: unknown;
+            role?: unknown;
+            portal_url?: unknown;
+          };
+          selected_resume_artifact_id?: unknown;
+          resume_attached?: unknown;
+          resume_source?: unknown;
+          unanswered_questions?: unknown;
+        } | undefined;
+        let applicationId = typeof payload?.application_id === 'string' ? payload.application_id : '';
+        const company = typeof payload?.application_identity?.company === 'string'
+          ? payload.application_identity.company.trim()
+          : '';
+        const role = typeof payload?.application_identity?.role === 'string'
+          ? payload.application_identity.role.trim()
+          : '';
+        const portalUrl = typeof payload?.application_identity?.portal_url === 'string'
+          ? payload.application_identity.portal_url
+          : '';
+        const selectedResumeArtifactId = typeof payload?.selected_resume_artifact_id === 'string'
+          ? payload.selected_resume_artifact_id
+          : null;
+        const unansweredQuestions = typeof payload?.unanswered_questions === 'number'
+          ? Math.max(0, Math.min(200, Math.trunc(payload.unanswered_questions)))
+          : 0;
+        const resumeAttached = payload?.resume_attached === true;
+        const resumeSource = payload?.resume_source === 'artifact' || payload?.resume_source === 'base_resume'
+          ? payload.resume_source
+          : 'none';
+        getStoredToken().then(async (token) => {
+          if (!token) {
+            sendResponse({ ok: false, error: NOT_SIGNED_IN_MESSAGE });
+            return;
+          }
+          try {
+            if (!applicationId) {
+              if (!company || !role || !portalUrl) {
+                sendResponse({ ok: false, error: 'This fill is missing its Tracker identity.' });
+                return;
+              }
+              const applicationResponse = await timeoutBackendFetch('/applications', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ company, role, portal_url: portalUrl, source: 'extension' }),
+              }, token);
+              if (!applicationResponse.ok) {
+                sendResponse({ ok: false, error: 'This fill could not be added to your Tracker yet.' });
+                return;
+              }
+              const applicationBody = await applicationResponse.json().catch(() => null) as {
+                application?: { id?: unknown };
+              } | null;
+              applicationId = typeof applicationBody?.application?.id === 'string'
+                ? applicationBody.application.id
+                : '';
+              if (!applicationId) {
+                sendResponse({ ok: false, error: 'Tracker did not return the canonical application.' });
+                return;
+              }
+            }
+            const response = await timeoutBackendFetch(`/applications/${applicationId}/fill`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                selected_resume_artifact_id: selectedResumeArtifactId,
+                resume_attached: resumeAttached,
+                resume_source: resumeSource,
+                unanswered_questions: unansweredQuestions,
+              }),
+            }, token);
+            if (!response.ok) {
+              sendResponse({ ok: false, application_id: applicationId, error: 'This fill could not update your Tracker yet.' });
+              return;
+            }
+            sendResponse({ ok: true, application_id: applicationId, fill: await response.json().catch(() => null) });
+          } catch (error) {
+            sendResponse({
+              ok: false,
+              ...(applicationId ? { application_id: applicationId } : {}),
+              error: error instanceof Error ? error.message : 'This fill could not update your Tracker yet.',
+            });
+          }
+        });
+        return true;
+      }
+
+      case 'START_FREE_SUBMISSION_OUTCOME_MONITOR': {
+        const monitorAuthEpoch = currentAuthEpoch();
+        const tabId = sender.tab?.id;
+        const frameId = sender.frameId ?? 0;
+        const eventId = isValidFreeFillApplicationId(message.payload?.event_id)
+          ? message.payload.event_id.toLowerCase()
+          : '';
+        const applicationId = isValidFreeFillApplicationId(message.payload?.application_id)
+          ? message.payload.application_id.toLowerCase()
+          : '';
+        const startUrl = safeFreeSubmissionUrl(message.payload?.start_url);
+        const senderUrl = safeFreeSubmissionUrl(sender.url);
+        if (
+          tabId === undefined
+          || !eventId
+          || !applicationId
+          || !startUrl
+          || !senderUrl
+          || !freeSubmissionNavigationMatches(startUrl, senderUrl)
+        ) {
+          sendResponse({ ok: false, error: 'This Free submission monitor could not be bound to the current page.' });
+          return false;
+        }
+        beginFreeSubmissionMonitorStart(tabId);
+        getStoredToken().then(async (token) => {
+          if (!token) throw new Error(NOT_SIGNED_IN_MESSAGE);
+          assertCurrentAuthEpoch(monitorAuthEpoch);
+          const snapshot = await refreshEntitlementSnapshot(token, monitorAuthEpoch);
+          assertCurrentAuthEpoch(monitorAuthEpoch);
+          await storePendingFreeSubmissionMonitor({
+            eventId,
+            applicationId,
+            tabId,
+            frameId,
+            accountId: snapshot.account_id,
+            authEpoch: monitorAuthEpoch,
+            startUrl,
+            startedAt: Date.now(),
+          });
+          assertCurrentAuthEpoch(monitorAuthEpoch);
+          sendResponse({ ok: true });
+        }).catch((error) => sendResponse({
+          ok: false,
+          error: error instanceof Error ? error.message : 'The Free submission monitor could not start.',
+        })).finally(() => endFreeSubmissionMonitorStart(tabId));
+        return true;
+      }
+
+      case 'GET_PENDING_FREE_SUBMISSION_OUTCOME': {
+        const recoveryAuthEpoch = currentAuthEpoch();
+        const tabId = sender.tab?.id;
+        const frameId = sender.frameId ?? 0;
+        const currentUrl = safeFreeSubmissionUrl(sender.url);
+        if (tabId === undefined || !currentUrl) {
+          sendResponse({ pending: null });
+          return false;
+        }
+        Promise.all([
+          getStoredToken(),
+          pendingFreeSubmissionMonitor(tabId, frameId)
+            .then((pending) => pending ?? pendingFreeSubmissionMonitorForTab(tabId)),
+        ]).then(async ([token, pending]) => {
+          if (!pending) {
+            sendResponse({
+              pending: null,
+              retry_pending: freeSubmissionMonitorStartsInFlight.has(tabId),
+            });
+            return;
+          }
+          if (!token) {
+            sendResponse({ pending, force_unknown: true, remaining_ms: 0 });
+            return;
+          }
+          assertCurrentAuthEpoch(recoveryAuthEpoch);
+          const snapshot = await refreshEntitlementSnapshot(token, recoveryAuthEpoch);
+          assertCurrentAuthEpoch(recoveryAuthEpoch);
+          const disposition = freeSubmissionMonitorDisposition({
+            pending,
+            tabId,
+            frameId,
+            accountId: snapshot.account_id,
+            currentAuthEpoch: recoveryAuthEpoch,
+            currentUrl,
+            now: Date.now(),
+          });
+          const elapsed = Date.now() - pending.startedAt;
+          sendResponse({
+            pending,
+            force_unknown: disposition !== 'resume',
+            remaining_ms: disposition === 'resume'
+              ? Math.max(0, Math.min(
+                FREE_SUBMISSION_MONITOR_TTL_MS - elapsed,
+                FREE_SUBMISSION_OUTCOME_TIMEOUT_MS - elapsed,
+              ))
+              : 0,
+          });
+        }).catch(async () => {
+          const pending = await pendingFreeSubmissionMonitor(tabId, frameId)
+            .then((exact) => exact ?? pendingFreeSubmissionMonitorForTab(tabId))
+            .catch(() => null);
+          sendResponse({
+            pending,
+            force_unknown: Boolean(pending),
+            remaining_ms: 0,
+            retry_pending: !pending && freeSubmissionMonitorStartsInFlight.has(tabId),
+          });
+        });
+        return true;
+      }
+
+      case 'ABANDON_FREE_SUBMISSION_OUTCOME_MONITOR': {
+        const tabId = sender.tab?.id;
+        const frameId = sender.frameId ?? 0;
+        const eventId = isValidFreeFillApplicationId(message.event_id)
+          ? message.event_id.toLowerCase()
+          : '';
+        if (tabId === undefined || !eventId) {
+          sendResponse({ ok: false });
+          return false;
+        }
+        clearPendingFreeSubmissionMonitorForTabEvent(tabId, eventId)
+          .then(() => sendResponse({ ok: true }))
+          .catch(() => sendResponse({ ok: false }));
+        return true;
+      }
+
+      case 'RECORD_FREE_SUBMISSION_OUTCOME': {
+        const outcomeAuthEpoch = currentAuthEpoch();
+        const payload = message.payload as {
+          event_id?: unknown;
+          application_id?: unknown;
+          outcome?: unknown;
+          final_url?: unknown;
+          confirmation_text?: unknown;
+        } | undefined;
+        const eventId = isValidFreeFillApplicationId(payload?.event_id)
+          ? payload.event_id.toLowerCase()
+          : '';
+        const applicationId = isValidFreeFillApplicationId(payload?.application_id)
+          ? payload.application_id.toLowerCase()
+          : '';
+        const outcome = payload?.outcome === 'confirmed'
+          || payload?.outcome === 'failed'
+          || payload?.outcome === 'unknown'
+          ? payload.outcome
+          : null;
+        const finalUrl = safeFreeSubmissionUrl(payload?.final_url) ?? '';
+        if (!eventId || !applicationId || !outcome || !finalUrl) {
+          sendResponse({
+            ok: false,
+            error: 'This Free submission outcome is incomplete or unsafe.',
+            code: 'invalid_submission_outcome',
+          });
+          return false;
+        }
+        const confirmationText = typeof payload?.confirmation_text === 'string'
+          ? payload.confirmation_text.replace(/\s+/g, ' ').trim().slice(0, 1000)
+          : '';
+        getStoredToken().then(async (token) => {
+          if (!token) {
+            sendResponse({ ok: false, error: NOT_SIGNED_IN_MESSAGE, code: 'authentication_required' });
+            return;
+          }
+          try {
+            assertCurrentAuthEpoch(outcomeAuthEpoch);
+            const snapshot = await refreshEntitlementSnapshot(token, outcomeAuthEpoch);
+            assertCurrentAuthEpoch(outcomeAuthEpoch);
+            const tabId = sender.tab?.id;
+            const frameId = sender.frameId ?? 0;
+            const pending = tabId === undefined
+              ? null
+              : await pendingFreeSubmissionMonitor(tabId, frameId)
+                .then((exact) => exact ?? pendingFreeSubmissionMonitorForTab(tabId));
+            if (!pending || tabId === undefined) {
+              sendResponse({
+                ok: false,
+                error: 'This Free submission outcome no longer has its trusted-click monitor.',
+                code: 'submission_monitor_missing',
+              });
+              return;
+            }
+            const currentUrl = safeFreeSubmissionUrl(sender.url) ?? finalUrl;
+            const disposition = freeSubmissionMonitorDisposition({
+              pending,
+              tabId,
+              frameId,
+              accountId: snapshot.account_id,
+              currentAuthEpoch: outcomeAuthEpoch,
+              currentUrl,
+              now: Date.now(),
+            });
+            const {
+              eventId: effectiveEventId,
+              applicationId: effectiveApplicationId,
+              outcome: effectiveOutcome,
+              finalUrl: effectiveFinalUrl,
+              confirmationText: effectiveConfirmationText,
+            } = bindFreeSubmissionOutcome({
+              pending,
+              eventId,
+              applicationId,
+              outcome,
+              finalUrl,
+              confirmationText,
+              disposition,
+            });
+            const response = await timeoutBackendFetch(
+              `/applications/${effectiveApplicationId}/manual-submission-outcome`,
+              {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Idempotency-Key': effectiveEventId,
+                },
+                body: JSON.stringify({
+                  event_id: effectiveEventId,
+                  outcome: effectiveOutcome,
+                  final_url: effectiveFinalUrl,
+                  ...(effectiveConfirmationText ? { confirmation_text: effectiveConfirmationText } : {}),
+                }),
+              },
+              token,
+            );
+            assertCurrentAuthEpoch(outcomeAuthEpoch);
+            if (!response.ok) throw await apiErrorFromResponse(response);
+            if (tabId !== undefined) {
+              await clearPendingFreeSubmissionMonitorForTabEvent(tabId, effectiveEventId);
+            }
+            sendResponse({ ok: true });
+            void trackExtensionEvent('free_submission_outcome_recorded', { outcome: effectiveOutcome });
+          } catch (error) {
+            sendResponse({
+              ok: false,
+              error: error instanceof Error ? error.message : 'The Tracker outcome could not be recorded yet.',
+              ...(isLitosApiError(error) ? { code: error.body.code } : {}),
+            });
+          }
+        });
+        return true;
+      }
+
       case 'GET_AUTOMATION_SETTINGS': {
         getStoredToken().then(async (token) => {
           if (!token) {
@@ -887,14 +2157,18 @@ export default defineBackground(() => {
             return;
           }
           try {
-            const res = await timeoutBackendFetch('/onboarding/state', {}, token);
+            const [res, snapshot] = await Promise.all([
+              timeoutBackendFetch('/onboarding/state', {}, token),
+              refreshEntitlementSnapshot(token),
+            ]);
             if (!res.ok) throw new Error(`settings failed (${res.status})`);
             const data: {
               automatic_submission_enabled?: boolean;
               automatic_verification_enabled?: boolean;
               automatic_captcha_enabled?: boolean;
             } = await res.json();
-            const automaticSubmission = automaticSubmissionEnabled(data);
+            const automaticSubmission = automaticSubmissionEnabled(data)
+              && featureEnabled(snapshot, 'automatic_submission');
             await setAutoSubmitEnabled(automaticSubmission);
             sendResponse({
               automatic_submission_enabled: automaticSubmission,
@@ -918,6 +2192,13 @@ export default defineBackground(() => {
           .then(async ([token, tabId]) => {
             if (!token || tabId === undefined) throw new Error('Litos could not identify this application tab.');
             assertCurrentAuthEpoch(submissionAuthEpoch);
+            const authorization = message.payload?.authorization === 'user_initiated'
+              ? 'user_initiated'
+              : 'standing_consent';
+            if (needsAutomaticSubmissionEntitlement(authorization)) {
+              await requireFeature(token, 'automatic_submission');
+              assertCurrentAuthEpoch(submissionAuthEpoch);
+            }
             const applicationId = String(message.payload?.applicationId ?? '');
             const frameId = sender.frameId ?? 0;
             const binding = await handoffPacketBinding(applicationId, tabId, frameId);
@@ -925,9 +2206,6 @@ export default defineBackground(() => {
             if (!binding) throw new Error('Reload this saved application before submitting from Chrome.');
             const currentUrl = sender.url ?? '';
             if (!currentUrl) throw new Error('Litos could not verify the current application page.');
-            const authorization = message.payload?.authorization === 'user_initiated'
-              ? 'user_initiated'
-              : 'standing_consent';
             assertCurrentAuthEpoch(submissionAuthEpoch);
             const response = await timeoutBackendFetch(`/applications/${applicationId}/submission/extension-start`, {
               method: 'POST',
@@ -957,7 +2235,11 @@ export default defineBackground(() => {
             void trackExtensionEvent('application_submission_requested', { authorization });
             sendResponse({ ok: true, claimId: body.claim_id });
           })
-          .catch((error) => sendResponse({ ok: false, error: error instanceof Error ? error.message : 'Submission could not start.' }));
+          .catch((error) => sendResponse({
+            ok: false,
+            error: error instanceof Error ? error.message : 'Submission could not start.',
+            ...(isLitosApiError(error) ? { api_error: serializeLitosApiError(error) } : {}),
+          }));
         return true;
       }
 
@@ -1034,11 +2316,35 @@ export default defineBackground(() => {
       }
 
       case 'JOB_APPROVED': {
-        const { title, company, url } = message.payload;
+        const { title, company, url, operation_id } = message.payload;
+        const resolveOperationId = isValidFreeFillApplicationId(operation_id)
+          ? operation_id.toLowerCase()
+          : crypto.randomUUID();
         getStoredToken().then(async (token) => {
-          if (!token) return;
+          if (!token) {
+            sendResponse({ ok: false, error: NOT_SIGNED_IN_MESSAGE });
+            return;
+          }
           try {
-            const drafts = await resolveAndDraft(title, company, url, token);
+            const snapshot = await refreshEntitlementSnapshot(token);
+            if (!featureEnabled(snapshot, 'contact_discovery') || !featureEnabled(snapshot, 'outreach_email_generation')) {
+              throw new LitosApiError(402, {
+                error: 'Finding contacts and drafting outreach is part of Litos+.',
+                code: 'feature_locked',
+                feature_id: !featureEnabled(snapshot, 'contact_discovery')
+                  ? 'contact_discovery'
+                  : 'outreach_email_generation',
+                entitlement_revision: snapshot.revision,
+                retryable: false,
+              });
+            }
+            const { drafts, failures } = await resolveAndDraft(
+              title,
+              company,
+              url,
+              token,
+              resolveOperationId,
+            );
             if (drafts.length > 0) {
               await chrome.storage.session.set({ pendingDrafts: drafts });
               await renderBadge();
@@ -1046,17 +2352,34 @@ export default defineBackground(() => {
               chrome.runtime.sendMessage({ type: 'DRAFTS_READY', payload: { count: drafts.length } }).catch(() => {});
               void trackExtensionEvent('outreach_draft_created', { draft_count: drafts.length });
             }
-          } catch {
-            // silently fail - user can still use the popup manually
+            if (drafts.length === 0 && failures.length > 0) {
+              sendResponse({
+                ok: false,
+                count: 0,
+                failures,
+                error: 'No outreach draft finished. The contacts were found, but each draft failed.',
+              });
+              return;
+            }
+            sendResponse({ ok: true, count: drafts.length, failures });
+          } catch (error) {
+            sendResponse({
+              ok: false,
+              error: error instanceof Error ? error.message : 'Could not find people for this job.',
+              ...(isLitosApiError(error) ? { api_error: serializeLitosApiError(error) } : {}),
+            });
           }
         });
-        return false;
+        return true;
       }
 
       case 'GENERATE_RESUME_AND_FILL_DATA': {
         // `url` is the sending tab's posting URL, used only to fetch Ashby's structured
         // compensation range (R-031). Older callers that omit it just get no payload.
-        const { company, role, jd_text, url } = message.payload;
+        const { company, role, jd_text, url, initiation, operation_id } = message.payload;
+        const resumeOperationId = isValidFreeFillApplicationId(operation_id)
+          ? operation_id.toLowerCase()
+          : crypto.randomUUID();
         // The card lives in the sending tab, so a capacity-retry notice has to go back to that tab
         // specifically: chrome.runtime.sendMessage from the background reaches the popup, never a
         // content script (that is why DRAFTS_READY works but this would not). Best-effort by
@@ -1076,11 +2399,24 @@ export default defineBackground(() => {
             return;
           }
           try {
+            if (initiation === 'hover') {
+              await requireFeature(token, 'hover_generation');
+              assertCurrentAuthEpoch(requestAuthEpoch);
+            }
             if (tabId !== undefined) await clearPacketApplicantIdentity(tabId);
             // Started alongside the (much slower) resume generation, awaited only at the end;
             // internally caught, so a compensation miss can never sink the fill data.
             const compensationPromise = fetchAshbyPostingCompensation(url);
-            const result = await generateResumeAndProfile(company, role, jd_text, token, url, notifyRetry);
+            const result = await generateResumeAndProfile(
+              company,
+              role,
+              jd_text,
+              token,
+              resumeOperationId,
+              url,
+              initiation === 'hover' ? 'hover_prewarm' : 'explicit_click',
+              notifyRetry,
+            );
             if (!result.resume || !result.profile) {
               throw new Error('Litos did not return a complete application packet. Nothing was filled. Try again.');
             }
@@ -1136,7 +2472,10 @@ export default defineBackground(() => {
             void trackExtensionEvent('application_generation_completed');
             sendResponse({ ...result, posting_compensation: await compensationPromise });
           } catch (err) {
-            sendResponse({ error: err instanceof Error ? err.message : 'resume generation failed' });
+            sendResponse({
+              error: err instanceof Error ? err.message : 'resume generation failed',
+              ...(isLitosApiError(err) ? { api_error: serializeLitosApiError(err) } : {}),
+            });
           }
         });
         return true; // responding asynchronously
@@ -1146,7 +2485,7 @@ export default defineBackground(() => {
         // Drafts one open-ended application answer from the backend. The generic adapter calls
         // this per textarea; the field it fills is flagged for review, so this is a first draft
         // in the student's voice, never a silent final answer.
-        const { company, role, jd_text, question } = message.payload;
+        const { company, role, jd_text, question, application_id, operation_id } = message.payload;
         getStoredToken().then(async (token) => {
           if (!token) {
             sendResponse({ error: NOT_SIGNED_IN_MESSAGE });
@@ -1156,10 +2495,18 @@ export default defineBackground(() => {
             const res = await timeoutBackendFetch('/application/answer', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ company, role, jd_text, question }),
+              body: JSON.stringify({
+                company,
+                role,
+                jd_text,
+                question,
+                application_id,
+                operation_id,
+              }),
             }, token, RESUME_FETCH_TIMEOUT_MS);
             if (!res.ok) {
-              sendResponse({ error: `draft failed (${res.status})` });
+              const apiError = await apiErrorFromResponse(res);
+              sendResponse({ error: apiError.message, api_error: serializeLitosApiError(apiError) });
               return;
             }
             const data: unknown = await res.json();
@@ -1561,6 +2908,18 @@ export default defineBackground(() => {
               return Boolean(entry.applicationId && armedIdentity?.family === currentIdentity.family && armedIdentity.key === currentIdentity.key);
             }) ?? null;
           });
+          // Dashboard Free fill is a saved factual-fill request, not an immutable paid packet.
+          // Keep the one-shot arm available through any Jobvite or iCIMS account gate, and let the
+          // application-stage content script claim it only when the real form is ready.
+          if (armed && armedHandoffMode(armed) === 'free_fill') {
+            // A packet continuation from an older dashboard action must not survive and wake up
+            // after this newer Free fill has been consumed.
+            await withGatedContinuationMutation(gatedContinuationKey(tabId, frameId), () =>
+              chrome.storage.session.remove(gatedContinuationKey(tabId, frameId)));
+            assertCurrentAuthEpoch(preparationAuthEpoch);
+            sendResponse({ ok: true, mode: 'free_fill', applicationId: armed.applicationId });
+            return;
+          }
           const existing = await gatedAttendedContinuation(tabId, frameId);
           if (
             existing
@@ -1742,7 +3101,11 @@ export default defineBackground(() => {
               }
             }
             if (pool.length !== entries.length) await writeArmedHandoffs(pool);
-            return { armed: Boolean(hit), applicationId: hit?.applicationId };
+            return {
+              armed: Boolean(hit),
+              applicationId: hit?.applicationId,
+              mode: hit ? armedHandoffMode(hit) : undefined,
+            };
           })
           .then(sendResponse)
           .catch(() => sendResponse({ armed: false }));
@@ -1784,6 +3147,456 @@ export default defineBackground(() => {
       sendResponse({ error: 'This page is not allowed to control Litos.' });
       return false;
     }
+    if (respondToClearSessionMessage(message, sendResponse)) return true;
+    if (message?.type === 'LITOS_START_FREE_FILL') {
+      prepareFreeFillHandoff(message, {
+        currentAuthEpoch,
+        authEpochIsCurrent,
+        getToken: getStoredToken,
+        readAccount: async (token, authEpoch) => {
+          try {
+            return await refreshEntitlementSnapshot(token, authEpoch);
+          } catch (error) {
+            if (isLitosApiError(error) && (error.status === 401 || error.status === 403)) {
+              throw new FreeFillHandoffRequestError(
+                'authentication_required',
+                'Sign in to Litos in the extension first.',
+              );
+            }
+            throw error;
+          }
+        },
+        readFillData: ownedFreeFillHandoffData,
+      })
+        .then(async (result) => {
+          if (!result.ok) return result;
+          return armedHandoffMutations.run(ARMED_HANDOFF_MUTATION_KEY, async () => {
+            if (!authEpochIsCurrent(result.authEpoch)) {
+              return {
+                ok: false as const,
+                error: 'The Litos account changed while this application was being opened.',
+                code: 'account_changed' as const,
+              };
+            }
+            const existing = await readArmedHandoffs();
+            if (!authEpochIsCurrent(result.authEpoch)) {
+              return {
+                ok: false as const,
+                error: 'The Litos account changed while this application was being opened.',
+                code: 'account_changed' as const,
+              };
+            }
+            const next = armHandoffs(existing, [{
+              url: result.portalUrl,
+              applicationId: result.applicationId,
+              mode: 'free_fill',
+            }], Date.now());
+            await writeArmedHandoffs(next);
+            if (!authEpochIsCurrent(result.authEpoch)) {
+              const current = await readArmedHandoffs();
+              await writeArmedHandoffs(current.filter((entry) => !(
+                entry.applicationId === result.applicationId
+                && armedHandoffMode(entry) === 'free_fill'
+              )));
+              return {
+                ok: false as const,
+                error: 'The Litos account changed while this application was being opened.',
+                code: 'account_changed' as const,
+              };
+            }
+            return { ok: true as const, armed: true as const };
+          });
+        })
+        .then(sendResponse)
+        .catch(() => sendResponse({
+          ok: false,
+          error: 'Litos could not open this saved application. Try again.',
+          code: 'handoff_failed',
+        }));
+      return true;
+    }
+    if (message?.type === 'LITOS_CREATE_CHECKOUT') {
+      const planId = typeof message.plan_id === 'string' ? message.plan_id : '';
+      const validPlan = planId === 'litos_plus_week'
+        || planId === 'litos_plus_month'
+        || planId === 'litos_plus_quarter';
+      const trigger = typeof message.trigger === 'string'
+        ? message.trigger.trim().slice(0, 120)
+        : 'extension_pricing';
+      const placement = typeof message.placement === 'string'
+        ? message.placement.trim().slice(0, 120)
+        : 'public_pricing';
+      const actionNonce = validPremiumActionNonce(message.action_nonce) ? message.action_nonce : null;
+      const actionFeature = premiumActionFeatureForTrigger(trigger);
+      if (!validPlan || message.surface !== 'extension') {
+        sendResponse({ ok: false, error: 'The selected Litos+ term is invalid.', code: 'invalid_plan' });
+        return false;
+      }
+      const checkoutAuthEpoch = currentAuthEpoch();
+      getStoredToken()
+        .then(async (token) => {
+          if (!token) return { ok: false, error: 'Sign in to Litos in the extension first.', code: 'authentication_required' };
+          assertCurrentAuthEpoch(checkoutAuthEpoch);
+          const checkoutOwner = await refreshEntitlementSnapshot(token, checkoutAuthEpoch);
+          assertCurrentAuthEpoch(checkoutAuthEpoch);
+          if (actionFeature && !actionNonce) {
+            return {
+              ok: false,
+              error: 'This checkout lost the action that opened it. Return to the extension and try again.',
+              code: 'checkout_action_missing',
+            };
+          }
+          let pendingAction: PendingExtensionPremiumAction | null = null;
+          if (actionNonce) {
+            pendingAction = await pendingExtensionPremiumAction();
+            if (
+              !pendingAction
+              || pendingAction.action_nonce !== actionNonce
+              || pendingAction.account_id !== checkoutOwner.account_id
+              || (actionFeature !== null && pendingAction.feature_key !== actionFeature)
+            ) {
+              return {
+                ok: false,
+                error: 'This checkout no longer matches the saved extension action.',
+                code: 'checkout_action_mismatch',
+              };
+            }
+            const serverAction = await readServerPremiumAction(token, actionNonce, checkoutAuthEpoch);
+            pendingAction = await storeVerifiedPremiumActionExpiry(
+              pendingAction,
+              serverAction,
+              ['pending'],
+              checkoutAuthEpoch,
+            );
+            if (!pendingAction) {
+              return {
+                ok: false,
+                error: 'Litos could not verify the saved extension action.',
+                code: 'checkout_action_mismatch',
+              };
+            }
+          }
+          const idempotencyKey = crypto.randomUUID();
+          const response = await timeoutBackendFetch('/billing/checkout', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Idempotency-Key': idempotencyKey,
+            },
+            body: JSON.stringify({
+              plan_id: planId,
+              surface: 'extension',
+              placement,
+              trigger,
+              idempotency_key: idempotencyKey,
+              ...(actionNonce ? { action_nonce: actionNonce } : {}),
+            }),
+          }, token);
+          assertCurrentAuthEpoch(checkoutAuthEpoch);
+          if (response.status === 202) {
+            return {
+              ok: false,
+              error: 'Stripe checkout is still being prepared. Try again in a moment.',
+              code: 'checkout_creating',
+            };
+          }
+          if (!response.ok) {
+            const error = await apiErrorFromResponse(response);
+            return { ok: false, error: error.message, code: error.body.code };
+          }
+          const body = await response.json().catch(() => null) as { checkout_url?: unknown; offer_id?: unknown } | null;
+          if (typeof body?.checkout_url !== 'string' || typeof body.offer_id !== 'string' || !body.offer_id) {
+            return { ok: false, error: 'Stripe checkout did not return a secure URL.', code: 'unsafe_checkout_url' };
+          }
+          const checkoutUrl = new URL(body.checkout_url);
+          if (checkoutUrl.protocol !== 'https:' || checkoutUrl.hostname !== 'checkout.stripe.com') {
+            return { ok: false, error: 'Stripe checkout returned an unsafe URL.', code: 'unsafe_checkout_url' };
+          }
+          const serverOffer = await readServerCheckoutOffer(token, body.offer_id, checkoutAuthEpoch);
+          const checkoutExpiresAt = verifiedServerCheckoutExpiry(
+            serverOffer,
+            body.offer_id,
+            planId,
+          );
+          if (checkoutExpiresAt === null) {
+            return {
+              ok: false,
+              error: 'Litos could not verify the checkout expiry.',
+              code: 'checkout_context_mismatch',
+            };
+          }
+          if (pendingAction && actionNonce) {
+            const serverAction = await readServerPremiumAction(token, actionNonce, checkoutAuthEpoch);
+            const actionExpiresAt = verifiedServerPremiumActionExpiry(pendingAction, serverAction, ['pending']);
+            if (serverAction.offer_id !== body.offer_id || actionExpiresAt !== checkoutExpiresAt) {
+              return {
+                ok: false,
+                error: 'Litos could not verify the checkout action expiry.',
+                code: 'checkout_action_mismatch',
+              };
+            }
+            pendingAction = { ...pendingAction, expires_at: actionExpiresAt };
+            await storeExtensionPremiumAction(pendingAction, checkoutAuthEpoch);
+          }
+          await chrome.storage.session.set({
+            litos_pending_checkout: {
+              plan_id: planId,
+              trigger,
+              offer_id: body.offer_id,
+              account_id: checkoutOwner.account_id,
+              ...(actionNonce ? { action_nonce: actionNonce } : {}),
+              created_at: Date.now(),
+              expires_at: checkoutExpiresAt,
+            },
+          });
+          if (!authEpochIsCurrent(checkoutAuthEpoch)) {
+            await chrome.storage.session.remove('litos_pending_checkout');
+          }
+          assertCurrentAuthEpoch(checkoutAuthEpoch);
+          return {
+            ok: true,
+            checkout_url: checkoutUrl.toString(),
+            expires_at: new Date(checkoutExpiresAt).toISOString(),
+          };
+        })
+        .then(sendResponse)
+        .catch((error) => sendResponse({
+          ok: false,
+          error: error instanceof Error ? error.message : 'Checkout could not open.',
+          code: 'checkout_failed',
+        }));
+      return true;
+    }
+    if (message?.type === 'LITOS_RETRY_PREMIUM_ACTION') {
+      const actionNonce = validPremiumActionNonce(message.action_nonce) ? message.action_nonce : '';
+      if (!actionNonce) {
+        sendResponse({ ok: false, error: 'This saved action is invalid.', code: 'invalid_action_nonce' });
+        return false;
+      }
+      const retryAuthEpoch = currentAuthEpoch();
+      getStoredToken()
+        .then(async (token) => {
+          if (!token) {
+            return { ok: false, error: 'Sign in to Litos in the extension first.', code: 'authentication_required' };
+          }
+          assertCurrentAuthEpoch(retryAuthEpoch);
+          const snapshot = await refreshEntitlementSnapshot(token, retryAuthEpoch);
+          assertCurrentAuthEpoch(retryAuthEpoch);
+          const [pendingAction, checkoutStored] = await Promise.all([
+            pendingExtensionPremiumAction(),
+            chrome.storage.session.get('litos_pending_checkout'),
+          ]);
+          const pendingCheckout = parsePendingExtensionCheckout(checkoutStored.litos_pending_checkout);
+          if (
+            !pendingAction
+            || pendingAction.action_nonce !== actionNonce
+            || pendingAction.account_id !== snapshot.account_id
+            || !pendingCheckout
+            || pendingCheckout.action_nonce !== actionNonce
+            || pendingCheckout.account_id !== snapshot.account_id
+          ) {
+            return {
+              ok: false,
+              error: 'This paid action is no longer bound to the extension account that started it.',
+              code: 'checkout_action_mismatch',
+            };
+          }
+          const [serverAction, serverOffer] = await Promise.all([
+            readServerPremiumAction(token, actionNonce, retryAuthEpoch),
+            readServerCheckoutOffer(token, pendingCheckout.offer_id, retryAuthEpoch),
+          ]);
+          const checkoutExpiresAt = verifiedServerCheckoutExpiry(
+            serverOffer,
+            pendingCheckout.offer_id,
+            pendingCheckout.plan_id,
+          );
+          const actionExpiresAt = verifiedServerPremiumActionExpiry(
+            pendingAction,
+            serverAction,
+            ['pending', 'consumed'],
+          );
+          if (
+            serverAction.offer_id !== pendingCheckout.offer_id
+            || checkoutExpiresAt === null
+            || actionExpiresAt !== checkoutExpiresAt
+          ) {
+            return {
+              ok: false,
+              error: 'This paid offer does not match the saved extension action.',
+              code: 'checkout_action_mismatch',
+            };
+          }
+          const verifiedPendingAction = { ...pendingAction, expires_at: actionExpiresAt };
+          const verifiedPendingCheckout = { ...pendingCheckout, expires_at: checkoutExpiresAt };
+          await Promise.all([
+            storeExtensionPremiumAction(verifiedPendingAction, retryAuthEpoch),
+            chrome.storage.session.set({ litos_pending_checkout: verifiedPendingCheckout }),
+          ]);
+          assertCurrentAuthEpoch(retryAuthEpoch);
+          if (!featureEnabled(snapshot, verifiedPendingAction.feature_key)) {
+            return {
+              ok: false,
+              error: 'Litos+ is not active for this saved action yet.',
+              code: 'action_not_entitled',
+            };
+          }
+          const consumeResponse = await timeoutBackendFetch(
+            `/billing/actions/${encodeURIComponent(actionNonce)}/consume`,
+            { method: 'POST' },
+            token,
+          );
+          assertCurrentAuthEpoch(retryAuthEpoch);
+          if (!consumeResponse.ok) throw await apiErrorFromResponse(consumeResponse);
+          const consumed = await consumeResponse.json().catch(() => null) as {
+            consumed?: unknown;
+            offer_id?: unknown;
+            feature_key?: unknown;
+            application_id?: unknown;
+            job_id?: unknown;
+            contact_id?: unknown;
+          } | null;
+          if (
+            consumed?.consumed !== true
+            || consumed.offer_id !== verifiedPendingCheckout.offer_id
+            || consumed.feature_key !== verifiedPendingAction.feature_key
+            || (typeof consumed.application_id === 'string'
+              ? consumed.application_id.toLowerCase()
+              : undefined) !== verifiedPendingAction.application_id
+            || (typeof consumed.job_id === 'string'
+              ? consumed.job_id.toLowerCase()
+              : undefined) !== verifiedPendingAction.job_id
+            || (typeof consumed.contact_id === 'string'
+              ? consumed.contact_id.toLowerCase()
+              : undefined) !== verifiedPendingAction.contact_id
+          ) {
+            return {
+              ok: false,
+              error: 'Litos returned a different action than the one you confirmed.',
+              code: 'checkout_action_mismatch',
+            };
+          }
+          const consumedPending = { ...verifiedPendingAction, consumed_at: Date.now() };
+          await storeExtensionPremiumAction(consumedPending, retryAuthEpoch);
+          await restoreExtensionPremiumActionControl(consumedPending);
+          assertCurrentAuthEpoch(retryAuthEpoch);
+          await chrome.storage.session.remove('litos_pending_checkout');
+          return { ok: true, opened: true };
+        })
+        .then(sendResponse)
+        .catch((error) => sendResponse({
+          ok: false,
+          error: error instanceof Error ? error.message : 'The saved action could not be reopened.',
+          ...(isLitosApiError(error) ? { code: error.body.code } : {}),
+        }));
+      return true;
+    }
+    if (
+      message?.type === 'LITOS_ENTITLEMENTS_CHANGED'
+      || message?.type === 'LITOS_CHECKOUT_RETURN'
+      || message?.type === 'LITOS_LINKEDIN_RETURN'
+    ) {
+      const externalRefreshAuthEpoch = currentAuthEpoch();
+      getStoredToken()
+        .then(async (token) => {
+          if (!token) return { ok: false, error: 'Sign in to refresh this account.' };
+          const snapshot = await refreshEntitlementSnapshot(token, externalRefreshAuthEpoch);
+          assertCurrentAuthEpoch(externalRefreshAuthEpoch);
+          let checkoutActionReady = false;
+          if (message?.type === 'LITOS_CHECKOUT_RETURN') {
+            const stored = await chrome.storage.session.get('litos_pending_checkout');
+            const pending = parsePendingExtensionCheckout(stored.litos_pending_checkout);
+            const mismatch = checkoutReturnMismatch(
+              pending,
+              message.context,
+              message.action_nonce,
+              snapshot.account_id,
+            );
+            if (mismatch) return { ok: false, ...mismatch };
+            const cancelled = typeof message.status === 'string'
+              && ['cancelled', 'canceled', 'cancel'].includes(message.status.toLowerCase());
+            const active = snapshot.access_class === 'plus_paid' || snapshot.access_class === 'legacy_paid';
+            const serverOffer = await readServerCheckoutOffer(
+              token,
+              pending!.offer_id,
+              externalRefreshAuthEpoch,
+            );
+            const checkoutExpiresAt = verifiedServerCheckoutExpiry(
+              serverOffer,
+              pending!.offer_id,
+              pending!.plan_id,
+            );
+            if (checkoutExpiresAt === null) {
+              return {
+                ok: false,
+                error: 'Litos could not verify this checkout expiry.',
+                code: 'checkout_context_mismatch',
+              };
+            }
+            const verifiedCheckout = { ...pending!, expires_at: checkoutExpiresAt };
+            await chrome.storage.session.set({ litos_pending_checkout: verifiedCheckout });
+            if (pending?.action_nonce) {
+              const pendingAction = await pendingExtensionPremiumAction();
+              if (
+                !pendingAction
+                || pendingAction.action_nonce !== pending.action_nonce
+                || pendingAction.account_id !== snapshot.account_id
+              ) {
+                return {
+                  ok: false,
+                  error: 'This checkout no longer matches the saved extension action.',
+                  code: 'checkout_action_mismatch',
+                };
+              }
+              const serverAction = await readServerPremiumAction(
+                token,
+                pending.action_nonce,
+                externalRefreshAuthEpoch,
+              );
+              const actionExpiresAt = verifiedServerPremiumActionExpiry(
+                pendingAction,
+                serverAction,
+                ['pending', 'consumed'],
+              );
+              if (serverAction.offer_id !== pending.offer_id || actionExpiresAt !== checkoutExpiresAt) {
+                return {
+                  ok: false,
+                  error: 'This paid offer does not match the saved extension action.',
+                  code: 'checkout_action_mismatch',
+                };
+              }
+              const verifiedPendingAction = { ...pendingAction, expires_at: actionExpiresAt };
+              await storeExtensionPremiumAction(verifiedPendingAction, externalRefreshAuthEpoch);
+              checkoutActionReady = !cancelled
+                && active
+                && featureEnabled(snapshot, verifiedPendingAction.feature_key);
+            }
+            // Cancellation clears only the offer context. The blocked action remains owner-bound
+            // and restorable until its own server expiry. Paid action checkout remains until the
+            // explicit Retry so repeated return verification cannot lose the offer binding.
+            if (cancelled || (active && !pending?.action_nonce)) {
+              await chrome.storage.session.remove('litos_pending_checkout');
+            }
+          }
+          await chrome.runtime.sendMessage({ type: 'ENTITLEMENTS_UPDATED', snapshot }).catch(() => {});
+          return {
+            ok: true,
+            active: snapshot.access_class === 'plus_paid' || snapshot.access_class === 'legacy_paid',
+            access_class: snapshot.access_class,
+            revision: snapshot.revision,
+            account_id: snapshot.account_id,
+            ...(message?.type === 'LITOS_CHECKOUT_RETURN'
+              ? { action_ready: checkoutActionReady }
+              : {}),
+          };
+        })
+        .then(sendResponse)
+        .catch((error) => sendResponse({
+          ok: false,
+          error: error instanceof Error ? error.message : 'Could not refresh access.',
+          ...(isLitosApiError(error) ? { code: error.body.code } : {}),
+        }));
+      return true;
+    }
     if (message?.type === 'LITOS_PING') {
       // `signedIn` is the whole point of the ping now: the website cannot see chrome.storage, so
       // without an answer here it has no way to know the extension is sitting there logged out.
@@ -1800,19 +3613,15 @@ export default defineBackground(() => {
         return false;
       }
       adoptWebSession(token)
+        .then(async (response) => {
+          const storedToken = await getStoredToken();
+          if (storedToken) await refreshEntitlementSnapshot(storedToken).catch(() => null);
+          return response;
+        })
         .then(sendResponse)
         .catch((error) =>
           sendResponse({ ok: false, outcome: 'rejected', error: error instanceof Error ? error.message : 'Could not sign in.' }),
         );
-      return true;
-    }
-
-    if (message?.type === 'LITOS_CLEAR_SESSION') {
-      // Signing out on the website signs out the extension. One product, one account: the
-      // alternative is an extension quietly applying as whoever was signed in last week.
-      Promise.all([clearStoredSession(), clearApplicationRuntimeState()])
-        .then(() => sendResponse({ ok: true }))
-        .catch(() => sendResponse({ ok: false, error: 'Litos could not clear the extension session. Nothing changed in the popup.' }));
       return true;
     }
 
@@ -1858,6 +3667,8 @@ export default defineBackground(() => {
         const tabId = typeof storedTarget === 'number' ? storedTarget : storedTarget?.tabId;
         const frameId = typeof storedTarget === 'number' ? 0 : storedTarget?.frameId ?? 0;
         if (!token || tabId === undefined) throw new Error('That tab is no longer open. Go back to the job and start it again.');
+        await requireFeature(token, 'automatic_submission');
+        assertCurrentAuthEpoch(dashboardAuthEpoch);
         const livePage = await chrome.tabs.sendMessage(tabId, {
           type: 'GET_CURRENT_APPLICATION_URL',
         }, { frameId }) as { url?: string };
@@ -1975,7 +3786,10 @@ export default defineBackground(() => {
           throw error;
         }
       })
-      .catch((error) => sendResponse({ error: error instanceof Error ? error.message : 'Submission failed.' }))
+      .catch((error) => sendResponse({
+        error: error instanceof Error ? error.message : 'Submission failed.',
+        ...(isLitosApiError(error) ? { api_error: serializeLitosApiError(error) } : {}),
+      }))
       .finally(() => dashboardSubmissionsInFlight.delete(applicationId));
     return true;
   });

@@ -39,8 +39,9 @@ describe('the automation permission is saved separately from the setup data', ()
     expect(tail).toMatch(/catch[\s\S]{0,400}setAutoSubmitEnabled\(false\)/);
   });
 
-  it('the toggle is locked while ineligible and never locked while it is on', () => {
-    expect(screen).toMatch(/disabled=\{!automationSettingsLoaded \|\| \(!autoSubmit && consentEligibility\?\.eligible === false\)\}/);
+  it('the toggle requires both Litos+ entitlement and earned standing consent before enabling', () => {
+    expect(screen).toMatch(/disabled=\{!automationSettingsLoaded \|\| \(!autoSubmit && \(!automaticSubmissionEntitled \|\| consentEligibility\?\.eligible === false\)\)\}/);
+    expect(screen).toContain("featureEnabled(entitlements, 'automatic_submission')");
   });
 
   it('the lock says how many are left rather than just refusing', () => {

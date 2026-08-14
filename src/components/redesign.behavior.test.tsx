@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import * as api from '../lib/api';
+import { LitosApiError } from '../lib/api-error';
+import type { EntitlementSnapshotV2 } from '../lib/entitlements';
 import type { Contact, Draft, JobContext, OutreachEvent, Profile } from '../lib/types';
 import DraftEditor from './DraftEditor';
 import MainScreen from './MainScreen';
@@ -13,6 +15,7 @@ import TrackingDashboard from './TrackingDashboard';
 
 vi.mock('../lib/api', () => ({
   createSession: vi.fn(),
+  ensureOutreachApplication: vi.fn(),
   generateDraft: vi.fn(),
   getEvents: vi.fn(),
   requestCode: vi.fn(),
@@ -46,10 +49,33 @@ const contact: Contact = {
   status: 'verified',
 };
 
+const APPLICATION_ID = '123e4567-e89b-42d3-a456-426614174000';
+
 const job: JobContext = {
+  application_id: APPLICATION_ID,
   company: 'Figma',
   role: 'Software Engineer Intern',
   url: 'https://jobs.lever.co/figma/123',
+};
+
+const freeEntitlements: EntitlementSnapshotV2 = {
+  schema_version: 2,
+  policy_version: 'litos-entitlements-v2',
+  account_id: 'free-account',
+  revision: 'free-1',
+  evaluated_at: '2026-08-14T00:00:00.000Z',
+  access_class: 'free_new',
+  product: null,
+  term: null,
+  features: {
+    application_fill: true,
+    contact_discovery: false,
+    hover_generation: false,
+    automatic_submission: false,
+  } as EntitlementSnapshotV2['features'],
+  trial: null,
+  legacy_limits: null,
+  subscription: null,
 };
 
 const draft: Draft = {
@@ -74,6 +100,7 @@ describe('redesigned popup workflows', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(api.getEvents).mockResolvedValue([]);
+    vi.mocked(api.ensureOutreachApplication).mockResolvedValue(APPLICATION_ID);
     vi.mocked(api.resolveContacts).mockResolvedValue([]);
     vi.mocked(api.trackEvent).mockResolvedValue(undefined);
     tabsCreateMock = vi.fn().mockResolvedValue({ id: 7 });
@@ -138,11 +165,118 @@ describe('redesigned popup workflows', () => {
 
     await waitFor(() => {
       expect(api.resolveContacts).toHaveBeenCalledWith('token', {
+        application_id: APPLICATION_ID,
         company: job.company,
+        domain: 'figma.com',
         role: job.role,
         user_school: undefined,
+        operation_id: expect.stringMatching(/^[0-9a-f-]{36}$/),
       });
-      expect(onContactsFound).toHaveBeenCalledWith([contact], job);
+      expect(onContactsFound).toHaveBeenCalledWith([contact], {
+        ...job,
+        domain: 'figma.com',
+      });
+    });
+  });
+
+  it('reuses one contact resolve operation ID after an uncertain failure', async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.resolveContacts)
+      .mockRejectedValueOnce(new Error('Response lost'))
+      .mockResolvedValueOnce([contact]);
+    render(<MainScreen {...mainProps} detectedJob={job} />);
+
+    await user.click(screen.getByRole('button', { name: 'Find people' }));
+    expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'Response lost');
+    await user.click(screen.getByRole('button', { name: 'Find people' }));
+
+    await waitFor(() => expect(api.resolveContacts).toHaveBeenCalledTimes(2));
+    const firstOperationId = vi.mocked(api.resolveContacts).mock.calls[0][1].operation_id;
+    const secondOperationId = vi.mocked(api.resolveContacts).mock.calls[1][1].operation_id;
+    expect(firstOperationId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(secondOperationId).toBe(firstOperationId);
+  });
+
+  it('shows the contact paywall without losing the detected job when local plan state is locked', async () => {
+    const user = userEvent.setup();
+    const onViewPlans = vi.fn();
+    vi.mocked(api.resolveContacts).mockRejectedValueOnce(new LitosApiError(402, {
+      error: 'This action is part of Litos+.',
+      code: 'entitlement_required',
+      feature_id: 'contact_discovery',
+    }));
+    render(
+      <MainScreen
+        {...mainProps}
+        detectedJob={job}
+        entitlements={freeEntitlements}
+        onViewPlans={onViewPlans}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Find people' }));
+
+    expect(api.resolveContacts).toHaveBeenCalled();
+    expect(screen.getByText('Contact discovery is part of Litos+. You can keep filling applications for free.')).toBeTruthy();
+    expect(screen.getByText(job.company)).toBeTruthy();
+    expect(screen.getByText(job.role)).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'See Litos+' }));
+    expect(onViewPlans).toHaveBeenCalledWith('contact_discovery', {
+      application_id: APPLICATION_ID,
+      company: job.company,
+      role: job.role,
+      portal_url: job.url,
+    });
+  });
+
+  it('preserves a manual popup job without a URL as an extension-screen paid action', async () => {
+    const user = userEvent.setup();
+    const onViewPlans = vi.fn();
+    vi.mocked(api.resolveContacts).mockRejectedValueOnce(new LitosApiError(402, {
+      error: 'This action is part of Litos+.',
+      code: 'entitlement_required',
+      feature_id: 'contact_discovery',
+    }));
+    render(
+      <MainScreen
+        {...mainProps}
+        detectedJob={null}
+        entitlements={freeEntitlements}
+        onViewPlans={onViewPlans}
+      />,
+    );
+
+    await user.type(screen.getByLabelText('Company'), 'Acme');
+    await user.type(screen.getByLabelText('Role'), 'Engineer');
+    await user.click(screen.getByRole('button', { name: 'Find people' }));
+    await user.click(screen.getByRole('button', { name: 'See Litos+' }));
+
+    expect(onViewPlans).toHaveBeenCalledWith('contact_discovery', {
+      application_id: APPLICATION_ID,
+      company: 'Acme',
+      role: 'Engineer',
+    });
+  });
+
+  it('shows the same paywall when a stale client receives an authoritative 402', async () => {
+    const user = userEvent.setup();
+    const onViewPlans = vi.fn();
+    vi.mocked(api.resolveContacts).mockRejectedValueOnce(new LitosApiError(402, {
+      error: 'Contact discovery needs Litos+.',
+      code: 'feature_locked',
+      feature_id: 'contact_discovery',
+    }));
+    render(<MainScreen {...mainProps} detectedJob={job} onViewPlans={onViewPlans} />);
+
+    await user.click(screen.getByRole('button', { name: 'Find people' }));
+
+    expect(await screen.findByRole('button', { name: 'See Litos+' })).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'See Litos+' }));
+    expect(onViewPlans).toHaveBeenCalledWith('contact_discovery', {
+      application_id: APPLICATION_ID,
+      company: job.company,
+      role: job.role,
+      portal_url: job.url,
     });
   });
 
@@ -176,6 +310,137 @@ describe('redesigned popup workflows', () => {
 
     expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'Tabs unavailable');
     expect(screen.queryByRole('button', { name: 'Opened Gmail' })).toBeNull();
+  });
+
+  it('keeps a manual outreach editor available after an authoritative draft paywall', async () => {
+    const user = userEvent.setup();
+    const onViewPlans = vi.fn();
+    vi.mocked(api.generateDraft).mockRejectedValueOnce(new LitosApiError(402, {
+      error: 'This action is part of Litos+.',
+      code: 'entitlement_required',
+      feature_id: 'outreach_email_generation',
+    }));
+    render(
+      <DraftEditor
+        contact={contact}
+        job={job}
+        token="token"
+        profile={profile}
+        onBack={vi.fn()}
+        onDraftAnother={vi.fn()}
+        onViewPlans={onViewPlans}
+      />,
+    );
+
+    expect(await screen.findByLabelText('Message')).toBeTruthy();
+    expect(api.generateDraft).toHaveBeenCalledWith('token', expect.objectContaining({
+      application_id: APPLICATION_ID,
+      operation_id: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      draft_type: 'first_note',
+    }));
+    await user.type(screen.getByLabelText('Message'), 'I would value your perspective.');
+    await user.click(screen.getByRole('button', { name: 'See Litos+' }));
+    expect(onViewPlans).toHaveBeenCalledOnce();
+    expect(onViewPlans).toHaveBeenCalledWith(expect.objectContaining({
+      application_id: APPLICATION_ID,
+      contact_id: contact.id,
+      contact,
+      company: job.company,
+      role: job.role,
+      portal_url: job.url,
+      operation_id: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      draft_type: 'first_note',
+      draft_body: expect.stringContaining('value your perspective'),
+    }));
+    expect((screen.getByLabelText('Message') as HTMLTextAreaElement).value).toContain('value your perspective');
+  });
+
+  it('preserves the selected-contact DraftEditor action when the job has no URL', async () => {
+    const user = userEvent.setup();
+    const onViewPlans = vi.fn();
+    vi.mocked(api.generateDraft).mockRejectedValueOnce(new LitosApiError(402, {
+      error: 'This action is part of Litos+.',
+      code: 'entitlement_required',
+      feature_id: 'outreach_email_generation',
+    }));
+    render(
+      <DraftEditor
+        contact={contact}
+        job={{ company: job.company, role: job.role }}
+        token="token"
+        profile={profile}
+        onBack={vi.fn()}
+        onDraftAnother={vi.fn()}
+        onViewPlans={onViewPlans}
+      />,
+    );
+
+    await user.click(await screen.findByRole('button', { name: 'See Litos+' }));
+    expect(onViewPlans).toHaveBeenCalledWith(expect.objectContaining({
+      application_id: APPLICATION_ID,
+      contact_id: contact.id,
+      company: job.company,
+      role: job.role,
+    }));
+    expect(onViewPlans.mock.calls[0][0]).not.toHaveProperty('portal_url');
+  });
+
+  it('requires a named click before generating a restored selected-contact draft', async () => {
+    const user = userEvent.setup();
+    const operationId = '323e4567-e89b-42d3-a456-426614174000';
+    vi.mocked(api.generateDraft).mockResolvedValueOnce(draft);
+    render(
+      <DraftEditor
+        contact={contact}
+        job={job}
+        token="token"
+        profile={profile}
+        onBack={vi.fn()}
+        onDraftAnother={vi.fn()}
+        deferGeneration
+        focusGenerate
+        operationIdOverride={operationId}
+      />,
+    );
+
+    const generate = await screen.findByRole('button', { name: 'Generate draft' });
+    expect(api.generateDraft).not.toHaveBeenCalled();
+    await user.click(generate);
+    await waitFor(() => expect(api.generateDraft).toHaveBeenCalledWith('token', expect.objectContaining({
+      application_id: APPLICATION_ID,
+      contact,
+      role: job.role,
+      company: job.company,
+      operation_id: operationId,
+      draft_type: 'first_note',
+    })));
+  });
+
+  it('generates each supported outreach message type through the canonical draft contract', async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.generateDraft)
+      .mockResolvedValueOnce({ ...draft, draft_type: 'first_note' })
+      .mockResolvedValueOnce({ ...draft, draft_type: 'thank_you' });
+    render(
+      <DraftEditor
+        contact={contact}
+        job={job}
+        token="token"
+        profile={profile}
+        onBack={vi.fn()}
+        onDraftAnother={vi.fn()}
+      />,
+    );
+
+    await screen.findByLabelText('Message');
+    await user.selectOptions(screen.getByLabelText('Message type'), 'thank_you');
+    await user.click(screen.getByRole('button', { name: 'Generate this message type' }));
+
+    await waitFor(() => expect(api.generateDraft).toHaveBeenLastCalledWith('token', expect.objectContaining({
+      application_id: APPLICATION_ID,
+      contact,
+      draft_type: 'thank_you',
+    })));
   });
 
   it('uses prebuilt drafts without regenerating and copies the reviewed content', async () => {

@@ -4,7 +4,7 @@ import packageMetadata from '../../package.json';
 
 describe('published extension release contract', () => {
   it('uses a new installable version for the SmartRecruiters handoff build', () => {
-    expect(packageMetadata.version).toBe('0.5.11');
+    expect(packageMetadata.version).toBe('0.6.0');
   });
 
   it('reports the runtime manifest version to the website pairing gate', () => {
