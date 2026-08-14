@@ -1,10 +1,14 @@
-import React, { useEffect, useState } from 'react';
-import { getEvents, resolveContacts } from '../lib/api';
+import React, { useEffect, useRef, useState } from 'react';
+import { ensureOutreachApplication, getEvents, resolveContacts } from '../lib/api';
+import { isMonetizationError } from '../lib/api-error';
+import type { EntitlementSnapshotV2 } from '../lib/entitlements';
 import type { Contact, JobContext, OutreachEvent } from '../lib/types';
 import { outreachStatus } from '../lib/outreach-status';
 import Avatar from './Avatar';
 import { SkeletonBar } from './Skeleton';
 import WarningBanner from './WarningBanner';
+import PlanStatusPill from './PlanStatusPill';
+import TrialUsageCard from './TrialUsageCard';
 import {
   fieldClass,
   PendingLabel,
@@ -25,7 +29,13 @@ interface MainScreenProps {
   onContactsFound: (contacts: Contact[], job: JobContext) => void;
   onViewTracking: () => void;
   onViewAutofillSetup: () => void;
+  entitlements?: EntitlementSnapshotV2 | null;
+  onViewPlans?: (
+    trigger?: string,
+    actionContext?: { application_id?: string; company: string; role: string; portal_url?: string },
+  ) => void;
   userSchool?: string;
+  focusContactDiscovery?: boolean;
 }
 
 function EventStatus({ status }: { status: string }) {
@@ -73,7 +83,10 @@ export default function MainScreen({
   onContactsFound,
   onViewTracking,
   onViewAutofillSetup,
+  entitlements = null,
+  onViewPlans = () => {},
   userSchool,
+  focusContactDiscovery = false,
 }: MainScreenProps) {
   const [jobUrl, setJobUrl] = useState(detectedJob?.url ?? '');
   const [company, setCompany] = useState(detectedJob?.company ?? '');
@@ -87,6 +100,9 @@ export default function MainScreen({
   const [eventsLoading, setEventsLoading] = useState(true);
   const [eventsError, setEventsError] = useState<string | null>(null);
   const [fillError, setFillError] = useState<string | null>(null);
+  const [contactPaywall, setContactPaywall] = useState(false);
+  const [outreachApplicationId, setOutreachApplicationId] = useState<string | null>(detectedJob?.application_id ?? null);
+  const pendingResolveOperation = useRef<{ key: string; operationId: string } | null>(null);
 
   const handleFillThisPage = async () => {
     setFillError(null);
@@ -118,12 +134,22 @@ export default function MainScreen({
     if (detectedJob.company) setCompany((current) => current || detectedJob.company);
     if (detectedJob.role) setRole((current) => current || detectedJob.role);
     if (detectedJob.url) setJobUrl((current) => current || detectedJob.url!);
+    if (detectedJob.application_id) setOutreachApplicationId((current) => current || detectedJob.application_id!);
     if (!jobDetailsTouched && (detectedJob.company || detectedJob.role)) setEditingJob(false);
   }, [detectedJob, jobDetailsTouched]);
+
+  useEffect(() => {
+    if (!focusContactDiscovery) return;
+    const frame = requestAnimationFrame(() => {
+      document.getElementById('litos-contact-discovery-control')?.focus({ preventScroll: true });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [focusContactDiscovery]);
 
   const handleUrlChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;
     setJobUrl(value);
+    setOutreachApplicationId(null);
     setJobDetailsTouched(true);
     setError(null);
     const parsed = parseJobUrl(value);
@@ -145,20 +171,45 @@ export default function MainScreen({
       return;
     }
 
+    const resolveKey = `${cleanCompany.toLowerCase()}\u0000${cleanRole.toLowerCase()}`;
+    if (pendingResolveOperation.current?.key !== resolveKey) {
+      pendingResolveOperation.current = { key: resolveKey, operationId: crypto.randomUUID() };
+    }
+    const operationId = pendingResolveOperation.current.operationId;
     setError(null);
+    setContactPaywall(false);
     setLoading(true);
     try {
-      const contacts = await resolveContacts(token, {
+      const domain = cleanCompany.toLowerCase().replace(/\s+/g, '') + '.com';
+      const canonicalApplicationId = await ensureOutreachApplication(token, {
         company: cleanCompany,
+        role: cleanRole,
+        domain,
+        ...(jobUrl ? { url: jobUrl } : {}),
+      });
+      setOutreachApplicationId(canonicalApplicationId);
+      const contacts = await resolveContacts(token, {
+        application_id: canonicalApplicationId,
+        company: cleanCompany,
+        domain,
         role: cleanRole,
         user_school: userSchool,
+        operation_id: operationId,
       });
+      pendingResolveOperation.current = null;
       onContactsFound(contacts, {
+        application_id: canonicalApplicationId,
         company: cleanCompany,
         role: cleanRole,
+        domain,
         url: jobUrl || undefined,
       });
     } catch (err) {
+      if (isMonetizationError(err)) {
+        setError('Contact discovery is part of Litos+. You can keep filling applications for free.');
+        setContactPaywall(true);
+        return;
+      }
       setError(err instanceof Error ? err.message : 'Could not find anyone. Try again.');
     } finally {
       setLoading(false);
@@ -177,6 +228,7 @@ export default function MainScreen({
           longer sits between them - it lives at the foot of Answers, behind an inline confirm,
           because a native window.confirm is the one piece of OS chrome in the product. */}
       <PopupHeader title="This job">
+        <PlanStatusPill snapshot={entitlements} onOpen={() => onViewPlans('manual')} />
         <button type="button" onClick={onViewAutofillSetup} className="min-h-11 px-1.5 text-xs font-medium text-gray-600 hover:text-gray-950">
           Answers
         </button>
@@ -186,6 +238,9 @@ export default function MainScreen({
       </PopupHeader>
 
       <main className="flex flex-1 flex-col gap-5 px-4 py-4">
+        {entitlements && (
+          <TrialUsageCard snapshot={entitlements} onOpenPlans={() => onViewPlans('trial_usage')} />
+        )}
         {pendingDraftCount > 0 && (
           <button
             type="button"
@@ -243,6 +298,7 @@ export default function MainScreen({
                     value={company}
                     onChange={(e) => {
                       setCompany(e.target.value);
+                      setOutreachApplicationId(null);
                       setJobDetailsTouched(true);
                       setCompanyWasGuessed(false);
                     }}
@@ -260,6 +316,7 @@ export default function MainScreen({
                     value={role}
                     onChange={(e) => {
                       setRole(e.target.value);
+                      setOutreachApplicationId(null);
                       setJobDetailsTouched(true);
                     }}
                     placeholder="Software Engineer"
@@ -270,7 +327,28 @@ export default function MainScreen({
             </div>
           )}
 
-          {error && <WarningBanner message={error} variant="error" />}
+          {error && (
+            <div className="space-y-2">
+              <WarningBanner message={error} variant="error" />
+              {contactPaywall && (
+                <div className="flex items-center justify-between gap-3 rounded-inner bg-brand-50 px-3 py-2">
+                  <p className="text-xs leading-5 text-gray-700">Existing contacts and drafts stay available.</p>
+                  <button
+                    type="button"
+                    onClick={() => onViewPlans('contact_discovery', {
+                      ...(outreachApplicationId ? { application_id: outreachApplicationId } : {}),
+                      company: company.trim(),
+                      role: role.trim(),
+                      ...(jobUrl ? { portal_url: jobUrl } : {}),
+                    })}
+                    className="min-h-11 text-xs font-medium text-brand-800 underline-offset-4 hover:underline"
+                  >
+                    See Litos+
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
 
           <section aria-labelledby="workflow-heading">
             <div id="workflow-heading"><SectionLabel>What Litos can do here</SectionLabel></div>
@@ -293,7 +371,13 @@ export default function MainScreen({
                     only affordance used to be the words "Not started", with its actual control a
                     hundred pixels below as a full-width outlined button - which read as the
                     screen's primary while the real primary sat inside the row above. */}
-                <button type="submit" aria-label="Find people" disabled={loading} className={secondaryButtonClass}>
+                <button
+                  id="litos-contact-discovery-control"
+                  type="submit"
+                  aria-label="Find people"
+                  disabled={loading}
+                  className={secondaryButtonClass}
+                >
                   {loading ? <PendingLabel state="searching">Looking…</PendingLabel> : 'Find people'}
                 </button>
               </div>

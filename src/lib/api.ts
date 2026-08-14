@@ -9,22 +9,16 @@ import type {
   ApplicationProfile,
   ResumeContact,
   GeneratedResume,
+  OutreachDraftType,
 } from './types';
 import { type ProductMeta } from './product';
 import { backendFetch } from './backend-fetch';
+import { apiErrorFromResponse } from './api-error';
+import { parseEntitlementSnapshot, type EntitlementSnapshotV2 } from './entitlements';
 
 
-// Throw the backend's human-readable message (quota, rate limit, bad code, etc.)
-// when present; raw status-prefixed text otherwise.
 async function throwApiError(res: Response): Promise<never> {
-  const text = await res.text().catch(() => res.statusText);
-  try {
-    const parsed = JSON.parse(text) as { error?: string };
-    if (parsed.error) throw new Error(parsed.error);
-  } catch (e) {
-    if (e instanceof Error && !(e instanceof SyntaxError)) throw e;
-  }
-  throw new Error(`API error ${res.status}: ${text}`);
+  throw await apiErrorFromResponse(res);
 }
 
 async function request<T>(
@@ -98,6 +92,10 @@ export async function getProfile(token: string): Promise<Profile> {
   return request<Profile>('/profile', {}, token);
 }
 
+export async function getEntitlements(token: string): Promise<EntitlementSnapshotV2> {
+  return parseEntitlementSnapshot(await request<unknown>('/billing/state', { cache: 'no-store' }, token));
+}
+
 export type StandingConsentEligibility = {
   eligible: boolean;
   reviewed_submits: number;
@@ -129,11 +127,13 @@ export async function putAutomationSettings(token: string, settings: AutomationS
 }
 
 export interface ResolveParams {
+  application_id: string;
   company: string;
   domain?: string;
   role: string;
   team?: string;
   user_school?: string;
+  operation_id: string;
 }
 
 // Backend /resolve returns { contacts: [{ contact, email_resolution }] }.
@@ -192,10 +192,13 @@ export async function resolveContacts(
 }
 
 export interface GenerateDraftParams {
+  application_id: string;
   contact: Contact;
   role: string;
   company: string;
   user_profile: Profile;
+  operation_id: string;
+  draft_type: OutreachDraftType;
 }
 
 export async function generateDraft(
@@ -206,10 +209,39 @@ export async function generateDraft(
     '/draft',
     {
       method: 'POST',
-      body: JSON.stringify(params),
+      body: JSON.stringify({
+        ...params,
+        company_domain: params.contact.company_domain,
+      }),
     },
     token,
   );
+}
+
+export async function ensureOutreachApplication(
+  token: string,
+  input: { company: string; role: string; domain?: string; url?: string },
+): Promise<string> {
+  const portalUrl = (() => {
+    if (!input.url) return undefined;
+    try {
+      const parsed = new URL(input.url);
+      return parsed.protocol === 'https:' ? parsed.toString() : undefined;
+    } catch {
+      return undefined;
+    }
+  })();
+  const response = await request<{ application: { id: string } }>('/applications', {
+    method: 'POST',
+    body: JSON.stringify({
+      company: input.company,
+      role: input.role,
+      ...(input.domain ? { company_domain: input.domain } : {}),
+      ...(portalUrl ? { portal_url: portalUrl } : {}),
+      source_surface: 'extension',
+    }),
+  }, token);
+  return response.application.id;
 }
 
 export interface TrackEventParams {

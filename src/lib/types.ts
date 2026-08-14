@@ -4,6 +4,7 @@ export type Outcome = 'sent' | 'opened' | 'replied' | 'bounced';
 export type Channel = 'email' | 'linkedin';
 export type ContactStatus = 'verified' | 'likely' | 'linkedin_only' | 'none';
 export type OutreachStatus = 'drafted' | 'sent' | 'replied' | 'bounced';
+export type OutreachDraftType = 'first_note' | 'follow_up' | 'thank_you' | 'referral_ask' | 'offer_stage';
 
 export interface Contact {
   id: string;
@@ -23,6 +24,11 @@ export interface Draft {
   body: string;
   word_count: number;
   warnings: string[];
+  draft_id?: string;
+  operation_id?: string;
+  draft_type?: OutreachDraftType;
+  contact_id?: string;
+  application_id?: string;
 }
 
 export interface OutreachEvent {
@@ -41,6 +47,7 @@ export interface OutreachEvent {
 export interface Profile {
   full_name?: string;
   email?: string; // account login email, added server-side by GET /profile - not resume-parsed
+  resume_email?: string;
   experience: Array<{
     company: string;
     title: string;
@@ -61,6 +68,7 @@ export interface Profile {
 }
 
 export interface JobContext {
+  application_id?: string;
   company: string;
   role: string;
   domain?: string;
@@ -83,7 +91,8 @@ export type Screen =
   | 'contacts'
   | 'draft'
   | 'tracking'
-  | 'autofill-setup';
+  | 'autofill-setup'
+  | 'plans';
 
 // ─── v2: resume-gen + application autofill (PRD-v2-resume-autofill.md) ─────────────
 
@@ -162,6 +171,10 @@ export interface GeneratedResume {
   resume_id: string;
   resume_url: string;
   file_name: string;
+  /** Canonical Tracker application used for per-application trial answer metering. */
+  canonical_application_id?: string;
+  /** Canonical saved resume artifact selected for this application. */
+  artifact_id?: string;
   /** Immutable backend version for an attended extension handoff. */
   handoff_version?: string;
   spec: unknown;

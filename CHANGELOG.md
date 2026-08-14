@@ -2,6 +2,32 @@
 
 All notable changes to the Litos extension are documented here.
 
+## [0.6.0] - 2026-08-14
+
+### Added
+- New Free accounts can fill unlimited supported applications with saved factual answers and an
+  existing base or uploaded resume, then review and press the employer site's final submit control.
+- A shared Litos+ plan view shows the weekly, monthly, and three-month prices, with three months
+  selected by default and labeled Most popular. Checkout and billing management stay on trylitos.com.
+- The seven-day trial shows separate remaining counts for tailored resumes, cover letters,
+  application-answer contexts, and outreach companies.
+- Active paid accounts can pre-warm resume tailoring on hover through a distinct live entitlement.
+
+### Changed
+- Resume generation now requires an explicit click for Free, trial, and original Free accounts, so
+  passive hover cannot consume a trial unit. Page detection never starts paid work.
+- Contact discovery, premium writing, and automatic submission use server-authoritative feature
+  checks. A plan-state outage fails closed to factual filling and manual final submission.
+- Trial and paid accounts can use opt-in automatic submission only through the existing consent,
+  review, CAPTCHA, sensitive-answer, and site-safety gates.
+
+### Safety
+- Free filling never calls a premium generation endpoint and never spends a trial allowance.
+- Subscription state is cached per account and cleared on logout, while premium actions refresh
+  current server state before execution.
+- The extension keeps its existing Manifest V3 permission set and sends payment details only to
+  Stripe through the Litos website.
+
 ## [0.5.11] - 2026-08-10
 
 ### Added

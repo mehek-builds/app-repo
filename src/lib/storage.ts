@@ -1,5 +1,5 @@
 import type { Profile } from './types';
-import { ANALYTICS_ID_KEY } from './storage-keys';
+import { ANALYTICS_ID_KEY, ANALYTICS_QUEUE_KEY, CAPTCHA_STALLS_KEY } from './storage-keys';
 
 // Litos is the current product name. RoleQuick and Volley keys remain read-only migration
 // aliases so an extension update never signs out an existing user or loses their settings.
@@ -20,6 +20,17 @@ export function currentAuthEpoch(): number {
 
 export function authEpochIsCurrent(expectedEpoch: number): boolean {
   return authSessionActive && Number.isSafeInteger(expectedEpoch) && expectedEpoch === authEpoch;
+}
+
+/**
+ * Called by the background only after every account-owned local and session value has been
+ * removed. Advancing once more invalidates work that began during the asynchronous clear, while
+ * reactivation lets a later popup sign-in use the now-empty background context without waiting
+ * for the MV3 worker to restart.
+ */
+export function completeAuthSessionClear(): void {
+  authEpoch += 1;
+  authSessionActive = true;
 }
 
 function serializePortalAccountMutation<T>(operation: () => Promise<T>): Promise<T> {
@@ -138,14 +149,19 @@ export async function clearAll(): Promise<void> {
   authEpoch += 1;
   authSessionActive = false;
   await serializePortalAccountMutation(async () => {
+    const entitlementPointer = await chromeStorageGetCompat<string>('litos:entitlements:v2:current-account', []);
     await chromeStorageRemove([
       TOKEN_KEY,
       ...TOKEN_ALIASES,
       PROFILE_KEY,
       ...PROFILE_ALIASES,
       ANALYTICS_ID_KEY,
+      ANALYTICS_QUEUE_KEY,
+      CAPTCHA_STALLS_KEY,
       PORTAL_ACCOUNTS_KEY,
       PENDING_PORTAL_ACCOUNTS_KEY,
+      'litos:entitlements:v2:current-account',
+      ...(entitlementPointer ? [`litos:entitlements:v2:${entitlementPointer}`] : []),
     ]);
     const session = chrome.storage.session;
     if (session) {
@@ -157,6 +173,7 @@ export async function clearAll(): Promise<void> {
         || key === 'litos_armed_handoffs'
         || key === 'litos_extension_handoff_packet_bindings'
         || key === 'litos_application_tabs'
+        || key === 'pendingDrafts'
         || key === 'lastDetectedJob');
       if (userScopedSessionKeys.length) await session.remove(userScopedSessionKeys);
     }

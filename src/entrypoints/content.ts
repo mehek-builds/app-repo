@@ -40,6 +40,13 @@ import { startHarvest } from '../lib/harvest';
 import { withInactivityTimeout } from '../lib/inactivity-timeout';
 import { asSentence } from '../lib/sentence';
 import type { Profile, ApplicationProfile, AutofillResult, GeneratedResume } from '../lib/types';
+import { createFillActionGate, type FillActionPresentation } from '../lib/application-fill-action';
+import { createFreeFillTrackerSync, type FreeFillTrackerPayload } from '../lib/free-fill-tracker';
+import {
+  createFreeSubmissionOutcomeSync,
+  recordFreeSubmissionOutcome,
+} from '../lib/free-submission-outcome';
+import { FREE_SUBMISSION_OUTCOME_TIMEOUT_MS } from '../lib/free-submission-monitor';
 import { detectChallenge, waitForChallengeCleared, watchForChallenge } from '../lib/captcha-detection';
 import type { PostingCompensation } from '../lib/adapters/salary';
 import { buildResumeReviewSummary } from '../lib/resume-review';
@@ -97,6 +104,11 @@ import {
   replayWorkdayFinalSubmitIfAllowed,
   workdayVerificationStage,
 } from '../lib/workday-account-flow';
+import type { SerializedLitosApiError } from '../lib/api-error';
+import {
+  premiumRetryControlSelector,
+  type ExtensionPremiumActionFeature,
+} from '../lib/extension-premium-action';
 
 export default defineContentScript({
   matches: [
@@ -378,6 +390,173 @@ export default defineContentScript({
       submitButton.addEventListener('click', onClick, true);
     }
 
+    const freeSubmissionOutcomeButtons = new WeakSet<HTMLElement>();
+    const activeFreeSubmissionOutcomeEvents = new Set<string>();
+
+    function reportFreeSubmissionOutcomeWithRetry(
+      outcomeSync: ReturnType<typeof createFreeSubmissionOutcomeSync>,
+      baselineUrl: string,
+      outcome: 'confirmed' | 'failed' | 'unknown',
+      confirmationText?: string,
+      attempt = 0,
+    ): void {
+      const finalUrl = window.location.href || baselineUrl;
+      void outcomeSync.record(outcome, finalUrl, confirmationText).then((result) => {
+        if (result.ok) return;
+        if (attempt < 4) {
+          window.setTimeout(
+            () => reportFreeSubmissionOutcomeWithRetry(
+              outcomeSync,
+              baselineUrl,
+              outcome,
+              confirmationText,
+              attempt + 1,
+            ),
+            1000 * (attempt + 1),
+          );
+          return;
+        }
+        chrome.runtime.sendMessage({
+          type: 'ABANDON_FREE_SUBMISSION_OUTCOME_MONITOR',
+          event_id: outcomeSync.eventId,
+        });
+      });
+    }
+
+    function monitorFreeSubmissionOutcome(input: {
+      outcomeSync: ReturnType<typeof createFreeSubmissionOutcomeSync>;
+      baselineUrl: string;
+      baselineTexts: ReadonlySet<string>;
+      timeoutMs?: number;
+    }): void {
+      if (activeFreeSubmissionOutcomeEvents.has(input.outcomeSync.eventId)) return;
+      activeFreeSubmissionOutcomeEvents.add(input.outcomeSync.eventId);
+      const readNewReceiptText = () => visibleSubmissionOutcomeTexts()
+        .filter((text) => !input.baselineTexts.has(text))
+        .join(' ');
+      let observer: MutationObserver | null = null;
+      let interval: ReturnType<typeof setInterval> | null = null;
+      const stopResources = () => {
+        if (interval) clearInterval(interval);
+        interval = null;
+        observer?.disconnect();
+        observer = null;
+      };
+      const controller = createSubmissionOutcomeController({
+        readText: readNewReceiptText,
+        timeoutMs: input.timeoutMs ?? FREE_SUBMISSION_OUTCOME_TIMEOUT_MS,
+        onStop: stopResources,
+        onOutcome: (outcome) => {
+          const receiptText = readNewReceiptText().slice(0, 1000);
+          if (outcome.kind === 'failure') {
+            reportFreeSubmissionOutcomeWithRetry(
+              input.outcomeSync,
+              input.baselineUrl,
+              'failed',
+              receiptText || outcome.message,
+            );
+            return;
+          }
+          reportFreeSubmissionOutcomeWithRetry(
+            input.outcomeSync,
+            input.baselineUrl,
+            'confirmed',
+            receiptText,
+          );
+        },
+        onUnknown: () => reportFreeSubmissionOutcomeWithRetry(
+          input.outcomeSync,
+          input.baselineUrl,
+          'unknown',
+        ),
+      });
+      interval = setInterval(controller.scan, 1000);
+      observer = new MutationObserver(controller.queueScan);
+      observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+      controller.scan();
+    }
+
+    /**
+     * Observes the applicant's own native Free-plan submit click. This is intentionally separate
+     * from armManualSubmissionTracking: there is no reservation, entitlement check, click replay,
+     * or event cancellation in this lane. If Tracker transport fails, the employer click and page
+     * behavior remain exactly as they would be without Litos.
+     */
+    function armFreeManualSubmissionOutcomeTracking(
+      submitButton: HTMLElement,
+      applicationId: string,
+    ): void {
+      if (freeSubmissionOutcomeButtons.has(submitButton)) return;
+      freeSubmissionOutcomeButtons.add(submitButton);
+      const onTrustedClick = (event: MouseEvent) => {
+        if (!event.isTrusted) return;
+        submitButton.removeEventListener('click', onTrustedClick, true);
+
+        const baselineUrl = window.location.href;
+        const baselineTexts = new Set(visibleSubmissionOutcomeTexts());
+        const eventId = crypto.randomUUID();
+        let settleMonitorStart!: () => void;
+        const monitorStart = new Promise<void>((resolve) => { settleMonitorStart = resolve; });
+        const outcomeSync = createFreeSubmissionOutcomeSync(
+          applicationId,
+          eventId,
+          async (payload) => {
+            await monitorStart;
+            return recordFreeSubmissionOutcome(payload);
+          },
+        );
+        // Fire-and-observe: queueing this storage message never delays or alters the employer's
+        // native click, but gives a post-navigation content script the same stable event id.
+        chrome.runtime.sendMessage({
+          type: 'START_FREE_SUBMISSION_OUTCOME_MONITOR',
+          payload: {
+            event_id: outcomeSync.eventId,
+            application_id: applicationId,
+            start_url: baselineUrl,
+          },
+        }, () => {
+          void chrome.runtime.lastError;
+          settleMonitorStart();
+        });
+        monitorFreeSubmissionOutcome({ outcomeSync, baselineUrl, baselineTexts });
+      };
+      submitButton.addEventListener('click', onTrustedClick, true);
+    }
+
+    function findFreeManualFinalSubmitButton(atsName: string): HTMLElement | null {
+      return atsName === 'workday' ? findWorkdayFinalSubmitButton() : findFinalSubmitButton();
+    }
+
+    const pendingFreeSubmissionOutcomeApplications = new Set<string>();
+
+    function armFreeManualSubmissionOutcomeWhenAvailable(
+      applicationId: string,
+      atsName: string,
+    ): void {
+      if (pendingFreeSubmissionOutcomeApplications.has(applicationId)) return;
+      pendingFreeSubmissionOutcomeApplications.add(applicationId);
+      let observer: MutationObserver | null = null;
+      let timeout: ReturnType<typeof setTimeout> | null = null;
+      const tryArm = (): boolean => {
+        const finalControl = findFreeManualFinalSubmitButton(atsName);
+        if (!finalControl) return false;
+        armFreeManualSubmissionOutcomeTracking(finalControl, applicationId);
+        observer?.disconnect();
+        observer = null;
+        if (timeout) clearTimeout(timeout);
+        timeout = null;
+        return true;
+      };
+      if (tryArm()) return;
+      observer = new MutationObserver(() => { tryArm(); });
+      observer.observe(document.body, { childList: true, subtree: true, attributes: true });
+      timeout = setTimeout(() => {
+        observer?.disconnect();
+        observer = null;
+        pendingFreeSubmissionOutcomeApplications.delete(applicationId);
+      }, 5 * 60_000);
+    }
+
     // No top-frame gating: for a cross-origin Greenhouse iframe embed, this script's instance
     // running INSIDE that iframe is the only one that ever matches `*.greenhouse.io/*` at all
     // (the parent page is on the company's own domain, which isn't in `matches`). That iframe
@@ -416,12 +595,131 @@ export default defineContentScript({
     };
     checkPendingSubmission();
 
+    const checkPendingFreeSubmissionOutcome = (attempt = 0): void => {
+      chrome.runtime.sendMessage(
+        { type: 'GET_PENDING_FREE_SUBMISSION_OUTCOME' },
+        (response: {
+          pending?: {
+            eventId?: string;
+            applicationId?: string;
+            startUrl?: string;
+          } | null;
+          force_unknown?: boolean;
+          remaining_ms?: number;
+          retry_pending?: boolean;
+        } | undefined) => {
+          const pending = response?.pending;
+          if (
+            pending?.eventId
+            && pending.applicationId
+            && pending.startUrl
+          ) {
+            const outcomeSync = createFreeSubmissionOutcomeSync(
+              pending.applicationId,
+              pending.eventId,
+            );
+            const remainingMs = Math.max(0, response?.remaining_ms ?? 0);
+            if (response?.force_unknown || remainingMs === 0) {
+              reportFreeSubmissionOutcomeWithRetry(
+                outcomeSync,
+                pending.startUrl,
+                'unknown',
+              );
+              return;
+            }
+            // A new document has no trustworthy pre-click text baseline. Only visible receipt or
+            // failure text on this bound post-navigation page participates in classification.
+            monitorFreeSubmissionOutcome({
+              outcomeSync,
+              baselineUrl: pending.startUrl,
+              baselineTexts: new Set(),
+              timeoutMs: remainingMs,
+            });
+            return;
+          }
+          // The native navigation can beat the asynchronous session-storage write by a few
+          // milliseconds. Retry briefly without keeping every ordinary application page polling.
+          if (attempt < 20 || (response?.retry_pending && attempt < 100)) {
+            window.setTimeout(() => checkPendingFreeSubmissionOutcome(attempt + 1), 250);
+          }
+        },
+      );
+    };
+    checkPendingFreeSubmissionOutcome();
+
     let cardInjected = false;
     let approved = false; // true once user taps "Yes" on either card
     let submitFromDashboard: ((questions: Array<{ id: string; question: string; answer: string }>) => Promise<{ ok: boolean; clicked?: boolean; error?: string; finalUrl?: string; confirmationText?: string }>) | null = null;
     let prepareSubmissionFromDashboard: ((resume: GeneratedResume, expectedUrl: string) => Promise<string | null>) | null = null;
 
+    function openLitosPlansFromPage(
+      trigger: ExtensionPremiumActionFeature,
+      actionContext: {
+        application_id?: string;
+        company: string;
+        role: string;
+        portal_url: string;
+      } | null,
+      done: (result: { ok: boolean; error?: string }) => void,
+    ): void {
+      chrome.runtime.sendMessage({
+        type: 'OPEN_LITOS_PLANS',
+        trigger,
+        ...(actionContext ? { action_context: actionContext } : {}),
+      }, (response: { ok?: boolean; error?: string } | undefined) => {
+        const runtimeError = chrome.runtime.lastError?.message;
+        done(response?.ok === true
+          ? { ok: true }
+          : { ok: false, error: response?.error ?? runtimeError ?? 'Litos+ options could not open.' });
+      });
+    }
+
+    function focusPremiumRetryControl(
+      feature: ExtensionPremiumActionFeature,
+      actionNonce?: string,
+    ): boolean {
+      const selector = premiumRetryControlSelector(feature);
+      if (!selector) return false;
+      let observer: MutationObserver | null = null;
+      let timeout: ReturnType<typeof setTimeout> | null = null;
+      const tryFocus = (): boolean => {
+        const control = document.querySelector<HTMLElement>(selector);
+        if (
+          !control
+          || !isElementVisible(control)
+          || (control as HTMLButtonElement).disabled
+          || control.getAttribute('aria-disabled') === 'true'
+        ) return false;
+        control.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        control.focus({ preventScroll: true });
+        observer?.disconnect();
+        observer = null;
+        if (timeout) clearTimeout(timeout);
+        timeout = null;
+        if (actionNonce) {
+          chrome.runtime.sendMessage({
+            type: 'COMPLETE_PREMIUM_RETRY_FOCUS',
+            action_nonce: actionNonce,
+          });
+        }
+        return true;
+      };
+      if (tryFocus()) return true;
+      observer = new MutationObserver(() => { tryFocus(); });
+      observer.observe(document.body, { childList: true, subtree: true, attributes: true });
+      timeout = setTimeout(() => observer?.disconnect(), 5 * 60_000);
+      return true;
+    }
+
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+      if (message?.type === 'FOCUS_PREMIUM_RETRY_CONTROL') {
+        const focused = focusPremiumRetryControl(
+          message.feature_key as ExtensionPremiumActionFeature,
+          typeof message.action_nonce === 'string' ? message.action_nonce : undefined,
+        );
+        sendResponse({ ok: focused });
+        return false;
+      }
       if (message?.type === 'GET_CURRENT_APPLICATION_URL') {
         sendResponse({ url: window.location.href });
         return false;
@@ -448,6 +746,15 @@ export default defineContentScript({
         .finally(() => pendingRecoveryGate.endLocal(applicationId));
       return true;
     });
+
+    chrome.runtime.sendMessage(
+      { type: 'CLAIM_PREMIUM_RETRY_FOCUS' },
+      (response: { ok?: boolean; action_nonce?: string; feature_key?: ExtensionPremiumActionFeature } | undefined) => {
+        if (response?.ok && response.feature_key) {
+          focusPremiumRetryControl(response.feature_key, response.action_nonce);
+        }
+      },
+    );
 
     // ─── Job title/company extraction ───────────────────────────────────────
 
@@ -972,6 +1279,7 @@ export default defineContentScript({
     // for - a fresh generation on every step.
     type ResumeGenResult = {
       error?: string;
+      api_error?: SerializedLitosApiError;
       profile?: Profile;
       applicationProfile?: ApplicationProfile;
       resume?: GeneratedResume;
@@ -980,6 +1288,7 @@ export default defineContentScript({
       posting_compensation?: PostingCompensation | null;
     };
     const resumeGenByJob = new Map<string, Promise<ResumeGenResult>>();
+    const resumeOperationIdByJob = new Map<string, string>();
 
     function watchSubmitButton(title: string, company: string, url: string) {
       let watched = false;
@@ -1132,6 +1441,9 @@ export default defineContentScript({
     }
 
     function attachCardHandlers(card: HTMLElement, title: string, company: string, url: string) {
+      // A retry of this exact card action must reach the server with the same operation ID so
+      // response loss cannot consume the Trial company meters more than once.
+      const outreachOperationId = crypto.randomUUID();
       const dismiss = () => { card.remove(); cardInjected = false; };
       card.querySelector('#wp-close')?.addEventListener('click', dismiss);
       card.querySelector('#wp-no')?.addEventListener('click', dismiss);
@@ -1149,20 +1461,148 @@ export default defineContentScript({
         }
         dismiss();
       });
-      card.querySelector('#wp-yes')?.addEventListener('click', () => {
+      const requestOutreach = () => {
         approved = true;
         const inner = card.querySelector('div') as HTMLElement;
         inner.innerHTML = `
           <div style="display:flex;align-items:center;gap:10px;">
             <div>
               <div style="font-weight:500;font-size:13px;color:${COLOR.ink};">Finding people to email</div>
-              <div style="font-size:12px;color:${COLOR.muted};margin-top:2px;">They will be in Litos in a moment</div>
+              <div style="font-size:12px;color:${COLOR.muted};margin-top:2px;">Checking your plan and verified contact options</div>
             </div>
           </div>
         `;
-        chrome.runtime.sendMessage({ type: 'JOB_APPROVED', payload: { title, company, url } });
-        setTimeout(dismiss, DISMISS_MS.confirmation);
-      });
+        chrome.runtime.sendMessage(
+          { type: 'JOB_APPROVED', payload: { title, company, url, operation_id: outreachOperationId } },
+          (response: {
+            ok?: boolean;
+            count?: number;
+            error?: string;
+            api_error?: SerializedLitosApiError;
+            failures?: Array<{ contact_id: string; contact_name: string; error: string }>;
+          } | undefined) => {
+            if (!card.isConnected) return;
+            const renderActions = (input: {
+              heading: string;
+              detail: string;
+              primary: string;
+              onPrimary: () => void;
+              secondary?: string;
+              onSecondary?: () => void;
+            }) => {
+              inner.innerHTML = `
+                <div style="font-weight:500;font-size:13px;color:${COLOR.ink};line-height:1.4;"></div>
+                <div data-litos-outreach-detail style="font-size:12px;color:${COLOR.muted};margin-top:3px;line-height:1.4;"></div>
+                <div style="display:flex;gap:8px;margin-top:12px;">
+                  <button data-litos-outreach-primary style="flex:1;background:${COLOR.brand};color:white;border:0;border-radius:${RADIUS.control};min-height:44px;padding:0 10px;font:500 12px ${FONT.sans};cursor:pointer;"></button>
+                  ${input.secondary ? `<button data-litos-outreach-secondary style="flex:1;background:${COLOR.surfaceAlt};color:${COLOR.ink};border:0;border-radius:${RADIUS.control};min-height:44px;padding:0 10px;font:500 12px ${FONT.sans};cursor:pointer;"></button>` : ''}
+                </div>
+              `;
+              const heading = inner.firstElementChild as HTMLElement | null;
+              const detail = inner.querySelector<HTMLElement>('[data-litos-outreach-detail]');
+              const primary = inner.querySelector<HTMLButtonElement>('[data-litos-outreach-primary]');
+              const secondary = inner.querySelector<HTMLButtonElement>('[data-litos-outreach-secondary]');
+              if (heading) heading.textContent = input.heading;
+              if (detail) detail.textContent = input.detail;
+              if (primary) {
+                primary.textContent = input.primary;
+                primary.addEventListener('click', input.onPrimary);
+              }
+              if (secondary && input.secondary) {
+                secondary.textContent = input.secondary;
+                secondary.addEventListener('click', input.onSecondary ?? dismiss);
+              }
+            };
+
+            if (chrome.runtime.lastError || !response) {
+              renderActions({
+                heading: 'Could not finish',
+                detail: chrome.runtime.lastError?.message || 'Litos did not respond. Nothing was sent.',
+                primary: 'Try again',
+                onPrimary: requestOutreach,
+                secondary: 'Close',
+              });
+              return;
+            }
+            if (response.ok && (response.count ?? 0) > 0) {
+              inner.innerHTML = `
+                <div data-litos-outreach-heading style="font-weight:500;font-size:13px;color:${COLOR.ink};"></div>
+                <div data-litos-outreach-detail style="font-size:12px;color:${COLOR.muted};margin-top:2px;"></div>
+              `;
+              const count = response.count ?? 0;
+              const heading = inner.querySelector<HTMLElement>('[data-litos-outreach-heading]');
+              const detail = inner.querySelector<HTMLElement>('[data-litos-outreach-detail]');
+              if (heading) heading.textContent = count === 1 ? 'Outreach draft ready' : 'Outreach drafts ready';
+              if (detail) {
+                const failedNames = (response.failures ?? []).map((failure) => failure.contact_name).join(', ');
+                const partial = failedNames ? ` Drafting failed for ${failedNames}; no successful draft was discarded.` : '';
+                detail.textContent = `Open Litos to review ${count === 1 ? 'the draft' : `${count} drafts`}. Nothing was sent.${partial}`;
+              }
+              setTimeout(dismiss, DISMISS_MS.confirmation);
+              return;
+            }
+            if (response.ok) {
+              renderActions({
+                heading: 'No verified contacts found',
+                detail: 'You can still add someone you know and write the message yourself.',
+                primary: 'Add manually',
+                onPrimary: () => {
+                  chrome.runtime.sendMessage({ type: 'OPEN_MANUAL_OUTREACH', company, role: title });
+                  dismiss();
+                },
+                secondary: 'Close',
+              });
+              return;
+            }
+            if (response.api_error?.status === 402) {
+              renderActions({
+                heading: 'Find people with Litos+',
+                detail: response.error || 'Contact discovery and AI outreach drafts are part of Litos+.',
+                primary: 'See Litos+',
+                onPrimary: () => {
+                  const primary = inner.querySelector<HTMLButtonElement>('[data-litos-outreach-primary]');
+                  const detail = inner.querySelector<HTMLElement>('[data-litos-outreach-detail]');
+                  if (primary) {
+                    primary.disabled = true;
+                    primary.textContent = 'Opening Litos+...';
+                  }
+                  openLitosPlansFromPage('contact_discovery', {
+                    company,
+                    role: title,
+                    portal_url: window.location.href,
+                  }, (result) => {
+                    if (result.ok) {
+                      dismiss();
+                      return;
+                    }
+                    if (primary) {
+                      primary.disabled = false;
+                      primary.textContent = 'Try again';
+                    }
+                    if (detail) detail.textContent = result.error ?? 'Litos+ options could not open.';
+                  });
+                },
+                secondary: 'Add manually',
+                onSecondary: () => {
+                  chrome.runtime.sendMessage({ type: 'OPEN_MANUAL_OUTREACH', company, role: title });
+                  dismiss();
+                },
+              });
+              return;
+            }
+            renderActions({
+              heading: 'Could not finish',
+              detail: (response.failures?.length
+                ? `${response.error || 'Litos could not prepare outreach.'} ${response.failures.map((failure) => `${failure.contact_name}: ${failure.error}`).join(' ')}`
+                : response.error) || 'Litos could not prepare outreach. Nothing was sent.',
+              primary: 'Try again',
+              onPrimary: requestOutreach,
+              secondary: 'Close',
+            });
+          },
+        );
+      };
+      card.querySelector('#wp-yes')?.addEventListener('click', requestOutreach);
     }
 
     // Card 1: fires when application form loads
@@ -1325,11 +1765,11 @@ export default defineContentScript({
           </div>
           <div id="wp-resume-announcer" role="status" aria-live="polite" aria-atomic="true" style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;"></div>
           <div style="display:flex;gap:8px;">
-            <button id="wp-resume-yes" style="
+            <button id="wp-resume-yes" disabled style="
               flex:1;background:${COLOR.brand};color:white;border:none;border-radius:${RADIUS.control};
-              min-height:44px;padding:0 12px;font-size:13px;font-weight:500;cursor:pointer;
+              min-height:44px;padding:0 12px;font-size:13px;font-weight:500;cursor:wait;
               font-family:${FONT.sans};color-scheme:only light;
-            ">Yes, fill it</button>
+            ">Checking plan...</button>
             <button id="wp-resume-no" style="
               flex:1;background:${COLOR.surfaceAlt};color:${COLOR.ink};border:none;border-radius:${RADIUS.control};
               min-height:44px;padding:0 12px;font-size:13px;font-weight:500;cursor:pointer;
@@ -1367,6 +1807,7 @@ export default defineContentScript({
       fill: FillFn,
       initialHandoffApplicationId?: string,
       expectedGatePacket?: { handoffVersion: string; applicantEmail: string },
+      initialFreeFillApplicationId?: string,
     ) {
       if (document.getElementById('litos-resume-card')) return;
       // Resume preparation and outreach are one application workflow, not two competing prompts.
@@ -1378,15 +1819,9 @@ export default defineContentScript({
       card.innerHTML = resumeFillCardShell(title, company);
       getCardStack().appendChild(card);
 
-      // Pre-warm on first HOVER of the card, not on render. Resume generation is the slowest
-      // step (an LLM round trip), so starting it before "Yes" hides most of the wait - but a
-      // render-time pre-warm charged one backend generation (real Anthropic spend AND one of
-      // the monthly resume credits, plus an hourly rate-limit slot) for every card the student
-      // dismissed. Hover is the earliest reliable signal of intent: it still fires seconds
-      // before a click, keeping nearly all of the head start at none of the dismissal cost.
-      // JD is read at intent time (first hover/click), NOT at card injection, so a JD that
-      // lazy-loads after the card appears is present when we tailor. Memoized so the gen call and
-      // the essay-draft hook read the same JD text.
+      // New Free, trial, and original Free accounts start generation only after the named action,
+      // so a passive hover cannot consume a trial unit. Active paid accounts may pre-warm on hover
+      // when the live entitlement says so. Page detection and card injection never start work.
       let jdCache: string | null = null;
       const getJd = (): string => (jdCache ??= extractJdText());
       let resumeGenStartedAt: number | null = null;
@@ -1400,6 +1835,18 @@ export default defineContentScript({
       });
       let handoffApplicationId: string | null = initialHandoffApplicationId ?? null;
       let handoffFormUrl: string | null = initialHandoffApplicationId ? window.location.href : null;
+      let dashboardFreeFillApplicationId: string | null = initialFreeFillApplicationId ?? null;
+      let handoffClaimSettled = Boolean(initialHandoffApplicationId || initialFreeFillApplicationId);
+      let resolveHandoffClaim: (() => void) | null = null;
+      const handoffClaimReady = handoffClaimSettled
+        ? Promise.resolve()
+        : new Promise<void>((resolve) => { resolveHandoffClaim = resolve; });
+      const settleHandoffClaim = (): void => {
+        if (handoffClaimSettled) return;
+        handoffClaimSettled = true;
+        resolveHandoffClaim?.();
+        resolveHandoffClaim = null;
+      };
 
       // Must stay longer than the background's WHOLE budget so its descriptive error surfaces
       // first; this is only the backstop for the worse case where the service worker is torn down
@@ -1413,17 +1860,25 @@ export default defineContentScript({
       // steps. So: the background's 150s budget + one final 60s fetch + slack.
       const RESUME_GEN_TIMEOUT_MS = 215000;
       const jobKey = `${company}\u0000${title}`;
-      const startResumeGen = (): Promise<ResumeGenResult> => {
+      const startResumeGen = (initiation: 'explicit' | 'hover' = 'explicit'): Promise<ResumeGenResult> => {
         const cacheKey = handoffApplicationId ? `application:${handoffApplicationId}` : jobKey;
         const cached = resumeGenByJob.get(cacheKey);
         if (cached) return cached; // reuse across steps of a multi-step application (no re-charge)
+        const operationId = resumeOperationIdByJob.get(cacheKey) ?? crypto.randomUUID();
+        resumeOperationIdByJob.set(cacheKey, operationId);
         resumeGenStartedAt = Date.now();
         const p = new Promise<ResumeGenResult>((resolve) => {
           let settled = false;
           const done = (r: ResumeGenResult) => {
             if (settled) return;
             settled = true;
-            if (r.error) resumeGenByJob.delete(jobKey); // never cache a failure; let a retry re-run
+            if (r.error) {
+              // Let a retry run, but retain its operation ID because the server may have committed
+              // before the response was lost.
+              resumeGenByJob.delete(cacheKey);
+            } else {
+              resumeOperationIdByJob.delete(cacheKey);
+            }
             resolve(r);
           };
           const timer = setTimeout(
@@ -1435,7 +1890,17 @@ export default defineContentScript({
             // for this exact posting; harmless everywhere else (it resolves to null).
             handoffApplicationId
               ? { type: 'GET_APPLICATION_HANDOFF_PACKET', applicationId: handoffApplicationId }
-              : { type: 'GENERATE_RESUME_AND_FILL_DATA', payload: { company, role: title, jd_text: getJd(), url: location.href } },
+              : {
+                type: 'GENERATE_RESUME_AND_FILL_DATA',
+                payload: {
+                  company,
+                  role: title,
+                  jd_text: getJd(),
+                  url: location.href,
+                  initiation,
+                  operation_id: operationId,
+                },
+              },
             (result: ResumeGenResult | undefined) => {
               clearTimeout(timer);
               // A dead service worker resolves the callback with lastError set (or with no
@@ -1457,7 +1922,284 @@ export default defineContentScript({
         resumeGenByJob.set(cacheKey, p);
         return p;
       };
-      card.addEventListener('mouseenter', () => void startResumeGen(), { once: true });
+
+      const getFillAccess = (): Promise<{
+        can_tailor?: boolean;
+        can_draft_answers?: boolean;
+        hover_generation?: boolean;
+        automatic_submission?: boolean;
+      }> => new Promise((resolve) => {
+        chrome.runtime.sendMessage({ type: 'GET_FILL_ACCESS' }, (response) => {
+          resolve(response ?? {
+            can_tailor: false,
+            can_draft_answers: false,
+            hover_generation: false,
+            automatic_submission: false,
+          });
+        });
+      });
+
+      let secondaryAction: 'dismiss' | 'fill_free' | 'plans' = 'dismiss';
+      let forceFreeFill = false;
+      let actionStarted = false;
+      const primaryControl = card.querySelector<HTMLButtonElement>('#wp-resume-yes');
+      const secondaryControl = card.querySelector<HTMLButtonElement>('#wp-resume-no');
+      const fillActionGate = handoffApplicationId ? null : createFillActionGate(getFillAccess);
+      let resolvedFillPresentation: FillActionPresentation | null = null;
+      const renderResolvedFillAction = (): void => {
+        if (!card.isConnected || actionStarted) return;
+        if (handoffApplicationId) {
+          if (primaryControl) {
+            primaryControl.textContent = 'Fill saved application';
+            primaryControl.disabled = false;
+            primaryControl.style.cursor = 'pointer';
+          }
+          return;
+        }
+        if (!handoffClaimSettled || !resolvedFillPresentation) return;
+        if (dashboardFreeFillApplicationId) {
+          secondaryAction = 'dismiss';
+          if (primaryControl) {
+            primaryControl.textContent = 'Fill application';
+            primaryControl.disabled = false;
+            primaryControl.style.cursor = 'pointer';
+          }
+          if (secondaryControl) secondaryControl.textContent = 'Not this time';
+          return;
+        }
+        secondaryAction = resolvedFillPresentation.secondaryAction;
+        if (primaryControl) {
+          primaryControl.textContent = resolvedFillPresentation.primaryLabel;
+          primaryControl.disabled = false;
+          primaryControl.style.cursor = 'pointer';
+        }
+        if (secondaryControl) secondaryControl.textContent = resolvedFillPresentation.secondaryLabel;
+      };
+      if (!handoffApplicationId) {
+        void fillActionGate!.ready().then((presentation) => {
+          resolvedFillPresentation = presentation;
+          renderResolvedFillAction();
+        });
+      } else renderResolvedFillAction();
+
+      card.addEventListener('mouseenter', () => {
+        void handoffClaimReady.then(() => {
+          if (dashboardFreeFillApplicationId) return;
+          void getFillAccess().then((access) => {
+            if (!dashboardFreeFillApplicationId && access.can_tailor === true && access.hover_generation === true) {
+              void startResumeGen('hover');
+            }
+          });
+        });
+      }, { once: true });
+
+      const runFreeFactualFill = async (
+        yesBtn: HTMLButtonElement | null,
+        noBtn: HTMLButtonElement | null,
+        showUpgrade = false,
+      ): Promise<void> => {
+        secondaryAction = 'dismiss';
+        if (noBtn) noBtn.disabled = true;
+        if (statusEl) {
+          statusEl.style.display = 'block';
+          statusEl.textContent = 'Loading your saved answers. No paid generation will run.';
+        }
+        const data = await new Promise<{
+          error?: string;
+          profile?: Profile;
+          applicationProfile?: ApplicationProfile;
+          application_id?: string | null;
+          selected_resume?: {
+            artifact_id: string | null;
+            file_name: string;
+            resume_url: string;
+          } | null;
+          resume_error?: string;
+          tracking_error?: string;
+          posting_compensation?: PostingCompensation | null;
+        }>((resolve) => {
+          chrome.runtime.sendMessage({
+            type: 'GET_FREE_FILL_DATA',
+            payload: {
+              ...(dashboardFreeFillApplicationId
+                ? { application_id: dashboardFreeFillApplicationId }
+                : {}),
+              company,
+              role: title,
+              portal_url: window.location.href,
+            },
+          }, (response) => resolve(response ?? { error: chrome.runtime.lastError?.message ?? 'Litos did not respond.' }));
+        });
+        if (!data.profile || !data.applicationProfile) {
+          if (statusEl) statusEl.textContent = `${asSentence(data.error) || 'Litos could not load your saved answers.'} Nothing was submitted.`;
+          if (yesBtn) {
+            yesBtn.disabled = false;
+            yesBtn.textContent = 'Retry';
+          }
+          if (noBtn) {
+            noBtn.disabled = false;
+            noBtn.textContent = 'Close';
+          }
+          return;
+        }
+
+        const profile = data.profile;
+        const applicationProfile: ApplicationProfile = {
+          ...data.applicationProfile,
+          school: data.applicationProfile.school ?? profile.school,
+          degree: data.applicationProfile.degree ?? profile.degree,
+          grad_date: data.applicationProfile.grad_date ?? profile.grad_date,
+          grad_year: data.applicationProfile.grad_year ?? profile.grad_year,
+          currently_enrolled: data.applicationProfile.currently_enrolled ?? profile.currently_enrolled,
+        };
+        const applicantEmail = profile.resume_email ?? profile.email;
+        const resumeBlob = data.selected_resume
+          ? (await fetchResumeBlob(data.selected_resume.resume_url)) ?? undefined
+          : undefined;
+        const resumeDownloadFailed = Boolean(data.resume_error || (data.selected_resume && !resumeBlob));
+        if (statusEl) {
+          statusEl.textContent = resumeBlob
+            ? 'Filling factual fields and attaching your saved resume.'
+            : 'Filling factual fields from your saved profile.';
+        }
+
+        let freeFillResult: AutofillResult;
+        try {
+          freeFillResult = await withInactivityTimeout((reportProgress, signal) => fill({
+            fullName: profile.full_name ?? '',
+            email: applicantEmail,
+            profile,
+            applicationProfile,
+            resumeBlob,
+            resumeFileName: data.selected_resume?.file_name,
+            eeo: (applicationProfile.eeo_prefs as Record<string, string> | undefined) ?? {},
+            postingCompensation: data.posting_compensation ?? null,
+            signal,
+            onProgress: (partial) => {
+              reportProgress();
+              if (statusEl) statusEl.textContent = `Filled ${partial.fields_filled} field${partial.fields_filled === 1 ? '' : 's'}.`;
+            },
+          }), 90_000);
+        } catch {
+          if (statusEl) statusEl.textContent = 'This form stopped responding. Some factual fields may be filled. Finish the rest yourself.';
+          if (yesBtn) yesBtn.style.display = 'none';
+          if (noBtn) {
+            noBtn.disabled = false;
+            noBtn.textContent = 'Close';
+          }
+          return;
+        }
+
+        if (resumeDownloadFailed) {
+          freeFillResult.skipped_reasons = mergeValidationReasons(
+            freeFillResult.skipped_reasons,
+            [resumeFetchSkipReason],
+          );
+        }
+        const resumeAttached = Boolean(resumeBlob)
+          && !freeFillResult.skipped_reasons.some((reason) => /^resume:/i.test(reason));
+        const resumeMissing = !resumeAttached;
+        // GET_FREE_FILL_DATA has already owner-resolved this canonical application. Arm the native
+        // final control before rendering completion or waiting on the separate fill-metadata write,
+        // so a fast applicant click is still observed while Tracker sync is in flight.
+        if (data.application_id) {
+          armFreeManualSubmissionOutcomeWhenAvailable(data.application_id, freeFillResult.ats_name);
+        }
+        renderFillSummary(statusEl, freeFillResult, { resumeMissing, autoSubmitHeld: true });
+        armValidationAuthority(statusEl, freeFillResult, resumeMissing);
+        armCaptchaStall(card, statusEl, { company, role: title, atsName: freeFillResult.ats_name });
+        const unansweredQuestions = selectNeedsYouReasons(freeFillResult.skipped_reasons)
+          .filter((reason) => !/resume|attach/i.test(reason)).length;
+        const trackerPayload: FreeFillTrackerPayload = {
+          application_id: data.application_id ?? null,
+          application_identity: { company, role: title, portal_url: window.location.href },
+          selected_resume_artifact_id: resumeAttached ? data.selected_resume?.artifact_id ?? null : null,
+          resume_attached: resumeAttached,
+          resume_source: resumeAttached
+            ? data.selected_resume?.artifact_id ? 'artifact' : 'base_resume'
+            : 'none',
+          unanswered_questions: unansweredQuestions,
+        };
+        chrome.runtime.sendMessage({
+          type: 'AUTOFILL_EVENT',
+          payload: {
+            ats_name: freeFillResult.ats_name,
+            job_context: { company, role: title },
+            fields_filled: freeFillResult.fields_filled,
+            fields_skipped: freeFillResult.fields_skipped,
+            auto_submitted: false,
+          },
+        });
+        const trackerSync = createFreeFillTrackerSync(trackerPayload);
+        const syncTracker = async (): Promise<void> => {
+          const result = await trackerSync.sync();
+          statusEl?.querySelector('#litos-tracker-sync-warning')?.remove();
+          if (result.application_id) {
+            data.application_id = result.application_id;
+            armFreeManualSubmissionOutcomeWhenAvailable(result.application_id, freeFillResult.ats_name);
+          }
+          if (result.ok) {
+            return;
+          }
+          if (statusEl) {
+            const warning = document.createElement('div');
+            warning.id = 'litos-tracker-sync-warning';
+            warning.setAttribute('role', 'alert');
+            warning.style.cssText = `margin-top:8px;padding-top:8px;border-top:1px solid ${COLOR.border};line-height:1.4;color:${COLOR.muted};`;
+            const message = document.createElement('div');
+            message.textContent = `Your form stays filled, but Tracker did not update: ${result.error}`;
+            const retryButton = document.createElement('button');
+            retryButton.type = 'button';
+            retryButton.textContent = 'Retry Tracker sync';
+            retryButton.style.cssText = `margin-top:6px;min-height:44px;background:none;border:0;padding:0;color:${COLOR.brand};font:500 12px ${FONT.sans};text-decoration:underline;text-underline-offset:3px;cursor:pointer;`;
+            retryButton.addEventListener('click', () => {
+              retryButton.disabled = true;
+              retryButton.textContent = 'Retrying...';
+              void syncTracker();
+            });
+            warning.append(message, retryButton);
+            statusEl.appendChild(warning);
+          }
+        };
+        await syncTracker();
+        if (showUpgrade && statusEl) {
+          const upgradeLine = document.createElement('div');
+          upgradeLine.style.cssText = `margin-top:8px;padding-top:8px;border-top:1px solid ${COLOR.border};line-height:1.4;`;
+          const explanation = document.createElement('div');
+          explanation.style.cssText = `font-size:11px;color:${COLOR.muted};`;
+          explanation.textContent = 'Your factual fields are filled. Litos+ adds a new tailored resume for this job.';
+          const upgradeButton = document.createElement('button');
+          upgradeButton.type = 'button';
+          upgradeButton.textContent = 'See Litos+';
+          upgradeButton.style.cssText = `margin-top:6px;min-height:44px;background:none;border:0;padding:0;color:${COLOR.brand};font:500 12px ${FONT.sans};text-decoration:underline;text-underline-offset:3px;cursor:pointer;`;
+          upgradeButton.addEventListener('click', () => {
+            upgradeButton.disabled = true;
+            upgradeButton.textContent = 'Opening Litos+...';
+            openLitosPlansFromPage('ai_resume_tailoring', {
+                ...(data.application_id ? { application_id: data.application_id } : {}),
+                company,
+                role: title,
+                portal_url: window.location.href,
+            }, (result) => {
+              if (result.ok) {
+                upgradeButton.textContent = 'Opened Litos+';
+                return;
+              }
+              upgradeButton.disabled = false;
+              upgradeButton.textContent = 'Try Litos+ again';
+              explanation.textContent = result.error ?? 'Litos+ options could not open.';
+            });
+          });
+          upgradeLine.append(explanation, upgradeButton);
+          statusEl.appendChild(upgradeLine);
+        }
+        if (yesBtn) yesBtn.style.display = 'none';
+        if (noBtn) {
+          noBtn.disabled = false;
+          noBtn.textContent = 'Close';
+        }
+        generationController.announce('Factual fields are filled. Review the items that still need you, then submit on this site.');
+      };
 
       // Tell the student when generation is waiting on model capacity rather than hung. Without
       // this the card sits on "Tailoring your resume..." for up to two minutes, which reads
@@ -1489,8 +2231,42 @@ export default defineContentScript({
         card.remove();
       };
       card.querySelector('#wp-resume-close')?.addEventListener('click', dismiss);
-      card.querySelector('#wp-resume-no')?.addEventListener('click', dismiss);
+      card.querySelector('#wp-resume-no')?.addEventListener('click', () => {
+        const secondaryButton = card.querySelector<HTMLButtonElement>('#wp-resume-no');
+        if (secondaryAction === 'fill_free') {
+          forceFreeFill = true;
+          card.querySelector<HTMLButtonElement>('#wp-resume-yes')?.click();
+          return;
+        }
+        if (secondaryAction === 'plans') {
+          if (secondaryButton) {
+            secondaryButton.disabled = true;
+            secondaryButton.textContent = 'Opening Litos+...';
+          }
+          openLitosPlansFromPage('ai_resume_tailoring', {
+            company,
+            role: title,
+            portal_url: window.location.href,
+          }, (result) => {
+            if (result.ok) {
+              dismiss();
+              return;
+            }
+            if (secondaryButton) {
+              secondaryButton.disabled = false;
+              secondaryButton.textContent = 'Try Litos+';
+            }
+            if (statusEl) {
+              statusEl.style.display = 'block';
+              statusEl.textContent = result.error ?? 'Litos+ options could not open.';
+            }
+          });
+          return;
+        }
+        dismiss();
+      });
       card.querySelector('#wp-resume-yes')?.addEventListener('click', async () => {
+        actionStarted = true;
         const yesBtn = card.querySelector<HTMLButtonElement>('#wp-resume-yes');
         const noBtn = card.querySelector<HTMLButtonElement>('#wp-resume-no');
         if (yesBtn) yesBtn.disabled = true;
@@ -1507,7 +2283,21 @@ export default defineContentScript({
           generationController.tick((Date.now() - startedAt) / 1000);
         }, 1000);
 
-        const result = await startResumeGen();
+        const fillRoute = fillActionGate
+          ? await fillActionGate.resolvePrimary(forceFreeFill || Boolean(dashboardFreeFillApplicationId))
+          : { action: 'tailor' as const, showUpgrade: false };
+        forceFreeFill = false;
+        if (!handoffApplicationId && fillRoute.action === 'free') {
+          clearInterval(progressTimer);
+          generationController.finish();
+          stopOrb?.();
+          stopOrb = null;
+          if (orbCanvas) orbCanvas.style.display = 'none';
+          await runFreeFactualFill(yesBtn, noBtn, fillRoute.showUpgrade);
+          return;
+        }
+
+        const result = await startResumeGen('explicit');
         clearInterval(progressTimer);
         generationController.finish();
         stopOrb?.();
@@ -1522,6 +2312,10 @@ export default defineContentScript({
         // signal: every dismiss path ends in card.remove(). The generation result itself stays
         // cached per job, so nothing paid for is thrown away; re-opening the card reuses it.
         if (!card.isConnected) return;
+        if (!handoffApplicationId && result?.api_error?.status === 402) {
+          await runFreeFactualFill(yesBtn, noBtn, true);
+          return;
+        }
         if (!result || result.error || !result.profile || !result.applicationProfile || !result.resume) {
           if (statusEl) statusEl.textContent = `${asSentence(result?.error) || 'We could not build a resume.'} Nothing was attached or submitted.`;
           generationController.announce('The resume did not build. Try again.');
@@ -1634,6 +2428,10 @@ export default defineContentScript({
         // labels recorded by this fill.
         drainR030CandidateLabels();
         const draftedQuestions: Array<{ id: string; question: string; answer: string; kind: 'essay'; required: boolean }> = [];
+        // Reuse an operation id when the same question is retried during this application fill.
+        // The backend also meters trial answers by canonical application id, so multiple essay
+        // fields in one application consume one application allowance, not one unit per field.
+        const answerOperationIdByQuestion = new Map<string, string>();
         const fillApplicationProfile: ApplicationProfile = {
           ...applicationProfile,
           school: applicationProfile.school ?? profile.school,
@@ -1686,8 +2484,21 @@ export default defineContentScript({
                   };
                   const onAbort = () => finish(null);
                   signal.addEventListener('abort', onAbort, { once: true });
+                  const operationKey = question.trim().replace(/\s+/g, ' ').toLowerCase();
+                  const operationId = answerOperationIdByQuestion.get(operationKey) ?? crypto.randomUUID();
+                  answerOperationIdByQuestion.set(operationKey, operationId);
                   chrome.runtime.sendMessage(
-                    { type: 'ANSWER_QUESTION', payload: { company, role: title, jd_text: getJd(), question } },
+                    {
+                      type: 'ANSWER_QUESTION',
+                      payload: {
+                        company,
+                        role: title,
+                        jd_text: getJd(),
+                        question,
+                        application_id: resume.canonical_application_id,
+                        operation_id: operationId,
+                      },
+                    },
                     (r: { answer?: string | null } | undefined) =>
                       finish(signal.aborted ? null : (r?.answer ?? null)),
                   );
@@ -2132,26 +2943,37 @@ export default defineContentScript({
         }
       });
 
-      /* The attended handoff: "Finish this one" on the Litos dashboard.
+      /* The attended handoff from the Litos dashboard.
        *
        * The dashboard tells the background which portal URLs the applicant is about to be sent to,
-       * and the background hands out each arming exactly once. Landing here on an armed URL means
-       * the applicant has ALREADY said "finish this application" on Litos's own surface, seconds
-       * ago, so asking again is not consent, it is a second obstacle in front of the one thing they
-       * came to do.
+       * and the background hands out each arming exactly once. A packet handoff keeps its existing
+       * attended behavior. A dashboard Free fill is different: it names the saved application but
+       * still waits for an explicit click on the employer page and never enters packet generation.
        *
        * This deliberately clicks the real button rather than calling the fill directly: the entire
        * consent, resume-quality, review and never-auto-submit path lives behind that handler, and a
        * second entrance into it is a second thing to keep in step. Nothing here submits anything;
        * auto-submit remains behind its own separate opt-in.
        */
-      if (!initialHandoffApplicationId) chrome.runtime.sendMessage(
+      if (!initialHandoffApplicationId && !initialFreeFillApplicationId) chrome.runtime.sendMessage(
         { type: 'CLAIM_HANDOFF', url: window.location.href },
-        (response: { armed?: boolean; applicationId?: string } | undefined) => {
-          if (chrome.runtime.lastError || !response?.armed) return;
-          if (response.applicationId) handoffApplicationId = response.applicationId;
-          if (response.applicationId) handoffFormUrl = window.location.href;
+        (response: { armed?: boolean; applicationId?: string; mode?: 'packet' | 'free_fill' } | undefined) => {
+          settleHandoffClaim();
+          if (chrome.runtime.lastError || !response?.armed) {
+            renderResolvedFillAction();
+            return;
+          }
+          if (response.mode === 'free_fill') {
+            dashboardFreeFillApplicationId = response.applicationId ?? null;
+            renderResolvedFillAction();
+            return;
+          }
+          if (response.applicationId) {
+            handoffApplicationId = response.applicationId;
+            handoffFormUrl = window.location.href;
+          }
           if (!card.isConnected) return;
+          renderResolvedFillAction();
           const yesBtn = card.querySelector<HTMLButtonElement>('#wp-resume-yes');
           if (!yesBtn || yesBtn.disabled) return;
           const heading = card.querySelector<HTMLElement>('#wp-resume-heading');
@@ -2159,7 +2981,7 @@ export default defineContentScript({
           yesBtn.click();
         },
       );
-      else {
+      else if (initialHandoffApplicationId) {
         const yesBtn = card.querySelector<HTMLButtonElement>('#wp-resume-yes');
         const heading = card.querySelector<HTMLElement>('#wp-resume-heading');
         if (heading) heading.textContent = 'Finishing this application';
@@ -2862,7 +3684,13 @@ export default defineContentScript({
       preparedGatedStages.add(preparationKey);
       chrome.runtime.sendMessage(
         { type: 'PREPARE_GATED_ATTENDED_HANDOFF' },
-        (response: { ok?: boolean; email?: string; handoffVersion?: string; error?: string } | undefined) => {
+        (response: {
+          ok?: boolean;
+          mode?: 'packet' | 'free_fill';
+          email?: string;
+          handoffVersion?: string;
+          error?: string;
+        } | undefined) => {
           if (chrome.runtime.lastError || !response?.ok) {
             preparedGatedStages.delete(preparationKey);
             const note = document.getElementById('litos-gated-note');
@@ -2871,6 +3699,9 @@ export default defineContentScript({
             return;
           }
           gatedStageRetryCounts.delete(preparationKey);
+          // A dashboard Free fill never needs an immutable packet or a frozen account email.
+          // Leave the one-shot arm untouched until the actual employer application form appears.
+          if (response.mode === 'free_fill') return;
           if (stage.family === 'icims' && stage.stage === 'security_code') {
             const guarded = guardTrustedSecurityCodeIntent({
               onTrustedSubmit: () => chrome.runtime.sendMessage({
@@ -2919,7 +3750,51 @@ export default defineContentScript({
       initializedGatedApplications.add(stage.identity);
       chrome.runtime.sendMessage(
         { type: 'PREPARE_GATED_ATTENDED_HANDOFF' },
-        (prepared: { ok?: boolean; applicationId?: string; handoffVersion?: string; email?: string; error?: string } | undefined) => {
+        (prepared: {
+          ok?: boolean;
+          mode?: 'packet' | 'free_fill';
+          applicationId?: string;
+          handoffVersion?: string;
+          email?: string;
+          error?: string;
+        } | undefined) => {
+          if (prepared?.ok && prepared.mode === 'free_fill' && prepared.applicationId) {
+            chrome.runtime.sendMessage(
+              { type: 'CLAIM_HANDOFF', url: window.location.href },
+              (claimed: {
+                armed?: boolean;
+                mode?: 'packet' | 'free_fill';
+                applicationId?: string;
+              } | undefined) => {
+                if (
+                  chrome.runtime.lastError
+                  || !claimed?.armed
+                  || claimed.mode !== 'free_fill'
+                  || claimed.applicationId !== prepared.applicationId
+                ) {
+                  initializedGatedApplications.delete(stage.identity);
+                  injectGatedPortalNotice('The saved Free fill request no longer matches this company form. Return to your Litos Tracker and try again.');
+                  return;
+                }
+                gatedStageRetryCounts.delete(`${stage.identity}:${stage.stage}`);
+                const job = getJobDetails() ?? getGenericJobDetails();
+                document.getElementById('litos-gated-note')?.remove();
+                startHarvest();
+                injectActionCard(job.title, job.company, window.location.href);
+                watchSubmitButton(job.title, job.company, window.location.href);
+                injectResumeFillCard(
+                  job.title,
+                  job.company,
+                  extractAtsJdText,
+                  fillAtsApplication,
+                  undefined,
+                  undefined,
+                  claimed.applicationId,
+                );
+              },
+            );
+            return;
+          }
           if (
             chrome.runtime.lastError
             || !prepared?.ok

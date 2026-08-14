@@ -11,6 +11,8 @@ import DraftEditor from './src/components/DraftEditor';
 import TrackingDashboard from './src/components/TrackingDashboard';
 import AutofillSetupScreen from './src/components/AutofillSetupScreen';
 import BrandMark from './src/components/BrandMark';
+import PlansScreen from './src/components/PlansScreen';
+import type { EntitlementSnapshotV2 } from './src/lib/entitlements';
 
 const TOKEN = 'preview-token';
 
@@ -71,6 +73,60 @@ const profile: Profile = {
    an internship title here made the only real screenshots of the product on
    the marketing site say Litos is an internship tool. */
 const job: JobContext = { company: 'Figma', role: 'Software Engineer', url: 'https://linkedin.com/jobs/view/123' };
+
+const trialSnapshot: EntitlementSnapshotV2 = {
+  schema_version: 2,
+  policy_version: 'litos-entitlements-v2',
+  account_id: 'preview-account',
+  revision: 'preview-1',
+  evaluated_at: new Date().toISOString(),
+  access_class: 'trial_plus',
+  product: 'litos_plus',
+  term: null,
+  features: {
+    application_fill: true,
+    application_tracking: true,
+    job_discovery: true,
+    base_resume_use: true,
+    saved_profile_use: true,
+    saved_answer_use: true,
+    document_management: true,
+    application_review: true,
+    manual_submission_controls: true,
+    account_data_controls: true,
+    ai_resume_tailoring: true,
+    ai_resume_feedback: true,
+    ai_cover_letter_generation: true,
+    ai_application_answer_generation: true,
+    saved_generated_versions: true,
+    contact_discovery: true,
+    outreach_email_generation: true,
+    networking_discovery: true,
+    referral_paths: true,
+    connected_companies: true,
+    advanced_job_insights: true,
+    recruiter_visibility: true,
+    hover_generation: false,
+    automatic_submission: true,
+  },
+  trial: {
+    meter_policy: 'litos_plus_v2_lifetime',
+    starts_at: new Date().toISOString(),
+    ends_at: new Date(Date.now() + 5 * 24 * 60 * 60 * 1_000).toISOString(),
+    active: true,
+    tailored_resumes_used: 1,
+    tailored_resumes_limit: 5,
+    cover_letters_used: 1,
+    cover_letters_limit: 5,
+    answer_applications_used: 2,
+    answer_applications_limit: 5,
+    outreach_companies_used: 2,
+    outreach_companies_limit: 5,
+    company_usage: [],
+  },
+  legacy_limits: null,
+  subscription: null,
+};
 
 const contacts: Contact[] = [
   { id: 'c2', full_name: 'Marcus Lee', title: 'Software Engineer', persona: 'alumni', company_domain: 'figma.com', school_match: true, email: 'marcus.lee@figma.com', tier: 'green', status: 'verified' },
@@ -135,6 +191,7 @@ const storeScreens = {
         onContactsFound={noop}
         onViewTracking={noop}
         onViewAutofillSetup={noop}
+        entitlements={trialSnapshot}
         userSchool={profile.school}
       />
     ),
@@ -144,6 +201,12 @@ const storeScreens = {
     title: 'Find people worth contacting, without the noise.',
     body: 'Litos prioritizes likely replies and keeps the details you need in one compact, reviewable list.',
     screen: <ContactList contacts={contacts} job={job} loading={false} onDraft={noop} onBack={noop} />,
+  },
+  plans: {
+    eyebrow: 'ONE FEATURE SET',
+    title: 'Choose the term that fits your search.',
+    body: 'Application filling stays free. Litos+ adds unlimited tailored work, outreach, insights, and opt-in automatic submission.',
+    screen: <PlansScreen snapshot={trialSnapshot} onBack={noop} onContinue={noop} onManageBilling={noop} />,
   },
 } as const;
 
@@ -167,11 +230,13 @@ const shotScreens = {
       onContactsFound={noop}
       onViewTracking={noop}
       onViewAutofillSetup={noop}
+      entitlements={trialSnapshot}
       userSchool={profile.school}
     />
   ),
   contacts: <ContactList contacts={contacts} job={job} loading={false} onDraft={noop} onBack={noop} />,
   draft: <DraftEditor contact={contacts[0]} job={job} token={TOKEN} profile={profile} onBack={noop} onDraftAnother={noop} />,
+  plans: <PlansScreen snapshot={trialSnapshot} onBack={noop} onContinue={noop} onManageBilling={noop} />,
 } as const;
 
 /* The popup's real dimensions. MainScreen and friends are laid out for this
@@ -268,6 +333,7 @@ function Preview() {
           onContactsFound={noop}
           onViewTracking={noop}
           onViewAutofillSetup={noop}
+          entitlements={trialSnapshot}
           userSchool={profile.school}
         />
       </Frame>
@@ -289,7 +355,11 @@ function Preview() {
       </Frame>
 
       <Frame label="7 · Autofill setup (v2, seeded from resume)">
-        <AutofillSetupScreen token={TOKEN} profile={profile} onBack={noop} onLogout={noop} />
+        <AutofillSetupScreen token={TOKEN} profile={profile} entitlements={trialSnapshot} onBack={noop} onLogout={noop} />
+      </Frame>
+
+      <Frame label="8 · Litos+ plans">
+        <PlansScreen snapshot={trialSnapshot} onBack={noop} onContinue={noop} onManageBilling={noop} />
       </Frame>
     </div>
   );

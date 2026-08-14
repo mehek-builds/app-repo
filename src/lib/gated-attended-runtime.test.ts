@@ -34,8 +34,8 @@ describe('Jobvite and iCIMS attended runtime wiring', () => {
     expect(initialize).toMatch(/PREPARE_GATED_ATTENDED_HANDOFF[\s\S]*?CLAIM_GATED_ATTENDED_CONTINUATION/);
     expect(initialize).toMatch(/claimed\.handoffVersion !== prepared\.handoffVersion/);
     expect(initialize).toMatch(/injectResumeFillCard\([\s\S]*?claimed\.applicationId/);
-    const initialActivation = content.slice(content.indexOf('if (!initialHandoffApplicationId) chrome.runtime.sendMessage'));
-    expect(initialActivation).toMatch(/else \{[\s\S]*?yesBtn\.click\(\)/);
+    const initialActivation = content.slice(content.indexOf('if (!initialHandoffApplicationId && !initialFreeFillApplicationId)'));
+    expect(initialActivation).toMatch(/else if \(initialHandoffApplicationId\) \{[\s\S]*?yesBtn\.click\(\)/);
     expect(background).toMatch(/validGatedAccountNavigationProof\([\s\S]*?continuation\.accountLoginProofAt/);
     expect(gated).toMatch(/event\.isTrusted/);
     expect(content).toMatch(/PROVE_GATED_ATTENDED_ACCOUNT/);

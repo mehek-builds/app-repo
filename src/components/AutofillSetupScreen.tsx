@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { getExperienceBank, putExperienceBank, getApplicationProfile, putApplicationProfile, getAutomationSettings, putAutomationSettings, type StandingConsentEligibility } from '../lib/api';
 import { setAutoSubmitEnabled } from '../lib/storage';
+import { featureEnabled, type EntitlementSnapshotV2 } from '../lib/entitlements';
 import type { ExperienceBankEntry, ApplicationProfile, Profile } from '../lib/types';
 import { parseStoredDate, formatDate } from '../lib/adapters/shared/dates';
 import WarningBanner from './WarningBanner';
@@ -44,6 +45,9 @@ type Step = 'loading' | 'experience' | 'checks' | 'required' | 'links' | 'saving
 interface AutofillSetupScreenProps {
   token: string;
   profile: Profile;
+  entitlements?: EntitlementSnapshotV2 | null;
+  focusAutomaticSubmission?: boolean;
+  onViewPlans?: () => void;
   onBack: () => void;
   onLogout: () => void;
 }
@@ -124,7 +128,7 @@ export function seedExperienceBank(profile: Profile): ExperienceBankEntry[] {
   return [...jobs, ...projects];
 }
 
-export default function AutofillSetupScreen({ token, profile, onBack, onLogout }: AutofillSetupScreenProps) {
+export default function AutofillSetupScreen({ token, profile, entitlements = null, focusAutomaticSubmission = false, onViewPlans = () => {}, onBack, onLogout }: AutofillSetupScreenProps) {
   const [step, setStep] = useState<Step>('loading');
   const [error, setError] = useState<string | null>(null);
   // Two taps, in our own UI, instead of a native OS dialog inside a 380px popup.
@@ -146,6 +150,13 @@ export default function AutofillSetupScreen({ token, profile, onBack, onLogout }
      whether unattended submission has been earned; this only explains the
      state so the toggle is not an unexplained dead control. */
   const [consentEligibility, setConsentEligibility] = useState<StandingConsentEligibility | null>(null);
+  const automaticSubmissionEntitled = featureEnabled(entitlements, 'automatic_submission');
+
+  useEffect(() => {
+    if (!entitlements || automaticSubmissionEntitled || !autoSubmit) return;
+    setAutoSubmit(false);
+    void setAutoSubmitEnabled(false);
+  }, [automaticSubmissionEntitled, autoSubmit, entitlements]);
 
   useEffect(() => {
     (async () => {
@@ -178,10 +189,18 @@ export default function AutofillSetupScreen({ token, profile, onBack, onLogout }
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Could not load your setup data.');
       } finally {
-        setStep('experience');
+        setStep(focusAutomaticSubmission ? 'links' : 'experience');
       }
     })();
-  }, [token, profile]);
+  }, [token, profile, focusAutomaticSubmission]);
+
+  useEffect(() => {
+    if (!focusAutomaticSubmission || step !== 'links') return;
+    const frame = window.requestAnimationFrame(() => {
+      document.querySelector<HTMLElement>('#litos-automatic-submission-control')?.focus();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [focusAutomaticSubmission, step]);
 
   const updateEntry = (idx: number, patch: Partial<ExperienceBankEntry>) => {
     setBank((prev) => prev.map((e, i) => (i === idx ? { ...e, ...patch } : e)));
@@ -222,12 +241,15 @@ export default function AutofillSetupScreen({ token, profile, onBack, onLogout }
     // the application profile, so a refused toggle threw, reported "Could not save your setup", and
     // bounced the student back to a form whose contents had in fact already been written. They
     // would have saved it a second time to fix a problem that did not exist.
+    const automaticSubmissionRequested = entitlements
+      ? automaticSubmissionEntitled && autoSubmit
+      : autoSubmit;
     try {
       await putAutomationSettings(token, {
-        automatic_submission_enabled: autoSubmit,
+        automatic_submission_enabled: automaticSubmissionRequested,
         automatic_verification_enabled: automaticVerification,
       });
-      await setAutoSubmitEnabled(autoSubmit);
+      await setAutoSubmitEnabled(automaticSubmissionRequested);
     } catch (err) {
       // Keep the LOCAL switch in step with what the server actually holds. Otherwise the extension
       // counts down and clicks submit on a permission the backend never granted, which is the exact
@@ -639,6 +661,7 @@ export default function AutofillSetupScreen({ token, profile, onBack, onLogout }
                   </p>
                 </div>
                 <button
+                  id="litos-automatic-submission-control"
                   type="button"
                   role="switch"
                   aria-checked={autoSubmit}
@@ -646,7 +669,7 @@ export default function AutofillSetupScreen({ token, profile, onBack, onLogout }
                   // Locked until earned, mirroring the dashboard, and NEVER locked while it is on
                   // so the student can always turn it back off from here. Without this the toggle
                   // flipped freely and the save then 403d, which is a worse way to learn the rule.
-                  disabled={!automationSettingsLoaded || (!autoSubmit && consentEligibility?.eligible === false)}
+                  disabled={!automationSettingsLoaded || (!autoSubmit && (!automaticSubmissionEntitled || consentEligibility?.eligible === false))}
                   onClick={() => setAutoSubmit((v) => !v)}
                   className="relative flex h-11 w-12 flex-shrink-0 items-center rounded-full disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2"
                 >
@@ -663,6 +686,14 @@ export default function AutofillSetupScreen({ token, profile, onBack, onLogout }
                   </span>
                 </button>
               </div>
+              {!automaticSubmissionEntitled && entitlements && (
+                <div className="mt-2 flex items-center justify-between gap-3 rounded-inner bg-brand-50 px-3 py-2">
+                  <p className="text-xs leading-5 text-gray-700">Automatic submission is included in the Litos+ trial and paid plans. You can keep filling and submit each form yourself on Free.</p>
+                  <button type="button" onClick={onViewPlans} className="min-h-11 flex-shrink-0 text-xs font-medium text-brand-800 underline-offset-4 hover:underline">
+                    See Litos+
+                  </button>
+                </div>
+              )}
             </div>
 
             <div className="border-b border-gray-200 py-3">
@@ -674,7 +705,7 @@ export default function AutofillSetupScreen({ token, profile, onBack, onLogout }
               </div>
             </div>
 
-            {consentEligibility && !consentEligibility.eligible && !autoSubmit && (
+            {automaticSubmissionEntitled && consentEligibility && !consentEligibility.eligible && !autoSubmit && (
               <p className="-mt-2 text-xs leading-5 text-amber-700">
                 Sending without asking is available after you have approved{' '}
                 {consentEligibility.required} applications yourself. {consentEligibility.remaining} to
@@ -733,7 +764,7 @@ export default function AutofillSetupScreen({ token, profile, onBack, onLogout }
               </p>
               <p className="mt-2 text-sm leading-6 text-gray-600">
                 Next application, Litos will tailor a resume and fill the form for you
-                {autoSubmit ? ', then send it after a countdown you can cancel.' : '.'}
+                {automaticSubmissionEntitled && autoSubmit ? ', then send it after a countdown you can cancel.' : '.'}
               </p>
             </div>
             <button

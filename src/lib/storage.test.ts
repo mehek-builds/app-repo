@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { EntitlementSnapshotV2 } from './entitlements';
 
 const values: Record<string, unknown> = {};
 const sessionValues: Record<string, unknown> = {};
@@ -48,7 +49,9 @@ Object.defineProperty(globalThis, 'chrome', {
 
 const storage = await import('./storage');
 const packetIdentity = await import('./packet-applicant-identity');
+const entitlements = await import('./entitlements');
 const { requestBackgroundSessionClear } = await import('./popup-session');
+const { createSessionClearMessageHandler } = await import('./session-clear');
 
 describe('extension auth storage', () => {
   beforeEach(() => {
@@ -95,10 +98,15 @@ describe('extension auth storage', () => {
     sessionValues.litos_armed_handoffs = [{ applicationId: 'app-a' }];
     sessionValues.litos_extension_handoff_packet_bindings = { 'app-a': {} };
     sessionValues.litos_application_tabs = { 'app-a': 4 };
+    sessionValues.pendingDrafts = [{ contact: { full_name: 'Prior account contact' } }];
     sessionValues.lastDetectedJob = { title: 'Old owner job' };
     sessionValues.unrelated = true;
+    values.litos_posthog_event_queue = [{ distinctId: 'prior-account' }];
+    values.captcha_stalls = [{ company: 'Prior account company' }];
     await storage.clearAll();
     expect(sessionValues).toEqual({ unrelated: true });
+    expect(values).not.toHaveProperty('litos_posthog_event_queue');
+    expect(values).not.toHaveProperty('captcha_stalls');
   });
 
   it('routes popup logout through one background-owned clear and fails closed without confirmation', async () => {
@@ -116,6 +124,51 @@ describe('extension auth storage', () => {
     await expect(requestBackgroundSessionClear(((_message: unknown, callback: (response: { ok: boolean; error: string }) => void) => {
       callback({ ok: false, error: 'background cleanup failed' });
     }) as typeof chrome.runtime.sendMessage)).rejects.toThrow('background cleanup failed');
+  });
+
+  it('handles popup logout internally and cannot reuse the prior account entitlement cache', async () => {
+    await storage.setToken('owner-token');
+    await storage.setProfile({ email: 'owner@example.com' } as never);
+    await entitlements.cacheEntitlements({
+      schema_version: 2,
+      policy_version: 'litos-entitlements-v2',
+      account_id: 'owner-account',
+      revision: 'paid-1',
+      evaluated_at: '2026-08-14T00:00:00.000Z',
+      access_class: 'plus_paid',
+      product: 'litos_plus',
+      term: 'month',
+      features: {
+        application_fill: true,
+        hover_generation: true,
+        automatic_submission: true,
+      } as EntitlementSnapshotV2['features'],
+      trial: null,
+      legacy_limits: null,
+      subscription: null,
+    });
+    sessionValues.litos_pending_checkout = { plan_id: 'litos_plus_month' };
+
+    const handleClear = createSessionClearMessageHandler(async () => {
+      await Promise.all([
+        storage.clearAll(),
+        chrome.storage.session.remove('litos_pending_checkout'),
+      ]);
+    });
+    await requestBackgroundSessionClear(((message: unknown, callback: (response: { ok: boolean }) => void) => {
+      expect(handleClear(message, callback)).toBe(true);
+    }) as typeof chrome.runtime.sendMessage);
+
+    expect(await storage.getToken()).toBeNull();
+    expect(await entitlements.readCachedEntitlements()).toBeNull();
+    expect(sessionValues).not.toHaveProperty('litos_pending_checkout');
+
+    const clearingEpoch = storage.currentAuthEpoch();
+    expect(storage.authEpochIsCurrent(clearingEpoch)).toBe(false);
+    storage.completeAuthSessionClear();
+    expect(storage.currentAuthEpoch()).toBeGreaterThan(clearingEpoch);
+    expect(storage.authEpochIsCurrent(storage.currentAuthEpoch())).toBe(true);
+    expect(await entitlements.readCachedEntitlements()).toBeNull();
   });
 
   it('removes a packet write that finishes after logout invalidates its auth epoch', async () => {
