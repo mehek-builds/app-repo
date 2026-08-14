@@ -49,4 +49,3 @@ export function pricingUrl(planId: LitosPlusPlanId, trigger: string): string {
   url.searchParams.set('trigger', trigger);
   return url.toString();
 }
-

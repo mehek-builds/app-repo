@@ -20,4 +20,3 @@ describe('Litos+ pricing contract', () => {
     expect(url.searchParams.get('trigger')).toBe('automatic_submission');
   });
 });
-
