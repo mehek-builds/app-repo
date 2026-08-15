@@ -1,35 +1,85 @@
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import {
+  contentScriptMatches,
+  EXPECTED_EXTERNAL_MATCHES,
+  EXPECTED_MANIFEST_DESCRIPTION,
+  EXPECTED_MANIFEST_NAME,
+  EXPECTED_PERMISSIONS,
+  sameOrderedValues,
+} from './manifest-contract.mjs';
 
-const packageMetadata = JSON.parse(readFileSync('package.json', 'utf8'));
-const manifest = JSON.parse(readFileSync('.output/chrome-mv3/manifest.json', 'utf8'));
-const matches = (manifest.content_scripts ?? []).flatMap((entry) => entry.matches ?? []);
-const externalMatches = manifest.externally_connectable?.matches ?? [];
+export function verifyBuiltManifest({
+  packagePath = 'package.json',
+  manifestPath = '.output/chrome-mv3/manifest.json',
+  contentPath = 'src/entrypoints/content.ts',
+} = {}) {
+  const packageMetadata = JSON.parse(readFileSync(packagePath, 'utf8'));
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  const expectedMatches = contentScriptMatches(
+    readFileSync(contentPath, 'utf8'),
+    contentPath,
+  );
+  const contentScripts = manifest.content_scripts ?? [];
+  const contentScript = contentScripts[0];
+  const matches = (contentScript?.matches ?? []).slice().sort();
+  const externalMatches = manifest.externally_connectable?.matches ?? [];
 
-if (manifest.version !== packageMetadata.version) {
-  console.error(`Built manifest version ${manifest.version ?? 'missing'} does not match package ${packageMetadata.version}.`);
-  process.exit(1);
+  if (manifest.manifest_version !== 3) {
+    throw new Error(`Built manifest has unexpected manifest_version ${manifest.manifest_version ?? 'missing'}.`);
+  }
+  if (manifest.name !== EXPECTED_MANIFEST_NAME) {
+    throw new Error(`Built manifest has unexpected name ${JSON.stringify(manifest.name)}.`);
+  }
+  if (manifest.description !== EXPECTED_MANIFEST_DESCRIPTION) {
+    throw new Error(`Built manifest has unexpected description ${JSON.stringify(manifest.description)}.`);
+  }
+  if (manifest.version !== packageMetadata.version) {
+    throw new Error(
+      `Built manifest version ${manifest.version ?? 'missing'} does not match package ${packageMetadata.version}.`,
+    );
+  }
+  if (contentScripts.length !== 1) {
+    throw new Error(`Built manifest has ${contentScripts.length} content scripts instead of exactly one.`);
+  }
+  if (!sameOrderedValues(matches, expectedMatches)) {
+    throw new Error('Built manifest content-script matches differ from the exact source allowlist.');
+  }
+  if (contentScript.all_frames !== true || contentScript.run_at !== 'document_idle') {
+    throw new Error('Built manifest has unexpected content-script execution settings.');
+  }
+  if (!sameOrderedValues(contentScript.js ?? [], ['content-scripts/content.js'])) {
+    throw new Error(`Built manifest has unexpected content-script files: ${JSON.stringify(contentScript.js ?? [])}.`);
+  }
+  if (!sameOrderedValues(manifest.permissions ?? [], EXPECTED_PERMISSIONS)) {
+    throw new Error(`Built manifest has unexpected permissions: ${JSON.stringify(manifest.permissions ?? [])}.`);
+  }
+  if (!sameOrderedValues(manifest.host_permissions ?? [], [])) {
+    throw new Error(`Built manifest has unexpected host_permissions: ${JSON.stringify(manifest.host_permissions ?? [])}.`);
+  }
+  if (!sameOrderedValues(externalMatches, EXPECTED_EXTERNAL_MATCHES)) {
+    throw new Error(
+      `Built manifest has unexpected externally_connectable matches: ${JSON.stringify(externalMatches)}.`,
+    );
+  }
+  if (manifest.background?.service_worker !== 'background.js') {
+    throw new Error('Built manifest has unexpected background service worker settings.');
+  }
+  if (manifest.action?.default_popup !== 'popup.html') {
+    throw new Error(`Built manifest has unexpected action popup ${JSON.stringify(manifest.action?.default_popup)}.`);
+  }
+
+  return { version: manifest.version, matches: matches.length };
 }
 
-const requiredAtsMatches = [
-  'https://jobs.smartrecruiters.com/*',
-  'https://jobs.jobvite.com/*/job/*',
-  'https://*.icims.com/jobs/*',
-  'https://*.bamboohr.com/careers/*',
-];
-for (const required of requiredAtsMatches) {
-  if (!matches.includes(required)) {
-    console.error(`Built manifest does not include required ATS match ${required}.`);
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  try {
+    const result = verifyBuiltManifest();
+    console.log(
+      `Built Chrome manifest ${result.version} matches the exact production contract across ${result.matches} sites.`,
+    );
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);
   }
 }
-
-const expectedExternalMatches = [
-  'https://trylitos.com/*',
-  'https://www.trylitos.com/*',
-];
-if (JSON.stringify(externalMatches) !== JSON.stringify(expectedExternalMatches)) {
-  console.error(`Built manifest has unexpected externally_connectable matches: ${JSON.stringify(externalMatches)}.`);
-  process.exit(1);
-}
-
-console.log(`Built Chrome manifest ${manifest.version} includes the required ATS matches and production-only website origins.`);

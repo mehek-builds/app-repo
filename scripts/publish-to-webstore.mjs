@@ -35,10 +35,33 @@
  * After that this script publishes every future release in one command.
  */
 import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+import { verifyBuiltManifest } from './verify-built-manifest.mjs';
+import { verifyReleaseZip } from './verify-release-zip.mjs';
 
 const ITEM_ID = 'bdbedbmkjpfioknfpmhookefabipjaad';
-const { CWS_CLIENT_ID, CWS_CLIENT_SECRET, CWS_REFRESH_TOKEN } = process.env;
+const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url)));
+const zipPath = new URL(`../.output/litos-extension-${pkg.version}-chrome.zip`, import.meta.url);
+let release;
+try {
+  verifyBuiltManifest();
+  release = verifyReleaseZip(fileURLToPath(zipPath));
+} catch (error) {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exit(1);
+}
+
+const { CWS_CLIENT_ID, CWS_CLIENT_SECRET, CWS_REFRESH_TOKEN, CWS_EXPECTED_ZIP_SHA256 } = process.env;
 const SUBMIT = process.argv.includes('--submit');
+
+if (!/^[a-f0-9]{64}$/i.test(CWS_EXPECTED_ZIP_SHA256 ?? '')) {
+  console.error('Set CWS_EXPECTED_ZIP_SHA256 to the reviewed release ZIP hash before upload.');
+  process.exit(1);
+}
+if (CWS_EXPECTED_ZIP_SHA256.toLowerCase() !== release.sha256) {
+  console.error('CWS_EXPECTED_ZIP_SHA256 does not match the verified release ZIP.');
+  process.exit(1);
+}
 
 if (!CWS_CLIENT_ID || !CWS_CLIENT_SECRET || !CWS_REFRESH_TOKEN) {
   console.error('Missing CWS_CLIENT_ID / CWS_CLIENT_SECRET / CWS_REFRESH_TOKEN.');
@@ -46,8 +69,6 @@ if (!CWS_CLIENT_ID || !CWS_CLIENT_SECRET || !CWS_REFRESH_TOKEN) {
   process.exit(1);
 }
 
-const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url)));
-const zipPath = new URL(`../.output/litos-extension-${pkg.version}-chrome.zip`, import.meta.url);
 const zip = await readFile(zipPath);
 
 const tokenRes = await fetch('https://oauth2.googleapis.com/token', {

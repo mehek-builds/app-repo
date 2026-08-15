@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "extension_version": "0.6.0",
+  "files": {
+    "source/assets.html": "6477bc105a4c784004f6adcdbbed3f10e730b7be3d33b6132b8a47678cfdfb5e",
+    "source/assets.css": "77d9e9d8aee318fe938c710763f156f9001ab91019b73fc12be01e9bb1996e81",
+    "source/hanken-grotesk.woff2": "e9201eddf1d41d0b62253295d869ce3cf65768f7102b797f02c7f8c876b4a9d5",
+    "source/azeret-mono.woff2": "d090ca8b9080094d42b06c43f2987bfa8b36fd5565611fd59db84db53c5f74bb",
+    "source/LICENSE-Hanken-Grotesk.txt": "f45f60ca871850c58d8dc9c973bd6fcad40c137e9d037172b961e8ca68c87ef7",
+    "source/LICENSE-Azeret-Mono.txt": "2911cbfe0065723b1aac7b44263683fca40615dd8cdd14fbeae9875dec0acb41",
+    "../scripts/render-store-assets.mjs": "59402ee0128559307c288ceb80035d0adc7de86302c009a08939f42e8d15d842",
+    "litos-screenshot-1.png": "731d5cd1e9258c8d4e792fda1025a1de57c347458bb308cfe623135c140d16be",
+    "litos-screenshot-2.png": "3dc40d605f0f37123cdea96c0ad32bb4c840a4bc0b0e24a52ec3a493f1d1221b",
+    "litos-screenshot-3.png": "4e8544718458f2ceb933df35208968c34ef0c61e30b897ca48914d3a10dca1c3",
+    "litos-screenshot-4.png": "99669e82b2ed801286a03ef51f5d0444540fce20ecd7c28c90597b2ec50359c3",
+    "litos-screenshot-5.png": "6f22aa87407b7681a2e17b9a209da3f8650a79f4121c98ca97cc51cf3dce4e79",
+    "litos-promo-small-440x280.png": "520fcbabea6c8897bdfc185056d819a2672075b1042001912f55c99331e73653",
+    "litos-promo-marquee-1400x560.png": "c01d3438be1faf852448e9bcccc8f83652d93473369b685449835b20ef986a7c"
+  }
+}
