@@ -7,7 +7,7 @@ export default defineConfig({
   manifest: ({ command }) => ({
     name: `${PRODUCT_NAME}: AI Tailored Resumes & Application Autofill`,
     description:
-      `Open a job posting and ${PRODUCT_NAME} tailors your resume, fills the application, and drafts real outreach. You get the final say.`,
+      `${PRODUCT_NAME} fills job applications for free. Trial and Litos+ add tailored resumes, outreach, and opt-in auto-submit.`,
     version: EXTENSION_VERSION,
     // Keep this list minimal: every extra permission widens the install warning
     // and slows Chrome Web Store review. API calls go through the background

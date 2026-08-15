@@ -1,16 +1,9 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { contentScriptMatches } from './manifest-contract.mjs';
 
 const CONTENT_PATH = 'src/entrypoints/content.ts';
 const PACKAGE_PATH = 'package.json';
-
-function contentScriptMatches(source) {
-  const start = source.indexOf('  matches: [');
-  const end = source.indexOf('\n  ],', start);
-  if (start < 0 || end < 0) throw new Error(`Could not read the content-script matches from ${CONTENT_PATH}`);
-  const block = source.slice(start, end);
-  return [...block.matchAll(/['"]([^'"]+)['"]/g)].map((match) => match[1]).sort();
-}
 
 function gitShow(ref, path) {
   return execFileSync('git', ['show', `${ref}:${path}`], { encoding: 'utf8' });
@@ -20,13 +13,13 @@ const baseRef = process.env.GITHUB_BASE_REF
   ? `origin/${process.env.GITHUB_BASE_REF}`
   : process.env.LITOS_RELEASE_BASE || 'origin/main';
 const currentPackage = JSON.parse(readFileSync(PACKAGE_PATH, 'utf8'));
-const currentMatches = contentScriptMatches(readFileSync(CONTENT_PATH, 'utf8'));
+const currentMatches = contentScriptMatches(readFileSync(CONTENT_PATH, 'utf8'), CONTENT_PATH);
 
 let basePackage;
 let baseMatches;
 try {
   basePackage = JSON.parse(gitShow(baseRef, PACKAGE_PATH));
-  baseMatches = contentScriptMatches(gitShow(baseRef, CONTENT_PATH));
+  baseMatches = contentScriptMatches(gitShow(baseRef, CONTENT_PATH), `${baseRef}:${CONTENT_PATH}`);
 } catch (error) {
   console.error(`Could not compare the ATS manifest with ${baseRef}. Fetch the base branch before packaging.`);
   process.exit(1);

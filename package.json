@@ -8,7 +8,7 @@
     "build": "node scripts/ensure-no-qa-token.mjs && node scripts/ensure-ats-manifest-version.mjs && wxt build && node scripts/verify-built-manifest.mjs",
     "build:firefox": "node scripts/ensure-no-qa-token.mjs && wxt build -b firefox",
     "build:qa": "wxt build",
-    "zip": "node scripts/ensure-no-qa-token.mjs && node scripts/ensure-posthog-config.mjs && node scripts/ensure-ats-manifest-version.mjs && wxt zip && node scripts/verify-built-manifest.mjs",
+    "zip": "node scripts/ensure-no-qa-token.mjs && node scripts/ensure-posthog-config.mjs && node scripts/ensure-ats-manifest-version.mjs && wxt zip && node scripts/verify-built-manifest.mjs && node scripts/verify-release-zip.mjs",
     "zip:firefox": "node scripts/ensure-no-qa-token.mjs && node scripts/ensure-posthog-config.mjs && wxt zip -b firefox",
     "postinstall": "wxt prepare",
     "compile": "tsc --noEmit",

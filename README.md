@@ -167,9 +167,10 @@ Before submitting a store release:
   text will not publish the update.
 - Confirm the uploaded package has a version newer than the public listing. Chrome does not replace
   an installed binary with different bytes under the same version.
-- Run `npm run build` and inspect the verifier output for the package version, SmartRecruiters,
-  Jobvite, iCIMS, and BambooHR content-script matches, and the production-only external website origins
-  before uploading the zip.
+- Run `npm run build` and confirm the verifier reports the exact MV3 metadata, 44-site allowlist,
+  permissions, empty production host access, website origins, service worker, and popup contract.
+- Run `npm run zip`, record its reported SHA-256, and review that exact hash before upload. The API
+  publisher also requires the reviewed hash in `CWS_EXPECTED_ZIP_SHA256` before any network request.
 
 Then load the unpacked build: open `chrome://extensions`, enable Developer mode, choose "Load unpacked," and point it at `.output/chrome-mv3` (the directory WXT writes). Sign in through the popup, complete autofill setup, and open a real posting on any supported ATS.
 
