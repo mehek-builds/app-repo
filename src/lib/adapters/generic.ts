@@ -8,6 +8,8 @@ import {
   closeOpenCombobox,
   unattachableDocumentReasons,
   isHoneypotField,
+  randomDelay as sharedRandomDelay,
+  setNativeValue,
   splitName,
 } from './shared/dom';
 import {
@@ -45,26 +47,9 @@ import { isDraftTargetAvailable, runDraftQueue } from './shared/drafts';
 // Truly off-limits regardless of what the form asks.
 const NEVER_FILL_PATTERNS = [/social security/i, /\bssn\b/i, /driver'?s?\s*licen[sc]e/i];
 
-function randomDelay(minMs = 90, maxMs = 260): Promise<void> {
-  const ms = minMs + Math.random() * (maxMs - minMs);
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function setNativeValue(el: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement, value: string) {
-  // Last line of defense against bot traps. This file keeps its own copy of the write primitive
-  // (the shared one in shared/dom.ts is guarded identically), and several call sites here reach it
-  // without passing through candidateInputs, so the check belongs at the write itself rather than
-  // only at collection. A value in a honeypot marks the whole submission as bot traffic.
-  if (isHoneypotField(el)) return;
-  const proto =
-    el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype :
-    el instanceof HTMLSelectElement ? HTMLSelectElement.prototype :
-    HTMLInputElement.prototype;
-  const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-  setter?.call(el, value);
-  el.dispatchEvent(new Event('input', { bubbles: true }));
-  el.dispatchEvent(new Event('change', { bubbles: true }));
-}
+// Generic fills keep their measured 90 to 260 ms cadence while sharing the guarded writer and
+// timer implementation with every ATS-specific adapter.
+const randomDelay = () => sharedRandomDelay(90, 260);
 
 function isVisible(el: HTMLElement): boolean {
   const rect = el.getBoundingClientRect();

@@ -155,7 +155,7 @@ export function setNativeValue(el: HTMLInputElement | HTMLTextAreaElement | HTML
   // Bot-trap backstop, deliberately at the write primitive rather than only at field collection.
   // fillField() is NOT a universal chokepoint - ashby and generic call this directly in a dozen
   // places - so guarding collection alone would leave real paths open. Every adapter's writes
-  // funnel through here or through generic.ts's local copy, which carries the same check.
+  // funnel through this one guarded implementation.
   if (isHoneypotField(el)) return;
   const proto =
     el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype :
