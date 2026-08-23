@@ -2,6 +2,16 @@
 
 All notable changes to the Litos extension are documented here.
 
+## [0.6.1] - 2026-08-23
+
+### Changed
+- Generic application forms now use the same honeypot-guarded native value writer and field-write
+  pacing helper as the ATS-specific adapters.
+
+### Safety
+- Generic form timing remains 90 to 260 milliseconds, input and change events are unchanged, and
+  concealed honeypot fields remain untouched.
+
 ## [0.6.0] - 2026-08-14
 
 ### Added
