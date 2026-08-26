@@ -56,7 +56,12 @@ export type FreeFillHandoffDependencies = {
   authEpochIsCurrent: (epoch: number) => boolean;
   getToken: () => Promise<string | null>;
   readAccount: (token: string, authEpoch: number) => Promise<{ account_id: string }>;
-  readFillData: (token: string, applicationId: string, authEpoch: number) => Promise<unknown>;
+  readFillData: (
+    token: string,
+    applicationId: string,
+    portalUrl: string,
+    authEpoch: number,
+  ) => Promise<unknown>;
 };
 
 const APPLICATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -175,7 +180,12 @@ export async function prepareFreeFillHandoff(
       return failure('invalid_handoff_response', 'Litos could not verify the extension account.');
     }
 
-    const fillData = await dependencies.readFillData(token, request.applicationId, authEpoch);
+    const fillData = await dependencies.readFillData(
+      token,
+      request.applicationId,
+      request.portalUrl,
+      authEpoch,
+    );
     if (!dependencies.authEpochIsCurrent(authEpoch)) {
       return failure('account_changed', 'The Litos account changed while this application was being opened.');
     }

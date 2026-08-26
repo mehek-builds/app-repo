@@ -4,7 +4,7 @@ import packageMetadata from '../../package.json';
 
 describe('published extension release contract', () => {
   it('uses a new installable version for the SmartRecruiters handoff build', () => {
-    expect(packageMetadata.version).toBe('0.6.1');
+    expect(packageMetadata.version).toBe('0.6.2');
   });
 
   it('reports the runtime manifest version to the website pairing gate', () => {
@@ -25,13 +25,17 @@ describe('published extension release contract', () => {
   it('makes the built-artifact verifier require the exact source and permission allowlists', () => {
     const verifier = readFileSync(new URL('../../scripts/verify-built-manifest.mjs', import.meta.url), 'utf8');
     const contract = readFileSync(new URL('../../scripts/manifest-contract.mjs', import.meta.url), 'utf8');
+    const config = readFileSync(new URL('../../wxt.config.ts', import.meta.url), 'utf8');
     expect(verifier).toContain('contentScriptMatches');
     expect(verifier).toContain('EXPECTED_PERMISSIONS');
     expect(verifier).toContain('EXPECTED_EXTERNAL_MATCHES');
     expect(verifier).toContain('unexpected host_permissions');
-    expect(verifier).toContain("contentScript.run_at !== 'document_idle'");
+    expect(verifier).toContain("contentScript.run_at !== 'document_start'");
     expect(verifier).toContain("manifest.background?.service_worker !== 'background.js'");
     expect(verifier).toContain('unexpected externally_connectable matches');
+    expect(verifier).toContain('EXPECTED_MINIMUM_CHROME_VERSION');
+    expect(contract).toContain("EXPECTED_MINIMUM_CHROME_VERSION = '116'");
+    expect(config).toContain("minimum_chrome_version: '116'");
     expect(contract).toContain("'https://trylitos.com/*'");
     expect(contract).toContain("'https://www.trylitos.com/*'");
   });

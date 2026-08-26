@@ -1,5 +1,7 @@
 export const EXPECTED_PERMISSIONS = ['activeTab', 'scripting', 'storage', 'clipboardWrite'];
 
+export const EXPECTED_MINIMUM_CHROME_VERSION = '116';
+
 export const EXPECTED_MANIFEST_NAME = 'Litos: AI Tailored Resumes & Application Autofill';
 
 export const EXPECTED_MANIFEST_DESCRIPTION =

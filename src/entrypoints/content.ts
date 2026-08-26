@@ -7,7 +7,7 @@ import {
   isWorkdayStartScreen, findApplyManuallyButton,
 } from '../lib/adapters/workday';
 import { isLinkedInApplicationPage, extractLinkedInJdText, fillLinkedInApplication } from '../lib/adapters/linkedin';
-import { isLikelyApplicationForm, extractGenericJdText, getGenericJobDetails, fillGenericApplication, drainR030CandidateLabels, isPerApplicationDecisionQuestion } from '../lib/adapters/generic';
+import { getGenericJobDetails, drainR030CandidateLabels, isPerApplicationDecisionQuestion } from '../lib/adapters/generic';
 import { atsCanAutoSubmit, clickAtsSubmitIfAllowed, clickDashboardSubmitIfAllowed, isAtsApplicationPage, extractAtsJdText, fillAtsApplication, gatedPortalNotice, specForCurrentPage } from '../lib/adapters/ats-2026-07';
 import { PendingSubmissionRecoveryGate } from '../lib/submission-recovery';
 import { COLOR, DISMISS_MS, FONT, OVERLAY, RADIUS, SHADOW, markSvg } from '../styles/tokens';
@@ -44,7 +44,10 @@ import { createFillActionGate, type FillActionPresentation } from '../lib/applic
 import { createFreeFillTrackerSync, type FreeFillTrackerPayload } from '../lib/free-fill-tracker';
 import {
   createFreeSubmissionOutcomeSync,
+  isValidFreeSubmissionEventId,
   recordFreeSubmissionOutcome,
+  requestFreeSubmissionPreflight,
+  runFreeSubmissionReplayGate,
 } from '../lib/free-submission-outcome';
 import { FREE_SUBMISSION_OUTCOME_TIMEOUT_MS } from '../lib/free-submission-monitor';
 import { detectChallenge, waitForChallengeCleared, watchForChallenge } from '../lib/captcha-detection';
@@ -63,7 +66,7 @@ import {
 import { mountThinkingOrb } from '../lib/thinking-orb';
 import { derivePortalPassword, portalKeyForHost, currentSaltFingerprint } from '../lib/portal-password';
 import { automaticSubmissionEnabled } from '../lib/auto-submit-consent';
-import { applicantEmailForGeneratedPacket } from '../lib/applicant-email';
+import { applicantEmailForGeneratedPacket, atsNameForPortalUrl } from '../lib/applicant-email';
 import { frozenApplicantFillData } from '../lib/handoff-applicant-snapshot';
 import {
   WORKDAY_ACCOUNT_PROMPT_BODY,
@@ -75,6 +78,11 @@ import { applicationFormIdentityKey, smartRecruitersApplicationUrl } from '../li
 import { reviewedQuestionsForHandoff, validHandoffVersion, type HandoffQuestion } from '../lib/handoff-packet';
 import { frozenAnswerForQuestion, replayReviewedAnswers, reviewedAnswersMatch } from '../lib/reviewed-answer-replay';
 import { manualSubmissionPreflightError } from '../lib/manual-submission-preflight';
+import { isValidFreeFillApplicationId } from '../lib/free-fill-handoff';
+import {
+  FREE_MANUAL_SUBMISSION_UNAVAILABLE_COPY,
+  freeManualSubmissionAtsSupported,
+} from '../lib/free-manual-submission-capability';
 import {
   exactGatedAttendedReceipt,
   fillFrozenIcimsLoginEmail,
@@ -109,6 +117,16 @@ import {
   premiumRetryControlSelector,
   type ExtensionPremiumActionFeature,
 } from '../lib/extension-premium-action';
+import { EXTENSION_VERSION } from '../lib/product';
+import {
+  activatePreArmBoundaryShieldState,
+  cancelReleaseUpdateFenceContent,
+  initialPreArmBoundaryShieldState,
+  initialReleaseUpdateFenceContentState,
+  requestPreArmBoundaryShieldRelease,
+  settlePreArmBoundaryShieldForReleaseFence,
+  settleReleaseUpdateFenceContentReady,
+} from '../lib/release-update-fence-content';
 
 export default defineContentScript({
   matches: [
@@ -186,8 +204,138 @@ export default defineContentScript({
   // per-frame, so all_frames lets this script inject directly into that iframe - it runs with the
   // iframe's own greenhouse.io origin, not the parent page's, so no cross-frame messaging is needed.
   allFrames: true,
-  runAt: 'document_idle',
-  main() {
+  runAt: 'document_start',
+  async main() {
+    const earlyWindow = window as unknown as { __litosLoaded?: boolean; __litosGenericInit?: () => void };
+    if (earlyWindow.__litosLoaded) {
+      earlyWindow.__litosGenericInit?.();
+      return;
+    }
+    let preArmBoundaryShield = initialPreArmBoundaryShieldState();
+    const potentialFinalControl = (event: Event): HTMLElement | null => {
+      for (const node of event.composedPath()) {
+        if (!(node instanceof HTMLElement)) continue;
+        const control = node.closest<HTMLElement>('button, input[type="submit"], [role="button"]');
+        if (!control) continue;
+        const label = [
+          control.textContent ?? '',
+          control.getAttribute('value') ?? '',
+          control.getAttribute('aria-label') ?? '',
+          control.getAttribute('data-automation-id') ?? '',
+        ].join(' ').replace(/\s+/g, ' ').trim().toLowerCase();
+        if (/\b(submit|send)\b.*\b(application|candidate|profile)\b|^submit$|^apply now$/i.test(label)
+          && !/\b(next|continue|sign in|log in|create account|save)\b/i.test(label)) return control;
+      }
+      return null;
+    };
+    const blockBeforeDelegate = (event: Event) => {
+      if (!preArmBoundaryShield.active) return;
+      if (event.type === 'click' && !potentialFinalControl(event)) return;
+      if (event.type === 'submit') {
+        const form = event.target;
+        if (!(form instanceof HTMLFormElement)) return;
+        const controls = Array.from(form.querySelectorAll<HTMLElement>('button, input[type="submit"], [role="button"]'));
+        if (!controls.some((control) => potentialFinalControl({
+          composedPath: () => [control],
+        } as unknown as Event))) return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+    };
+    document.addEventListener('click', blockBeforeDelegate, true);
+    document.addEventListener('submit', blockBeforeDelegate, true);
+    let releaseUpdateFenceState = initialReleaseUpdateFenceContentState();
+    let releaseFenceRetryTimer: number | null = null;
+    let activeAutoSubmitCancel: ((msg?: string) => void) | null = null;
+    const activatePreArmBoundaryShield = (): number => {
+      preArmBoundaryShield = activatePreArmBoundaryShieldState(preArmBoundaryShield);
+      return preArmBoundaryShield.epoch;
+    };
+    const releasePreArmBoundaryShield = (requestEpoch: number): void => {
+      preArmBoundaryShield = requestPreArmBoundaryShieldRelease(
+        preArmBoundaryShield,
+        requestEpoch,
+        releaseUpdateFenceState.active,
+      );
+    };
+    const scheduleReleaseFenceReady = (delayMs: number) => {
+      if (releaseFenceRetryTimer !== null) return;
+      releaseFenceRetryTimer = window.setTimeout(() => {
+        releaseFenceRetryTimer = null;
+        announceReleaseFenceReady();
+      }, delayMs);
+    };
+    chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+      if (message?.type !== 'LITOS_RELEASE_FENCE_CANCEL') return false;
+      releaseUpdateFenceState = cancelReleaseUpdateFenceContent(releaseUpdateFenceState);
+      activatePreArmBoundaryShield();
+      activeAutoSubmitCancel?.('Litos was updated, so this application was stopped. Reload the tab before sending anything.');
+      sendResponse({ ok: true, blocked: true });
+      scheduleReleaseFenceReady(0);
+      return false;
+    });
+    function announceReleaseFenceReady() {
+      const requestEpoch = releaseUpdateFenceState.epoch;
+      chrome.runtime.sendMessage({
+        type: 'LITOS_RELEASE_FENCE_READY',
+        releaseVersion: EXTENSION_VERSION,
+      }, (response: { ok?: boolean; blocked?: boolean } | undefined) => {
+        void chrome.runtime.lastError;
+        // Missing or malformed acknowledgement is a hold. The boundary cannot reopen merely because
+        // an updating or suspended worker failed to answer. Tabs that boot before another legacy tab
+        // finishes reloading ask again, so they reopen together when the last exact tab is ready.
+        const settled = settleReleaseUpdateFenceContentReady(
+          releaseUpdateFenceState,
+          requestEpoch,
+          response,
+        );
+        releaseUpdateFenceState = settled.state;
+        if (!settled.accepted) {
+          scheduleReleaseFenceReady(0);
+          return;
+        }
+        preArmBoundaryShield = settlePreArmBoundaryShieldForReleaseFence(
+          preArmBoundaryShield,
+          releaseUpdateFenceState.active,
+        );
+        if (releaseUpdateFenceState.active) scheduleReleaseFenceReady(2_000);
+      });
+    }
+    announceReleaseFenceReady();
+    const GENERATED_EXTENSION_SUBMISSION_ENABLED = false;
+    type StartupManualReservationResponse = {
+      pending?: { eventId?: string; applicationId?: string; startUrl?: string } | null;
+      blocked?: boolean;
+    };
+    const requestStartupManualReservation = (): Promise<StartupManualReservationResponse | null> =>
+      new Promise((resolve) => {
+        let settled = false;
+        const finish = (response: StartupManualReservationResponse | null): void => {
+          if (settled) return;
+          settled = true;
+          window.clearTimeout(timer);
+          resolve(response);
+        };
+        const timer = window.setTimeout(() => finish(null), 25_000);
+        try {
+          chrome.runtime.sendMessage(
+            { type: 'GET_PENDING_FREE_MANUAL_RESERVATION' },
+            (response: StartupManualReservationResponse | undefined) => {
+              const failed = Boolean(chrome.runtime.lastError);
+              finish(failed || !response ? null : response);
+            },
+          );
+        } catch {
+          finish(null);
+        }
+      });
+    const startupManualReservationBoundaryEpoch = preArmBoundaryShield.epoch;
+    let startupManualReservationFirstAttempt: Promise<StartupManualReservationResponse | null> | null =
+      requestStartupManualReservation();
+    if (document.readyState === 'loading') {
+      await new Promise<void>((resolve) => document.addEventListener('DOMContentLoaded', () => resolve(), { once: true }));
+    }
     async function serverCaptchaResumeEnabled(): Promise<boolean> {
       return new Promise((resolve) => {
         let settled = false;
@@ -390,7 +538,6 @@ export default defineContentScript({
       submitButton.addEventListener('click', onClick, true);
     }
 
-    const freeSubmissionOutcomeButtons = new WeakSet<HTMLElement>();
     const activeFreeSubmissionOutcomeEvents = new Set<string>();
 
     function reportFreeSubmissionOutcomeWithRetry(
@@ -428,8 +575,8 @@ export default defineContentScript({
       baselineUrl: string;
       baselineTexts: ReadonlySet<string>;
       timeoutMs?: number;
-    }): void {
-      if (activeFreeSubmissionOutcomeEvents.has(input.outcomeSync.eventId)) return;
+    }): () => void {
+      if (activeFreeSubmissionOutcomeEvents.has(input.outcomeSync.eventId)) return () => undefined;
       activeFreeSubmissionOutcomeEvents.add(input.outcomeSync.eventId);
       const readNewReceiptText = () => visibleSubmissionOutcomeTexts()
         .filter((text) => !input.baselineTexts.has(text))
@@ -441,6 +588,7 @@ export default defineContentScript({
         interval = null;
         observer?.disconnect();
         observer = null;
+        activeFreeSubmissionOutcomeEvents.delete(input.outcomeSync.eventId);
       };
       const controller = createSubmissionOutcomeController({
         readText: readNewReceiptText,
@@ -474,87 +622,471 @@ export default defineContentScript({
       observer = new MutationObserver(controller.queueScan);
       observer.observe(document.body, { childList: true, subtree: true, characterData: true });
       controller.scan();
+      return stopResources;
     }
 
-    /**
-     * Observes the applicant's own native Free-plan submit click. This is intentionally separate
-     * from armManualSubmissionTracking: there is no reservation, entitlement check, click replay,
-     * or event cancellation in this lane. If Tracker transport fails, the employer click and page
-     * behavior remain exactly as they would be without Litos.
-     */
-    function armFreeManualSubmissionOutcomeTracking(
-      submitButton: HTMLElement,
+    function startFreeSubmissionOutcomeMonitor(
       applicationId: string,
-    ): void {
-      if (freeSubmissionOutcomeButtons.has(submitButton)) return;
-      freeSubmissionOutcomeButtons.add(submitButton);
-      const onTrustedClick = (event: MouseEvent) => {
-        if (!event.isTrusted) return;
-        submitButton.removeEventListener('click', onTrustedClick, true);
-
-        const baselineUrl = window.location.href;
-        const baselineTexts = new Set(visibleSubmissionOutcomeTexts());
-        const eventId = crypto.randomUUID();
-        let settleMonitorStart!: () => void;
-        const monitorStart = new Promise<void>((resolve) => { settleMonitorStart = resolve; });
-        const outcomeSync = createFreeSubmissionOutcomeSync(
-          applicationId,
-          eventId,
-          async (payload) => {
-            await monitorStart;
-            return recordFreeSubmissionOutcome(payload);
-          },
-        );
-        // Fire-and-observe: queueing this storage message never delays or alters the employer's
-        // native click, but gives a post-navigation content script the same stable event id.
+      eventId: string,
+      startUrl: string,
+    ): Promise<{ ok: true } | { ok: false; error: string }> {
+      return new Promise((resolve) => {
         chrome.runtime.sendMessage({
           type: 'START_FREE_SUBMISSION_OUTCOME_MONITOR',
           payload: {
-            event_id: outcomeSync.eventId,
+            event_id: eventId,
             application_id: applicationId,
-            start_url: baselineUrl,
+            start_url: startUrl,
           },
+        }, (response: { ok?: boolean; error?: string } | undefined) => {
+          const runtimeError = chrome.runtime.lastError?.message;
+          if (runtimeError || response?.ok !== true) {
+            resolve({
+              ok: false,
+              error: response?.error ?? runtimeError ?? 'Litos could not arm the submission monitor.',
+            });
+            return;
+          }
+          resolve({ ok: true });
+        });
+      });
+    }
+
+    function abandonFreeSubmissionOutcomeMonitor(eventId: string): Promise<void> {
+      return new Promise((resolve) => {
+        chrome.runtime.sendMessage({
+          type: 'ABANDON_FREE_SUBMISSION_OUTCOME_MONITOR',
+          event_id: eventId,
         }, () => {
           void chrome.runtime.lastError;
-          settleMonitorStart();
+          resolve();
         });
-        monitorFreeSubmissionOutcome({ outcomeSync, baselineUrl, baselineTexts });
+      });
+    }
+
+    type FreeManualRetrySafety =
+      | { kind: 'no_evidence' }
+      | {
+        kind: 'safe_not_sent';
+        attemptId: string;
+        proofKind: 'typed_pre_click_stop'
+          | 'applicant_checked_not_sent'
+          | 'employer_rejected_not_filed'
+          | 'employer_verification_pending_not_filed'
+          | 'provider_definitive_rejection'
+          | 'extension_cancelled_before_press';
+        resolvedAt: string;
+      }
+      | { kind: 'blocked_unverified'; attemptId: string; at: string; reason: 'opened' | 'pressed' | 'invalid_sequence' }
+      | {
+        kind: 'blocked_unverified';
+        attemptId: string;
+        at: string;
+        reason: 'boundary_authorized';
+        leaseId: string;
+        expiresAt: string;
+      }
+      | { kind: 'blocked_confirmed'; attemptId: string; confirmedAt: string };
+
+    function freeManualRetrySafetyFromUnknown(value: unknown): FreeManualRetrySafety | null {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+      const safety = value as Record<string, unknown>;
+      const nonEmpty = (candidate: unknown): candidate is string => typeof candidate === 'string' && candidate.trim().length > 0;
+      const timestamp = (candidate: unknown): candidate is string => nonEmpty(candidate) && Number.isFinite(Date.parse(candidate));
+      if (safety.kind === 'no_evidence') return safety as FreeManualRetrySafety;
+      if (safety.kind === 'safe_not_sent'
+        && nonEmpty(safety.attemptId)
+        && (safety.proofKind === 'typed_pre_click_stop'
+          || safety.proofKind === 'applicant_checked_not_sent'
+          || safety.proofKind === 'employer_rejected_not_filed'
+          || safety.proofKind === 'employer_verification_pending_not_filed'
+          || safety.proofKind === 'provider_definitive_rejection'
+          || safety.proofKind === 'extension_cancelled_before_press')
+        && timestamp(safety.resolvedAt)) return safety as FreeManualRetrySafety;
+      if (safety.kind === 'blocked_unverified'
+        && nonEmpty(safety.attemptId)
+        && timestamp(safety.at)
+        && (safety.reason === 'opened' || safety.reason === 'pressed' || safety.reason === 'invalid_sequence')) {
+        return safety as FreeManualRetrySafety;
+      }
+      if (safety.kind === 'blocked_unverified'
+        && safety.reason === 'boundary_authorized'
+        && nonEmpty(safety.attemptId)
+        && timestamp(safety.at)
+        && nonEmpty(safety.leaseId)
+        && timestamp(safety.expiresAt)) return safety as FreeManualRetrySafety;
+      if (safety.kind === 'blocked_confirmed'
+        && nonEmpty(safety.attemptId)
+        && timestamp(safety.confirmedAt)) return safety as FreeManualRetrySafety;
+      return null;
+    }
+
+    function cancelFreeManualSubmissionBeforeReplay(
+      applicationId: string,
+      eventId: string,
+      currentUrl: string,
+    ): Promise<{ ok: boolean; error?: string; retrySafety: FreeManualRetrySafety | null }> {
+      return new Promise((resolve) => {
+        chrome.runtime.sendMessage({
+          type: 'CANCEL_FREE_MANUAL_SUBMISSION',
+          payload: {
+            application_id: applicationId,
+            event_id: eventId,
+            current_url: currentUrl,
+          },
+        }, (response: { ok?: boolean; error?: string; retry_safety?: unknown } | undefined) => {
+          const runtimeError = chrome.runtime.lastError?.message;
+          const retrySafety = freeManualRetrySafetyFromUnknown(response?.retry_safety);
+          const exactCancellation = retrySafety?.kind === 'safe_not_sent'
+            && retrySafety.attemptId === eventId
+            && retrySafety.proofKind === 'extension_cancelled_before_press';
+          resolve({
+            ok: !runtimeError && response?.ok === true && exactCancellation,
+            retrySafety,
+            ...(response?.error || runtimeError
+              ? { error: response?.error ?? runtimeError }
+              : {}),
+          });
+        });
+      });
+    }
+
+    function refreshFreeManualRetrySafety(
+      applicationId: string,
+      currentUrl: string,
+    ): Promise<{ safe: boolean; retrySafety: FreeManualRetrySafety | null }> {
+      return new Promise((resolve) => {
+        chrome.runtime.sendMessage({
+          type: 'REFRESH_FREE_MANUAL_RETRY_SAFETY',
+          payload: {
+            application_id: applicationId,
+            current_url: currentUrl,
+          },
+        }, (response: {
+          ok?: boolean;
+          application_id?: unknown;
+          retry_safe?: boolean;
+          retry_safety?: unknown;
+          authoritative_refresh?: boolean;
+        } | undefined) => {
+          const runtimeError = chrome.runtime.lastError?.message;
+          const retrySafety = freeManualRetrySafetyFromUnknown(response?.retry_safety);
+          const serverAllowsRetry = retrySafety?.kind === 'no_evidence' || retrySafety?.kind === 'safe_not_sent';
+          resolve({
+            safe: !runtimeError
+              && response?.ok === true
+              && response.application_id === applicationId
+              && response.authoritative_refresh === true
+              && response.retry_safe === true
+              && serverAllowsRetry,
+            retrySafety,
+          });
+        });
+      });
+    }
+
+    function clearPendingFreeManualReservation(eventId: string): void {
+      chrome.runtime.sendMessage({
+        type: 'CLEAR_PENDING_FREE_MANUAL_RESERVATION',
+        event_id: eventId,
+      }, () => { void chrome.runtime.lastError; });
+    }
+
+    function freeManualReplayContextIsSafe(
+      submitButton: HTMLElement,
+      atsName: string,
+      activationUrl: string,
+      activationFenceEpoch: number,
+    ): boolean {
+      return releaseUpdateFenceState.active === false
+        && releaseUpdateFenceState.epoch === activationFenceEpoch
+        && window.location.href === activationUrl
+        && submitButton.isConnected
+        && isElementVisible(submitButton)
+        && !(submitButton as HTMLButtonElement).disabled
+        && submitButton.getAttribute('aria-disabled') !== 'true'
+        && !document.hidden
+        && document.hasFocus()
+        && !hasEmptyRequiredFields()
+        && !(captchaWaiting || detectChallenge().waiting)
+        && findFreeManualFinalSubmitButton(atsName) === submitButton;
+    }
+
+    function replayFreeManualSubmitIfAllowed(
+      submitButton: HTMLElement,
+      atsName: string,
+    ): 'clicked' | 'pre_click_refusal' | 'ambiguous' {
+      if (!freeManualSubmissionAtsSupported(atsName) || !atsCanAutoSubmit(atsName)) {
+        return 'pre_click_refusal';
+      }
+      if (atsName === 'workday') {
+        if (
+          document.hidden
+          || !document.hasFocus()
+          || hasEmptyRequiredFields()
+          || detectChallenge().waiting
+          || !workdayProgrammaticFinalSubmitAllowed(submitButton)
+        ) return 'pre_click_refusal';
+        try {
+          submitButton.click();
+          return 'clicked';
+        } catch {
+          return 'ambiguous';
+        }
+      }
+      try {
+        return clickAtsSubmitIfAllowed(atsName, submitButton)
+          ? 'clicked'
+          : 'pre_click_refusal';
+      } catch {
+        return 'ambiguous';
+      }
+    }
+
+    /** Hold the applicant's activation until the exact reservation passes its final locked check. */
+    function armFreeManualSubmissionOutcomeTracking(
+      applicationId: string,
+      submissionEventId: string,
+      atsName: string,
+      statusEl: HTMLElement | null,
+      ownerEpoch: number,
+    ): void {
+      if (
+        preArmBoundaryShield.epoch !== ownerEpoch
+        ||
+        !isValidFreeFillApplicationId(applicationId)
+        || !isValidFreeSubmissionEventId(submissionEventId)
+      ) return;
+
+      activeFreeManualBoundaryCleanup?.();
+      const boundaryEpoch = activatePreArmBoundaryShield();
+      const reservationKey = `${applicationId}:${submissionEventId}`;
+      const activationId = crypto.randomUUID();
+      let replayInProgress = false;
+      let cleaned = false;
+
+      const blockActivation = (event: MouseEvent) => {
+        if (!event.isTrusted) return;
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
       };
-      submitButton.addEventListener('click', onTrustedClick, true);
+
+      const blockFormSubmission = (event: SubmitEvent) => {
+        if (replayInProgress) return;
+        const form = event.target;
+        const finalControl = findFreeManualFinalSubmitButton(atsName);
+        if (!(form instanceof HTMLFormElement) || !finalControl || finalControl.closest('form') !== form) return;
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+      };
+
+      let clickListener: ((event: MouseEvent) => void) | null = null;
+      let cleanupEpoch: number | null = null;
+      const cleanup = (): number | null => {
+        if (cleaned) return cleanupEpoch;
+        cleaned = true;
+        if (preArmBoundaryShield.epoch === boundaryEpoch) {
+          cleanupEpoch = activatePreArmBoundaryShield();
+        }
+        if (clickListener) document.removeEventListener('click', clickListener, true);
+        document.removeEventListener('submit', blockFormSubmission, true);
+        pendingFreeSubmissionOutcomeApplications.delete(reservationKey);
+        if (activeFreeManualBoundaryCleanup === cleanup) activeFreeManualBoundaryCleanup = null;
+        return cleanupEpoch;
+      };
+      activeFreeManualBoundaryCleanup = cleanup;
+      document.addEventListener('submit', blockFormSubmission, true);
+      releasePreArmBoundaryShield(boundaryEpoch);
+
+      if (!freeManualSubmissionAtsSupported(atsName) || !atsCanAutoSubmit(atsName)) {
+        clickListener = (event) => {
+          const finalControl = findFreeManualFinalSubmitButton(atsName);
+          if (!finalControl || !event.composedPath().includes(finalControl)) return;
+          blockActivation(event);
+        };
+        document.addEventListener('click', clickListener, true);
+        const message = FREE_MANUAL_SUBMISSION_UNAVAILABLE_COPY;
+        findFreeManualFinalSubmitButton(atsName)?.setAttribute('title', message);
+        if (statusEl) statusEl.textContent = message;
+        void cancelFreeManualSubmissionBeforeReplay(
+          applicationId,
+          submissionEventId,
+          window.location.href,
+        ).then((result) => {
+          if (result.ok) {
+            const releasedEpoch = cleanup();
+            if (releasedEpoch !== null) releasePreArmBoundaryShield(releasedEpoch);
+          } else if (statusEl) {
+            statusEl.textContent = `${message} ${result.error ?? 'The reservation remains blocked for review.'}`;
+          }
+        });
+        return;
+      }
+
+      let checking = false;
+      let boundaryActivated = false;
+      const onTrustedClick = (event: MouseEvent) => {
+        if (!event.isTrusted) return;
+        const submitButton = findFreeManualFinalSubmitButton(atsName);
+        if (!submitButton || !event.composedPath().includes(submitButton)) return;
+        blockActivation(event);
+        if (checking || boundaryActivated) return;
+
+        const activationUrl = window.location.href;
+        const activationFenceEpoch = releaseUpdateFenceState.epoch;
+        if (
+          hasEmptyRequiredFields()
+          || captchaWaiting
+          || detectChallenge().waiting
+        ) {
+          if (statusEl) {
+            statusEl.textContent = hasEmptyRequiredFields()
+              ? 'Something required is still blank. Fill it in, then click Submit again.'
+              : 'Complete the human check, then click Submit again.';
+          }
+          return;
+        }
+        checking = true;
+        if (statusEl) statusEl.textContent = 'Running the final duplicate and submission safety check.';
+
+        let cancellationError: string | null = null;
+        let outcomeSync: ReturnType<typeof createFreeSubmissionOutcomeSync> | null = null;
+        void runFreeSubmissionReplayGate({
+          startMonitor: () => startFreeSubmissionOutcomeMonitor(
+            applicationId,
+            submissionEventId,
+            activationUrl,
+          ),
+          preflight: async () => {
+            const authorization = await requestFreeSubmissionPreflight({
+              application_id: applicationId,
+              event_id: submissionEventId,
+              activation_id: activationId,
+              current_url: activationUrl,
+            });
+            if (authorization.ok) boundaryActivated = true;
+            return authorization;
+          },
+          contextStillSafe: () => freeManualReplayContextIsSafe(
+            submitButton,
+            atsName,
+            activationUrl,
+            activationFenceEpoch,
+          ),
+          armOutcome: (authorization) => {
+            const baselineTexts = new Set(visibleSubmissionOutcomeTexts());
+            outcomeSync = createFreeSubmissionOutcomeSync(
+              applicationId,
+              submissionEventId,
+              authorization.leaseId,
+              authorization.activationId,
+            );
+            return monitorFreeSubmissionOutcome({
+              outcomeSync,
+              baselineUrl: activationUrl,
+              baselineTexts,
+            });
+          },
+          replay: () => {
+            boundaryActivated = true;
+            replayInProgress = true;
+            try {
+              return outcomeSync
+                ? replayFreeManualSubmitIfAllowed(submitButton, atsName)
+                : 'pre_click_refusal';
+            } finally {
+              replayInProgress = false;
+            }
+          },
+          cancelBeforeReplay: async () => {
+            await abandonFreeSubmissionOutcomeMonitor(submissionEventId);
+            const cancellation = await cancelFreeManualSubmissionBeforeReplay(
+              applicationId,
+              submissionEventId,
+              activationUrl,
+            );
+            if (!cancellation.ok) {
+              cancellationError = cancellation.error ?? 'The reservation remains blocked for review.';
+            } else {
+              const releasedEpoch = cleanup();
+              if (releasedEpoch !== null) releasePreArmBoundaryShield(releasedEpoch);
+            }
+            boundaryActivated = true;
+          },
+        }).then((result) => {
+          checking = false;
+          if (result.ok) {
+            clearPendingFreeManualReservation(submissionEventId);
+            return;
+          }
+          if (result.stage === 'replay') clearPendingFreeManualReservation(submissionEventId);
+          const message = cancellationError
+            ? `${result.error} ${cancellationError}`
+            : result.error;
+          if (submitButton.isConnected) submitButton.setAttribute('title', message);
+          if (statusEl) statusEl.textContent = message;
+        }).catch((error) => {
+          checking = false;
+          boundaryActivated = true;
+          const message = error instanceof Error
+            ? error.message
+            : 'The final submission check failed. Nothing was submitted.';
+          if (submitButton.isConnected) submitButton.setAttribute('title', message);
+          if (statusEl) statusEl.textContent = message;
+        });
+      };
+      clickListener = onTrustedClick;
+      document.addEventListener('click', clickListener, true);
     }
 
     function findFreeManualFinalSubmitButton(atsName: string): HTMLElement | null {
       return atsName === 'workday' ? findWorkdayFinalSubmitButton() : findFinalSubmitButton();
     }
 
+    function freeManualAtsNameForCurrentPage(): string {
+      if (isWorkdayApplicationPage()) return 'workday';
+      if (isLeverApplicationPage()) return 'lever';
+      if (isGreenhouseApplicationPage()) return 'greenhouse';
+      if (isAshbyApplicationPage()) return 'ashby';
+      if (window.location.hostname.includes('linkedin.com')) return 'linkedin';
+      const spec = specForCurrentPage();
+      if (spec) return spec.id;
+      return contentInitRoute(window.location) === 'generic'
+        ? 'generic'
+        : atsNameForPortalUrl(window.location.href);
+    }
+
     const pendingFreeSubmissionOutcomeApplications = new Set<string>();
+    let activeFreeManualBoundaryCleanup: (() => number | null) | null = null;
 
     function armFreeManualSubmissionOutcomeWhenAvailable(
       applicationId: string,
+      submissionEventId: string,
       atsName: string,
+      statusEl: HTMLElement | null,
+      ownerEpoch: number,
     ): void {
-      if (pendingFreeSubmissionOutcomeApplications.has(applicationId)) return;
-      pendingFreeSubmissionOutcomeApplications.add(applicationId);
-      let observer: MutationObserver | null = null;
-      let timeout: ReturnType<typeof setTimeout> | null = null;
-      const tryArm = (): boolean => {
-        const finalControl = findFreeManualFinalSubmitButton(atsName);
-        if (!finalControl) return false;
-        armFreeManualSubmissionOutcomeTracking(finalControl, applicationId);
-        observer?.disconnect();
-        observer = null;
-        if (timeout) clearTimeout(timeout);
-        timeout = null;
-        return true;
-      };
-      if (tryArm()) return;
-      observer = new MutationObserver(() => { tryArm(); });
-      observer.observe(document.body, { childList: true, subtree: true, attributes: true });
-      timeout = setTimeout(() => {
-        observer?.disconnect();
-        observer = null;
-        pendingFreeSubmissionOutcomeApplications.delete(applicationId);
-      }, 5 * 60_000);
+      if (
+        preArmBoundaryShield.epoch !== ownerEpoch
+        ||
+        !isValidFreeFillApplicationId(applicationId)
+        || !isValidFreeSubmissionEventId(submissionEventId)
+      ) return;
+      const reservationKey = `${applicationId}:${submissionEventId}`;
+      if (pendingFreeSubmissionOutcomeApplications.has(reservationKey)) return;
+      pendingFreeSubmissionOutcomeApplications.add(reservationKey);
+      // Delegate from the document, not the current button node. React ATSs routinely replace the
+      // final control during validation and SPA transitions, and the reservation must keep guarding
+      // every replacement until it either crosses the boundary or is closed as not sent.
+      armFreeManualSubmissionOutcomeTracking(
+        applicationId,
+        submissionEventId,
+        atsName,
+        statusEl,
+        ownerEpoch,
+      );
     }
 
     // No top-frame gating: for a cross-origin Greenhouse iframe embed, this script's instance
@@ -595,6 +1127,57 @@ export default defineContentScript({
     };
     checkPendingSubmission();
 
+    let startupManualReservationRetryTimer: number | null = null;
+    const scheduleStartupManualReservationRetry = (): void => {
+      if (
+        startupManualReservationRetryTimer !== null
+        || preArmBoundaryShield.epoch !== startupManualReservationBoundaryEpoch
+      ) return;
+      startupManualReservationRetryTimer = window.setTimeout(() => {
+        startupManualReservationRetryTimer = null;
+        checkPendingFreeManualReservation();
+      }, 2_000);
+    };
+    const checkPendingFreeManualReservation = (): void => {
+      if (preArmBoundaryShield.epoch !== startupManualReservationBoundaryEpoch) return;
+      const request = startupManualReservationFirstAttempt ?? requestStartupManualReservation();
+      startupManualReservationFirstAttempt = null;
+      void request.then(
+        (response: {
+          pending?: {
+            eventId?: string;
+            applicationId?: string;
+            startUrl?: string;
+            boundaryLeaseId?: string | null;
+            boundaryActivationId?: string | null;
+          } | null;
+          blocked?: boolean;
+        } | null) => {
+          if (preArmBoundaryShield.epoch !== startupManualReservationBoundaryEpoch) return;
+          const pending = response?.pending;
+          if (
+            !isValidFreeFillApplicationId(pending?.applicationId)
+            || !isValidFreeSubmissionEventId(pending?.eventId)
+          ) {
+            if (response?.blocked === false) {
+              releasePreArmBoundaryShield(startupManualReservationBoundaryEpoch);
+            } else {
+              scheduleStartupManualReservationRetry();
+            }
+            return;
+          }
+          armFreeManualSubmissionOutcomeWhenAvailable(
+            pending.applicationId,
+            pending.eventId,
+            freeManualAtsNameForCurrentPage(),
+            null,
+            startupManualReservationBoundaryEpoch,
+          );
+        },
+      );
+    };
+    checkPendingFreeManualReservation();
+
     const checkPendingFreeSubmissionOutcome = (attempt = 0): void => {
       chrome.runtime.sendMessage(
         { type: 'GET_PENDING_FREE_SUBMISSION_OUTCOME' },
@@ -603,6 +1186,8 @@ export default defineContentScript({
             eventId?: string;
             applicationId?: string;
             startUrl?: string;
+            boundaryLeaseId?: string | null;
+            boundaryActivationId?: string | null;
           } | null;
           force_unknown?: boolean;
           remaining_ms?: number;
@@ -613,10 +1198,14 @@ export default defineContentScript({
             pending?.eventId
             && pending.applicationId
             && pending.startUrl
+            && pending.boundaryLeaseId
+            && pending.boundaryActivationId
           ) {
             const outcomeSync = createFreeSubmissionOutcomeSync(
               pending.applicationId,
               pending.eventId,
+              pending.boundaryLeaseId,
+              pending.boundaryActivationId,
             );
             const remainingMs = Math.max(0, response?.remaining_ms ?? 0);
             if (response?.force_unknown || remainingMs === 0) {
@@ -1996,9 +2585,11 @@ export default defineContentScript({
       const runFreeFactualFill = async (
         yesBtn: HTMLButtonElement | null,
         noBtn: HTMLButtonElement | null,
-        showUpgrade = false,
+        showUpgrade: boolean,
+        actionBoundaryEpoch: number,
       ): Promise<void> => {
         secondaryAction = 'dismiss';
+        const requestedSubmissionEventId = crypto.randomUUID();
         if (noBtn) noBtn.disabled = true;
         if (statusEl) {
           statusEl.style.display = 'block';
@@ -2006,21 +2597,27 @@ export default defineContentScript({
         }
         const data = await new Promise<{
           error?: string;
+          code?: string;
+          http_status?: number;
           profile?: Profile;
           applicationProfile?: ApplicationProfile;
           application_id?: string | null;
+          submission_event_id?: string | null;
+          retry_safety?: unknown;
+          reservation_cancelled?: boolean;
+          cancellation_error?: string;
           selected_resume?: {
             artifact_id: string | null;
             file_name: string;
             resume_url: string;
           } | null;
           resume_error?: string;
-          tracking_error?: string;
           posting_compensation?: PostingCompensation | null;
         }>((resolve) => {
           chrome.runtime.sendMessage({
             type: 'GET_FREE_FILL_DATA',
             payload: {
+              submission_event_id: requestedSubmissionEventId,
               ...(dashboardFreeFillApplicationId
                 ? { application_id: dashboardFreeFillApplicationId }
                 : {}),
@@ -2030,11 +2627,98 @@ export default defineContentScript({
             },
           }, (response) => resolve(response ?? { error: chrome.runtime.lastError?.message ?? 'Litos did not respond.' }));
         });
-        if (!data.profile || !data.applicationProfile) {
-          if (statusEl) statusEl.textContent = `${asSentence(data.error) || 'Litos could not load your saved answers.'} Nothing was submitted.`;
+        const responseRetrySafety = freeManualRetrySafetyFromUnknown(data.retry_safety);
+        const responseApplicationId = isValidFreeFillApplicationId(data.application_id)
+          ? data.application_id
+          : isValidFreeFillApplicationId(dashboardFreeFillApplicationId)
+            ? dashboardFreeFillApplicationId
+            : null;
+        const exactCancellationProvedSafe = data.reservation_cancelled === true
+          && responseRetrySafety?.kind === 'safe_not_sent'
+          && responseRetrySafety.attemptId === requestedSubmissionEventId
+          && responseRetrySafety.proofKind === 'extension_cancelled_before_press';
+        if (
+          data.error
+          ||
+          !isValidFreeFillApplicationId(data.application_id)
+          || !isValidFreeSubmissionEventId(data.submission_event_id)
+        ) {
+          if (statusEl) {
+            statusEl.textContent = exactCancellationProvedSafe
+              ? `${asSentence(data.error) || 'Litos could not reserve this manual submission safely.'} The exact reservation was cancelled before any press.`
+              : `${asSentence(data.error) || 'Litos could not verify this manual submission reservation.'} Submit and Retry stay locked while Litos checks the exact server outcome.`;
+          }
           if (yesBtn) {
-            yesBtn.disabled = false;
-            yesBtn.textContent = 'Retry';
+            yesBtn.disabled = !exactCancellationProvedSafe;
+            yesBtn.textContent = exactCancellationProvedSafe ? 'Retry' : 'Retry locked';
+          }
+          if (noBtn) {
+            noBtn.disabled = false;
+            noBtn.textContent = 'Close';
+          }
+          if (exactCancellationProvedSafe) {
+            releasePreArmBoundaryShield(actionBoundaryEpoch);
+            return;
+          }
+          if (responseApplicationId) {
+            const refreshed = await refreshFreeManualRetrySafety(responseApplicationId, window.location.href);
+            if (refreshed.safe) {
+              releasePreArmBoundaryShield(actionBoundaryEpoch);
+              if (yesBtn) {
+                yesBtn.disabled = false;
+                yesBtn.textContent = 'Retry';
+              }
+              if (statusEl) {
+                statusEl.textContent = 'The server confirmed that no employer submission is active. You can retry the fill.';
+              }
+            }
+          }
+          return;
+        }
+        // The reservation now exists, so guard every current or future final control before any
+        // resume read or DOM fill can fail, time out, or replace the button underneath us.
+        const reservedAtsName = freeManualAtsNameForCurrentPage();
+        armFreeManualSubmissionOutcomeWhenAvailable(
+          data.application_id,
+          data.submission_event_id,
+          reservedAtsName,
+          statusEl,
+          actionBoundaryEpoch,
+        );
+        if (!freeManualSubmissionAtsSupported(reservedAtsName) || !atsCanAutoSubmit(reservedAtsName)) {
+          if (statusEl) {
+            statusEl.textContent = FREE_MANUAL_SUBMISSION_UNAVAILABLE_COPY;
+          }
+          if (yesBtn) {
+            yesBtn.disabled = true;
+            yesBtn.textContent = 'Unavailable here';
+          }
+          if (noBtn) {
+            noBtn.disabled = false;
+            noBtn.textContent = 'Close';
+          }
+          return;
+        }
+        if (!data.profile || !data.applicationProfile) {
+          const cancelled = await cancelFreeManualSubmissionBeforeReplay(
+            data.application_id,
+            data.submission_event_id,
+            window.location.href,
+          );
+          if (cancelled.ok) {
+            const releasedEpoch = activeFreeManualBoundaryCleanup?.();
+            if (releasedEpoch !== null && releasedEpoch !== undefined) {
+              releasePreArmBoundaryShield(releasedEpoch);
+            }
+          }
+          if (statusEl) {
+            statusEl.textContent = cancelled.ok
+              ? `${asSentence(data.error) || 'Litos could not load your saved answers.'} The exact reservation was cancelled before any press.`
+              : `${asSentence(data.error) || 'Litos could not load your saved answers.'} Submit and Retry stay locked because the exact cancellation was not confirmed.`;
+          }
+          if (yesBtn) {
+            yesBtn.disabled = !cancelled.ok;
+            yesBtn.textContent = cancelled.ok ? 'Retry' : 'Retry locked';
           }
           if (noBtn) {
             noBtn.disabled = false;
@@ -2099,12 +2783,16 @@ export default defineContentScript({
         const resumeAttached = Boolean(resumeBlob)
           && !freeFillResult.skipped_reasons.some((reason) => /^resume:/i.test(reason));
         const resumeMissing = !resumeAttached;
-        // GET_FREE_FILL_DATA has already owner-resolved this canonical application. Arm the native
-        // final control before rendering completion or waiting on the separate fill-metadata write,
-        // so a fast applicant click is still observed while Tracker sync is in flight.
-        if (data.application_id) {
-          armFreeManualSubmissionOutcomeWhenAvailable(data.application_id, freeFillResult.ats_name);
-        }
+        // GET_FREE_FILL_DATA has owner-resolved the canonical application and durably reserved this
+        // exact event before any fields were filled. Arm the native final control before rendering
+        // completion or waiting on the separate fill-metadata write, so a fast click is observed.
+        armFreeManualSubmissionOutcomeWhenAvailable(
+          data.application_id,
+          data.submission_event_id,
+          freeFillResult.ats_name,
+          statusEl,
+          actionBoundaryEpoch,
+        );
         renderFillSummary(statusEl, freeFillResult, { resumeMissing, autoSubmitHeld: true });
         armValidationAuthority(statusEl, freeFillResult, resumeMissing);
         armCaptchaStall(card, statusEl, { company, role: title, atsName: freeFillResult.ats_name });
@@ -2136,7 +2824,6 @@ export default defineContentScript({
           statusEl?.querySelector('#litos-tracker-sync-warning')?.remove();
           if (result.application_id) {
             data.application_id = result.application_id;
-            armFreeManualSubmissionOutcomeWhenAvailable(result.application_id, freeFillResult.ats_name);
           }
           if (result.ok) {
             return;
@@ -2266,6 +2953,10 @@ export default defineContentScript({
         dismiss();
       });
       card.querySelector('#wp-resume-yes')?.addEventListener('click', async () => {
+        // Own every employer boundary before any async profile, generation, resume, or form work.
+        // The generated lane is held for 0.6.2, while supported Free ATS flows replace this shield
+        // with their exact reserved delegate after the backend acknowledgement.
+        const actionBoundaryEpoch = activatePreArmBoundaryShield();
         actionStarted = true;
         const yesBtn = card.querySelector<HTMLButtonElement>('#wp-resume-yes');
         const noBtn = card.querySelector<HTMLButtonElement>('#wp-resume-no');
@@ -2293,7 +2984,7 @@ export default defineContentScript({
           stopOrb?.();
           stopOrb = null;
           if (orbCanvas) orbCanvas.style.display = 'none';
-          await runFreeFactualFill(yesBtn, noBtn, fillRoute.showUpgrade);
+          await runFreeFactualFill(yesBtn, noBtn, fillRoute.showUpgrade, actionBoundaryEpoch);
           return;
         }
 
@@ -2311,12 +3002,16 @@ export default defineContentScript({
         // an auto-submit countdown for a card that no longer exists. isConnected is the dismissal
         // signal: every dismiss path ends in card.remove(). The generation result itself stays
         // cached per job, so nothing paid for is thrown away; re-opening the card reuses it.
-        if (!card.isConnected) return;
+        if (!card.isConnected) {
+          releasePreArmBoundaryShield(actionBoundaryEpoch);
+          return;
+        }
         if (!handoffApplicationId && result?.api_error?.status === 402) {
-          await runFreeFactualFill(yesBtn, noBtn, true);
+          await runFreeFactualFill(yesBtn, noBtn, true, actionBoundaryEpoch);
           return;
         }
         if (!result || result.error || !result.profile || !result.applicationProfile || !result.resume) {
+          releasePreArmBoundaryShield(actionBoundaryEpoch);
           if (statusEl) statusEl.textContent = `${asSentence(result?.error) || 'We could not build a resume.'} Nothing was attached or submitted.`;
           generationController.announce('The resume did not build. Try again.');
           if (yesBtn) {
@@ -2830,7 +3525,8 @@ export default defineContentScript({
             required: true,
           })),
         ].filter((question, index, all) => all.findIndex((candidate) => candidate.id === question.id) === index);
-        const otherwiseReadyForAutomaticSubmission = autoSubmitOn
+        const otherwiseReadyForAutomaticSubmission = GENERATED_EXTENSION_SUBMISSION_ENABLED
+          && autoSubmitOn
           && atsCanAutoSubmit(fillResult.ats_name)
           && Boolean(finalSubmitBtn)
           && !resumeMissing
@@ -2892,14 +3588,24 @@ export default defineContentScript({
             || hasEmptyRequiredFields() || hasApplicationDecisionControls() || document.hidden || captchaWaiting);
         reportEvent(false);
 
-        if (autoSubmitOn && !autoSubmitHeld && finalSubmitBtn) {
+        if (GENERATED_EXTENSION_SUBMISSION_ENABLED && autoSubmitOn && !autoSubmitHeld && finalSubmitBtn) {
           runAutoSubmitCountdown(card, statusEl, yesBtn, noBtn, finalSubmitBtn, fillResult, resume.resume_id, reportEvent, 'Submitting', handoffSubmissionGuard, Boolean(handoffApplicationId));
           return;
         }
 
-        if (finalSubmitBtn) armManualSubmissionTracking(finalSubmitBtn, resume.resume_id, statusEl, fillResult.ats_name, handoffSubmissionGuard, Boolean(handoffApplicationId));
+        if (finalSubmitBtn && GENERATED_EXTENSION_SUBMISSION_ENABLED) {
+          armManualSubmissionTracking(finalSubmitBtn, resume.resume_id, statusEl, fillResult.ats_name, handoffSubmissionGuard, Boolean(handoffApplicationId));
+        } else if (finalSubmitBtn && statusEl) {
+          statusEl.textContent = 'Submission from extension-filled paid applications is paused for this safety update. Nothing was sent.';
+        }
 
         submitFromDashboard = async (_approvedQuestions) => {
+          if (!GENERATED_EXTENSION_SUBMISSION_ENABLED) {
+            return {
+              ok: false,
+              error: 'Submission from extension-filled paid applications is paused for this safety update. Nothing was sent.',
+            };
+          }
           const handoffGuardError = handoffSubmissionGuard();
           if (handoffGuardError) return { ok: false, error: handoffGuardError };
           if (!atsCanAutoSubmit(fillResult.ats_name)) {
@@ -2995,8 +3701,6 @@ export default defineContentScript({
     // context change) can tear the countdown down. null whenever no countdown is running.
     // Takes the message to show, so a caller that knows WHY it is cancelling can say so. A CAPTCHA
     // stall is the case that needs it: 'Stopped' alone leaves the applicant guessing.
-    let activeAutoSubmitCancel: ((msg?: string) => void) | null = null;
-
     // Opt-in only (AutofillSetupScreen toggle). Instead of clicking Submit the instant the fill
     // finishes, this anchors a live countdown timer directly onto the page's own Submit button:
     // a depleting ring with the seconds remaining and a big Cancel control, pinned over the
@@ -3618,26 +4322,15 @@ export default defineContentScript({
     function genericInit() {
       if (contentInitRoute(window.location) !== 'generic') return;
       document.getElementById('litos-resume-card')?.remove();
-      if (!isLikelyApplicationForm()) {
-        const note = document.createElement('div');
-        note.id = 'litos-generic-note';
-        note.style.cssText =
-          `position:fixed;bottom:${OVERLAY.bottom};right:${OVERLAY.right};z-index:${OVERLAY.z};background:${COLOR.surface};border:1px solid ${COLOR.border};` +
-          `border-radius:${RADIUS.card};padding:12px 16px;font-family:${FONT.sans};color-scheme:only light;` +
-          `font-size:12px;line-height:1.4;color:${COLOR.ink};max-width:${OVERLAY.width};`;
-        note.textContent = "Litos could not find an application form on this page. Open the page that has the boxes to fill in, then try again.";
-        document.getElementById('litos-generic-note')?.remove();
-        document.body.appendChild(note);
-        setTimeout(() => note.remove(), 6000);
-        return;
-      }
-      const job = getGenericJobDetails();
-      // Company-hosted forms count too: isLikelyApplicationForm() has already confirmed this page
-      // is a real application (resume upload, or name AND email), which is the same bar the ATS
-      // path uses. This branch only runs on an on-demand inject from the popup, so the student
-      // has explicitly pointed Litos at this form.
-      startHarvest();
-      injectResumeFillCard(job.title, job.company, extractGenericJdText, fillGenericApplication);
+      document.getElementById('litos-generic-note')?.remove();
+      const unavailable = document.createElement('div');
+      unavailable.id = 'litos-generic-note';
+      unavailable.style.cssText =
+        `position:fixed;bottom:${OVERLAY.bottom};right:${OVERLAY.right};z-index:${OVERLAY.z};background:${COLOR.surface};border:1px solid ${COLOR.border};` +
+        `border-radius:${RADIUS.card};padding:12px 16px;font-family:${FONT.sans};color-scheme:only light;` +
+        `font-size:12px;line-height:1.4;color:${COLOR.ink};max-width:${OVERLAY.width};`;
+      unavailable.textContent = FREE_MANUAL_SUBMISSION_UNAVAILABLE_COPY;
+      document.body.appendChild(unavailable);
     }
     w.__litosGenericInit = genericInit;
 

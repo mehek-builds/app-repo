@@ -9,6 +9,9 @@ export default defineConfig({
     description:
       `${PRODUCT_NAME} fills job applications for free. Trial and Litos+ add tailored resumes, outreach, and opt-in auto-submit.`,
     version: EXTENSION_VERSION,
+    // runtime.getContexts is the permission-free, document-bound inventory used by the update
+    // submission fence. Chrome 116 is the first release that provides it.
+    minimum_chrome_version: '116',
     // Keep this list minimal: every extra permission widens the install warning
     // and slows Chrome Web Store review. API calls go through the background
     // worker and rely on the backend's CORS, so no host_permissions in prod.

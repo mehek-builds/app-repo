@@ -21,7 +21,7 @@ import { overloadWaitMs, overloadBudgetRemains, RESUME_OVERLOAD_BUDGET_MS } from
 // Pure salary/posting helpers (R-031). adapters/salary is a LEAF module (types only), so this
 // import does not pull the DOM-adjacent adapter graph into the service worker bundle.
 import { parseAshbyPostingRef, selectPostingCompensation, type PostingCompensation } from '../lib/adapters/salary';
-import { PRODUCT_NAME, type ProductMeta } from '../lib/product';
+import { EXTENSION_VERSION, PRODUCT_NAME, type ProductMeta } from '../lib/product';
 import type { ApplicationProfile, GeneratedResume, PendingDraft, Profile } from '../lib/types';
 import {
   ARMED_HANDOFF_KEY,
@@ -72,6 +72,7 @@ import { createSessionClearMessageHandler } from '../lib/session-clear';
 import { needsAutomaticSubmissionEntitlement } from '../lib/submission-entitlement';
 import { settleOutreachDraftBatch, type OutreachDraftFailure } from '../lib/outreach-draft-batch';
 import { derivedOperationId } from '../lib/operation-id';
+import { deliverAutofillEventWithStableId } from '../lib/autofill-event-delivery';
 import {
   checkoutReturnMismatch,
   parsePendingExtensionCheckout,
@@ -103,6 +104,36 @@ import {
   freeSubmissionNavigationMatches,
   type PendingFreeSubmissionMonitor,
 } from '../lib/free-submission-monitor';
+import {
+  authorizeFreeManualSubmissionState,
+  classifyFreeManualSubmissionState,
+  freeManualAcceptedOutcomeDisposition,
+  freeManualSafeNotSentDisposition,
+  freeManualSubmissionStateKey,
+  freeManualReservationWriteDisposition,
+  freeManualSubmissionStartupResponse,
+  freeManualSubmissionStartupState,
+  parseFreeManualSubmissionState,
+  reservedFreeManualSubmissionState,
+  transitionFreeManualSubmissionStateToMonitoring,
+  type FreeManualMonitoringState,
+  type FreeManualReservedState,
+  type FreeManualSubmissionState,
+} from '../lib/free-manual-submission-state';
+import {
+  isValidFreeSubmissionEventId,
+  parseFreeSubmissionPreflight,
+  parseFreeSubmissionReservation,
+} from '../lib/free-submission-outcome';
+import {
+  FREE_MANUAL_SUBMISSION_UNAVAILABLE_COPY,
+  freeManualSubmissionAtsSupported,
+} from '../lib/free-manual-submission-capability';
+import {
+  RELEASE_UPDATE_FENCE_STORAGE_KEY,
+} from '../lib/release-update-fence';
+import { ReleaseUpdateFenceController } from '../lib/release-update-fence-controller';
+import { contentScriptPersistsAfterReload } from '../lib/release-update-fence-url';
 
 // Latched off once the backend reports onboarding complete. Service-worker memory is fine for
 // this: the worst case on a restart is one wasted 403, which re-latches it immediately.
@@ -131,13 +162,13 @@ const armedHandoffMutations = new KeyedMutationQueue();
 const handoffPacketBindingMutations = new KeyedMutationQueue();
 const pendingSubmissionMutations = new KeyedMutationQueue();
 const applicationTabMutations = new KeyedMutationQueue();
-const freeSubmissionMonitorMutations = new KeyedMutationQueue();
+const freeManualSubmissionStateMutations = new KeyedMutationQueue();
 const freeSubmissionMonitorStartsInFlight = new Map<number, number>();
 const ARMED_HANDOFF_MUTATION_KEY = 'armed-handoffs';
 const HANDOFF_PACKET_BINDING_MUTATION_KEY = 'handoff-packet-bindings';
 const PENDING_SUBMISSION_MUTATION_KEY = 'pending-submissions';
 const APPLICATION_TAB_MUTATION_KEY = 'application-tabs';
-const FREE_SUBMISSION_MONITOR_PREFIX = 'litos_pending_free_submission';
+const FREE_MANUAL_RESERVATION_PREFIX = 'litos_pending_free_manual_reservation';
 const PENDING_PREMIUM_ACTION_KEY = 'litos_pending_premium_action';
 const PENDING_PREMIUM_RETRY_FOCUS_KEY = 'litos_pending_premium_retry_focus';
 const PREMIUM_RETRY_FOCUS_TTL_MS = 5 * 60_000;
@@ -150,6 +181,8 @@ type PendingPremiumRetryFocus = {
   tabId: number;
   createdAt: number;
 };
+
+type PendingFreeManualReservation = FreeManualReservedState;
 
 function beginFreeSubmissionMonitorStart(tabId: number): void {
   freeSubmissionMonitorStartsInFlight.set(
@@ -406,8 +439,160 @@ async function setPendingSubmission(tabId: number, pending: PendingExtensionSubm
   });
 }
 
-function freeSubmissionMonitorKey(tabId: number, frameId: number): string {
-  return `${FREE_SUBMISSION_MONITOR_PREFIX}:${tabId}:${frameId}`;
+function freeManualReservationKey(tabId: number, frameId: number): string {
+  return freeManualSubmissionStateKey(tabId, frameId);
+}
+
+function freeManualSubmissionMutationKey(tabId: number): string {
+  return `free-manual-tab:${tabId}`;
+}
+
+async function pendingFreeManualSubmissionStartupState(
+  tabId: number,
+  frameId: number,
+): Promise<{ pending: FreeManualReservedState | null; blocked: boolean }> {
+  return freeManualSubmissionStateMutations.run(freeManualSubmissionMutationKey(tabId), async () => {
+    const stored = await chrome.storage.session.get(null);
+    const values = Object.entries(stored)
+      .filter(([key]) => key.startsWith(`${FREE_MANUAL_RESERVATION_PREFIX}:${tabId}:`))
+      .map(([, value]) => value);
+    return freeManualSubmissionStartupState(values, frameId);
+  });
+}
+
+async function storePendingFreeManualReservation(
+  pending: PendingFreeManualReservation,
+): Promise<void> {
+  const key = freeManualReservationKey(pending.tabId, pending.frameId);
+  await freeManualSubmissionStateMutations.run(freeManualSubmissionMutationKey(pending.tabId), async () => {
+    const stored = await chrome.storage.session.get(null);
+    const tabStateValues = Object.entries(stored)
+      .filter(([storedKey]) => storedKey.startsWith(`${FREE_MANUAL_RESERVATION_PREFIX}:${pending.tabId}:`))
+      .map(([, value]) => value);
+    const disposition = freeManualReservationWriteDisposition(tabStateValues, pending);
+    if (disposition.kind === 'unchanged') return;
+    if (disposition.kind === 'blocked' && disposition.reason === 'monitoring') {
+      throw new Error('This tab is already monitoring a manual submission outcome. It cannot be reopened for another click.');
+    }
+    if (disposition.kind === 'blocked') {
+      throw new Error('Another manual submission reservation is active in this tab.');
+    }
+    await chrome.storage.session.set({ [key]: pending });
+  });
+}
+
+async function clearPendingFreeManualReservation(
+  tabId: number,
+  frameId: number,
+  eventId: string,
+): Promise<void> {
+  const key = freeManualReservationKey(tabId, frameId);
+  await freeManualSubmissionStateMutations.run(freeManualSubmissionMutationKey(tabId), async () => {
+    const stored = await chrome.storage.session.get(key);
+    const classified = classifyFreeManualSubmissionState(stored[key]);
+    const existing = classified.kind === 'valid' && classified.state.phase === 'reserved'
+      ? classified.state
+      : classified.kind === 'expired_reserved'
+        ? classified.state
+        : null;
+    if (!existing || existing.eventId !== eventId) return;
+    await chrome.storage.session.remove(key);
+  });
+}
+
+async function closeAndClearPendingFreeManualReservation(input: {
+  token: string;
+  applicationId: string;
+  eventId: string;
+  tabId: number;
+  frameId: number;
+  authEpoch: number;
+  expectedState?: FreeManualSubmissionState;
+}): Promise<FreeManualRetrySafety> {
+  assertCurrentAuthEpoch(input.authEpoch);
+  const safety = await closeAndClearPendingFreeManualReservationWithCapturedToken(input);
+  assertCurrentAuthEpoch(input.authEpoch);
+  return safety;
+}
+
+async function closeAndClearPendingFreeManualReservationWithCapturedToken(input: {
+  token: string;
+  applicationId: string;
+  eventId: string;
+  tabId: number;
+  frameId: number;
+  expectedState?: FreeManualSubmissionState;
+}): Promise<FreeManualRetrySafety> {
+  const key = freeManualReservationKey(input.tabId, input.frameId);
+  return freeManualSubmissionStateMutations.run(freeManualSubmissionMutationKey(input.tabId), async () => {
+    const stored = await chrome.storage.session.get(key);
+    const classified = classifyFreeManualSubmissionState(stored[key]);
+    const state = classified.kind === 'valid'
+      ? classified.state
+      : classified.kind === 'expired_reserved' || classified.kind === 'expired_monitoring'
+        ? classified.state
+        : null;
+    if (
+      !state
+      || state.eventId !== input.eventId
+      || state.applicationId !== input.applicationId
+      || state.tabId !== input.tabId
+      || state.frameId !== input.frameId
+      || (state.phase === 'monitoring' && state.boundaryLeaseId)
+      || (input.expectedState
+        && freeManualSafeNotSentDisposition(state, input.expectedState) !== 'remove')
+    ) throw new Error('The exact manual submission reservation is no longer active.');
+    const safety = await postFreeManualSubmissionBeforeReplayCancellation(
+      input.token,
+      input.applicationId,
+      input.eventId,
+    );
+    const current = await chrome.storage.session.get(key);
+    const disposition = freeManualSafeNotSentDisposition(current[key], state);
+    if (disposition === 'blocked') {
+      throw new Error('A newer or authorized manual submission state replaced the closed attempt.');
+    }
+    if (disposition === 'remove') await chrome.storage.session.remove(key);
+    return safety;
+  });
+}
+
+async function reconcileRecoverableFreeManualSubmissionStates(tabId: number): Promise<void> {
+  const candidates = await freeManualSubmissionStateMutations.run(freeManualSubmissionMutationKey(tabId), async () => {
+    const stored = await chrome.storage.session.get(null);
+    return Object.entries(stored)
+      .filter(([key]) => key.startsWith(`${FREE_MANUAL_RESERVATION_PREFIX}:${tabId}:`))
+      .flatMap<FreeManualSubmissionState>(([, value]) => {
+        const classified = classifyFreeManualSubmissionState(value);
+        if (classified.kind === 'expired_reserved') return [classified.state];
+        const state = classified.kind === 'valid' || classified.kind === 'expired_monitoring'
+          ? classified.state
+          : null;
+        return state?.phase === 'monitoring'
+          && state.boundaryLeaseId === null
+          && state.boundaryActivationId === null
+          && state.boundaryExpiresAt === null
+          ? [state]
+          : [];
+      });
+  });
+  if (candidates.length === 0) return;
+  const token = await getStoredToken();
+  if (!token) return;
+  const authEpoch = currentAuthEpoch();
+  const snapshot = await refreshEntitlementSnapshot(token, authEpoch);
+  for (const candidate of candidates) {
+    if (snapshot.account_id !== candidate.accountId) continue;
+    await closeAndClearPendingFreeManualReservation({
+      token,
+      applicationId: candidate.applicationId,
+      eventId: candidate.eventId,
+      tabId,
+      frameId: candidate.frameId,
+      authEpoch,
+      expectedState: candidate,
+    });
+  }
 }
 
 function safeFreeSubmissionUrl(value: unknown): string | null {
@@ -614,9 +799,27 @@ async function pendingFreeSubmissionMonitor(
   tabId: number,
   frameId: number,
 ): Promise<PendingFreeSubmissionMonitor | null> {
-  const key = freeSubmissionMonitorKey(tabId, frameId);
+  const key = freeManualReservationKey(tabId, frameId);
   const stored = await chrome.storage.session.get(key);
-  return (stored[key] as PendingFreeSubmissionMonitor | undefined) ?? null;
+  const classified = classifyFreeManualSubmissionState(stored[key]);
+  const state = classified.kind === 'valid' && classified.state.phase === 'monitoring'
+    ? classified.state
+    : classified.kind === 'expired_monitoring'
+      ? classified.state
+      : null;
+  return state ? {
+    eventId: state.eventId,
+    applicationId: state.applicationId,
+    tabId: state.tabId,
+    frameId: state.frameId,
+    accountId: state.accountId,
+    authEpoch: state.authEpoch,
+    startUrl: state.startUrl,
+    startedAt: state.monitoringStartedAt,
+    boundaryLeaseId: state.boundaryLeaseId,
+    boundaryActivationId: state.boundaryActivationId,
+    boundaryExpiresAt: state.boundaryExpiresAt,
+  } : null;
 }
 
 async function pendingFreeSubmissionMonitorForTab(
@@ -624,21 +827,82 @@ async function pendingFreeSubmissionMonitorForTab(
 ): Promise<PendingFreeSubmissionMonitor | null> {
   const stored = await chrome.storage.session.get(null);
   return Object.entries(stored)
-    .filter(([key]) => key.startsWith(`${FREE_SUBMISSION_MONITOR_PREFIX}:${tabId}:`))
-    .map(([, value]) => value as PendingFreeSubmissionMonitor)
-    .filter((value) => Boolean(value?.eventId && value?.applicationId))
-    .sort((left, right) => right.startedAt - left.startedAt)[0] ?? null;
+    .filter(([key]) => key.startsWith(`${FREE_MANUAL_RESERVATION_PREFIX}:${tabId}:`))
+    .map(([, value]) => {
+      const classified = classifyFreeManualSubmissionState(value);
+      return classified.kind === 'valid' && classified.state.phase === 'monitoring'
+        ? classified.state
+        : classified.kind === 'expired_monitoring'
+          ? classified.state
+          : null;
+    })
+    .filter((value): value is FreeManualMonitoringState => Boolean(value))
+    .sort((left, right) => right.monitoringStartedAt - left.monitoringStartedAt)
+    .map((state) => ({
+      eventId: state.eventId,
+      applicationId: state.applicationId,
+      tabId: state.tabId,
+      frameId: state.frameId,
+      accountId: state.accountId,
+      authEpoch: state.authEpoch,
+      startUrl: state.startUrl,
+      startedAt: state.monitoringStartedAt,
+      boundaryLeaseId: state.boundaryLeaseId,
+      boundaryActivationId: state.boundaryActivationId,
+      boundaryExpiresAt: state.boundaryExpiresAt,
+    }))[0] ?? null;
 }
 
-async function storePendingFreeSubmissionMonitor(pending: PendingFreeSubmissionMonitor): Promise<void> {
-  const key = freeSubmissionMonitorKey(pending.tabId, pending.frameId);
-  await freeSubmissionMonitorMutations.run(key, async () => {
+async function clearAcceptedFreeSubmissionOutcomeState(input: {
+  pending: PendingFreeSubmissionMonitor;
+  eventId: string;
+  applicationId: string;
+  leaseId: string;
+  activationId: string;
+}): Promise<void> {
+  const key = freeManualReservationKey(input.pending.tabId, input.pending.frameId);
+  await freeManualSubmissionStateMutations.run(
+    freeManualSubmissionMutationKey(input.pending.tabId),
+    async () => {
+      const stored = await chrome.storage.session.get(key);
+      const disposition = freeManualAcceptedOutcomeDisposition(stored[key], {
+        eventId: input.eventId,
+        applicationId: input.applicationId,
+        leaseId: input.leaseId,
+        activationId: input.activationId,
+        tabId: input.pending.tabId,
+        frameId: input.pending.frameId,
+        accountId: input.pending.accountId,
+        authEpoch: input.pending.authEpoch,
+        startUrl: input.pending.startUrl,
+      });
+      if (disposition === 'already_removed') return;
+      if (disposition !== 'remove') {
+        throw new Error('The accepted outcome belongs to a different monitoring state.');
+      }
+      await chrome.storage.session.remove(key);
+    },
+  );
+}
+
+async function transitionPendingFreeManualReservationToMonitor(pending: PendingFreeSubmissionMonitor): Promise<void> {
+  const key = freeManualReservationKey(pending.tabId, pending.frameId);
+  await freeManualSubmissionStateMutations.run(freeManualSubmissionMutationKey(pending.tabId), async () => {
     assertCurrentAuthEpoch(pending.authEpoch);
-    const existing = await pendingFreeSubmissionMonitor(pending.tabId, pending.frameId);
-    if (existing && existing.eventId !== pending.eventId) {
-      throw new Error('Another Free submission outcome is still being observed in this frame.');
-    }
-    await chrome.storage.session.set({ [key]: pending });
+    const stored = await chrome.storage.session.get(key);
+    const current = parseFreeManualSubmissionState(stored[key]);
+    const monitoring = current && transitionFreeManualSubmissionStateToMonitoring(current, {
+      eventId: pending.eventId,
+      applicationId: pending.applicationId,
+      tabId: pending.tabId,
+      frameId: pending.frameId,
+      accountId: pending.accountId,
+      authEpoch: pending.authEpoch,
+      startUrl: pending.startUrl,
+      now: Date.now(),
+    });
+    if (!monitoring) throw new Error('The exact pre-click reservation is no longer active.');
+    await chrome.storage.session.set({ [key]: monitoring });
     if (!authEpochIsCurrent(pending.authEpoch)) {
       await chrome.storage.session.remove(key);
       assertCurrentAuthEpoch(pending.authEpoch);
@@ -646,32 +910,82 @@ async function storePendingFreeSubmissionMonitor(pending: PendingFreeSubmissionM
   });
 }
 
-async function clearPendingFreeSubmissionMonitor(
-  tabId: number,
-  frameId: number,
-  eventId?: string,
-): Promise<void> {
-  const key = freeSubmissionMonitorKey(tabId, frameId);
-  await freeSubmissionMonitorMutations.run(key, async () => {
-    if (eventId) {
-      const current = await pendingFreeSubmissionMonitor(tabId, frameId);
-      if (!current || current.eventId !== eventId) return;
+async function authorizePendingFreeManualSubmissionMonitor(input: {
+  eventId: string;
+  applicationId: string;
+  tabId: number;
+  frameId: number;
+  leaseId: string;
+  activationId: string;
+  expiresAt: number;
+  authEpoch: number;
+}): Promise<void> {
+  const key = freeManualReservationKey(input.tabId, input.frameId);
+  await freeManualSubmissionStateMutations.run(freeManualSubmissionMutationKey(input.tabId), async () => {
+    assertCurrentAuthEpoch(input.authEpoch);
+    const stored = await chrome.storage.session.get(key);
+    const classified = classifyFreeManualSubmissionState(stored[key]);
+    const current = classified.kind === 'valid' ? classified.state : null;
+    if (!current || current.phase !== 'monitoring') {
+      throw new Error('The exact manual submission monitor is no longer active.');
     }
-    await chrome.storage.session.remove(key);
+    const authorized = authorizeFreeManualSubmissionState(current, {
+      eventId: input.eventId,
+      applicationId: input.applicationId,
+      tabId: input.tabId,
+      frameId: input.frameId,
+      accountId: current.accountId,
+      authEpoch: current.authEpoch,
+      startUrl: current.startUrl,
+      leaseId: input.leaseId,
+      activationId: input.activationId,
+      expiresAt: input.expiresAt,
+      now: Date.now(),
+    });
+    if (!authorized) throw new Error('The final boundary authorization did not match this monitor.');
+    await chrome.storage.session.set({ [key]: authorized });
+    if (!authEpochIsCurrent(input.authEpoch)) {
+      await chrome.storage.session.remove(key);
+      assertCurrentAuthEpoch(input.authEpoch);
+    }
   });
 }
 
-async function clearPendingFreeSubmissionMonitorForTabEvent(
-  tabId: number,
-  eventId: string,
-): Promise<void> {
-  const stored = await chrome.storage.session.get(null);
-  const matching = Object.entries(stored)
-    .filter(([key, value]) => key.startsWith(`${FREE_SUBMISSION_MONITOR_PREFIX}:${tabId}:`)
-      && (value as PendingFreeSubmissionMonitor | undefined)?.eventId === eventId)
-    .map(([key]) => key);
-  await Promise.all(matching.map((key) =>
-    freeSubmissionMonitorMutations.run(key, () => chrome.storage.session.remove(key))));
+async function closeAuthorizedFreeManualSubmissionBeforeResponse(input: {
+  token: string;
+  eventId: string;
+  applicationId: string;
+  tabId: number;
+  frameId: number;
+  leaseId: string;
+  activationId: string;
+  authEpoch: number;
+}): Promise<FreeManualRetrySafety> {
+  const key = freeManualReservationKey(input.tabId, input.frameId);
+  return freeManualSubmissionStateMutations.run(freeManualSubmissionMutationKey(input.tabId), async () => {
+    assertCurrentAuthEpoch(input.authEpoch);
+    const stored = await chrome.storage.session.get(key);
+    const classified = classifyFreeManualSubmissionState(stored[key]);
+    const current = classified.kind === 'valid' ? classified.state : null;
+    if (
+      !current
+      || current.phase !== 'monitoring'
+      || current.eventId !== input.eventId
+      || current.applicationId !== input.applicationId
+      || current.tabId !== input.tabId
+      || current.frameId !== input.frameId
+      || current.boundaryLeaseId !== input.leaseId
+      || current.boundaryActivationId !== input.activationId
+    ) throw new Error('The exact authorized manual submission monitor is no longer active.');
+    const safety = await postFreeManualSubmissionBeforeReplayCancellation(
+      input.token,
+      input.applicationId,
+      input.eventId,
+    );
+    assertCurrentAuthEpoch(input.authEpoch);
+    await chrome.storage.session.remove(key);
+    return safety;
+  });
 }
 
 async function postExtensionOutcome(pending: PendingExtensionSubmission, outcome: 'confirmed' | 'failed' | 'unknown' | 'cancelled', finalUrl: string, confirmationText?: string) {
@@ -947,10 +1261,15 @@ async function writeArmedHandoffs(entries: ArmedHandoff[]): Promise<void> {
 async function ownedFreeFillHandoffData(
   token: string,
   applicationId: string,
+  submissionEventId: string,
   authEpoch: number,
 ): Promise<unknown> {
   assertCurrentAuthEpoch(authEpoch);
-  const response = await timeoutBackendFetch(`/applications/${applicationId}/fill-data`, { cache: 'no-store' }, token);
+  const response = await timeoutBackendFetch(
+    `/applications/${applicationId}/fill-data?event_id=${encodeURIComponent(submissionEventId)}`,
+    { cache: 'no-store' },
+    token,
+  );
   assertCurrentAuthEpoch(authEpoch);
   if (!response.ok) {
     if (response.status === 401 || response.status === 403) {
@@ -973,13 +1292,268 @@ async function ownedFreeFillHandoffData(
   return data;
 }
 
+type FreeManualRetrySafety =
+  | { kind: 'no_evidence' }
+  | {
+    kind: 'safe_not_sent';
+    attemptId: string;
+    proofKind: 'typed_pre_click_stop'
+      | 'applicant_checked_not_sent'
+      | 'employer_rejected_not_filed'
+      | 'employer_verification_pending_not_filed'
+      | 'provider_definitive_rejection'
+      | 'extension_cancelled_before_press';
+    resolvedAt: string;
+  }
+  | { kind: 'blocked_unverified'; attemptId: string; at: string; reason: 'opened' | 'pressed' | 'invalid_sequence' }
+  | {
+    kind: 'blocked_unverified';
+    attemptId: string;
+    at: string;
+    reason: 'boundary_authorized';
+    leaseId: string;
+    expiresAt: string;
+  }
+  | { kind: 'blocked_confirmed'; attemptId: string; confirmedAt: string };
+
+function freeManualRetrySafetyFromUnknown(value: unknown): FreeManualRetrySafety | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const safety = value as Record<string, unknown>;
+  const nonEmpty = (candidate: unknown): candidate is string => typeof candidate === 'string' && candidate.trim().length > 0;
+  const timestamp = (candidate: unknown): candidate is string => nonEmpty(candidate) && Number.isFinite(Date.parse(candidate));
+  if (safety.kind === 'no_evidence') return safety as FreeManualRetrySafety;
+  if (safety.kind === 'safe_not_sent'
+    && nonEmpty(safety.attemptId)
+    && (safety.proofKind === 'typed_pre_click_stop'
+      || safety.proofKind === 'applicant_checked_not_sent'
+      || safety.proofKind === 'employer_rejected_not_filed'
+      || safety.proofKind === 'employer_verification_pending_not_filed'
+      || safety.proofKind === 'provider_definitive_rejection'
+      || safety.proofKind === 'extension_cancelled_before_press')
+    && timestamp(safety.resolvedAt)) return safety as FreeManualRetrySafety;
+  if (safety.kind === 'blocked_unverified'
+    && nonEmpty(safety.attemptId)
+    && timestamp(safety.at)
+    && (safety.reason === 'opened' || safety.reason === 'pressed' || safety.reason === 'invalid_sequence')) {
+    return safety as FreeManualRetrySafety;
+  }
+  if (safety.kind === 'blocked_unverified'
+    && safety.reason === 'boundary_authorized'
+    && nonEmpty(safety.attemptId)
+    && timestamp(safety.at)
+    && nonEmpty(safety.leaseId)
+    && timestamp(safety.expiresAt)) return safety as FreeManualRetrySafety;
+  if (safety.kind === 'blocked_confirmed'
+    && nonEmpty(safety.attemptId)
+    && timestamp(safety.confirmedAt)) return safety as FreeManualRetrySafety;
+  return null;
+}
+
+function freeManualRetrySafetyFromError(error: unknown): FreeManualRetrySafety | null {
+  if (!isLitosApiError(error)) return null;
+  return freeManualRetrySafetyFromUnknown((error.body as unknown as Record<string, unknown>).retry_safety);
+}
+
+function freeManualRetrySafetyAllowsRetry(value: unknown): boolean {
+  const safety = freeManualRetrySafetyFromUnknown(value);
+  return safety?.kind === 'no_evidence' || safety?.kind === 'safe_not_sent';
+}
+
+async function reserveFreeManualSubmission(
+  token: string,
+  applicationId: string,
+  requestedEventId: string,
+  currentUrl: string,
+  authEpoch: number,
+): Promise<{ applicationId: string; eventId: string; resumed: boolean }> {
+  assertCurrentAuthEpoch(authEpoch);
+  const reservationResponse = await timeoutBackendFetch(
+    `/applications/${applicationId}/manual-submission-start`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Idempotency-Key': requestedEventId,
+      },
+      body: JSON.stringify({
+        event_id: requestedEventId,
+        current_url: currentUrl,
+      }),
+    },
+    token,
+  );
+  assertCurrentAuthEpoch(authEpoch);
+  if (!reservationResponse.ok) throw await apiErrorFromResponse(reservationResponse);
+  const reservation = parseFreeSubmissionReservation(
+    await reservationResponse.json().catch(() => null),
+    applicationId,
+    requestedEventId,
+  );
+  if (!reservation) {
+    throw new Error('Litos could not verify this manual submission reservation. Nothing was filled.');
+  }
+  return reservation;
+}
+
+async function closeFreeManualSubmissionBeforeReplay(
+  token: string,
+  applicationId: string,
+  eventId: string,
+  authEpoch: number,
+): Promise<FreeManualRetrySafety> {
+  assertCurrentAuthEpoch(authEpoch);
+  const safety = await postFreeManualSubmissionBeforeReplayCancellation(token, applicationId, eventId);
+  assertCurrentAuthEpoch(authEpoch);
+  return safety;
+}
+
+async function postFreeManualSubmissionBeforeReplayCancellation(
+  token: string,
+  applicationId: string,
+  eventId: string,
+): Promise<FreeManualRetrySafety> {
+  const response = await timeoutBackendFetch(
+    `/applications/${applicationId}/manual-submission-resolution`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Idempotency-Key': eventId,
+      },
+      body: JSON.stringify({
+        attempt_id: eventId,
+        found: false,
+        reason: 'extension_cancelled_before_press',
+      }),
+    },
+    token,
+  );
+  if (!response.ok) throw await apiErrorFromResponse(response);
+  const body = await response.json().catch(() => null) as {
+    application_id?: unknown;
+    attempt_id?: unknown;
+    found?: unknown;
+    retry_safety?: {
+      kind?: unknown;
+      attemptId?: unknown;
+      proofKind?: unknown;
+      resolvedAt?: unknown;
+    };
+  } | null;
+  const safety = freeManualRetrySafetyFromUnknown(body?.retry_safety);
+  if (
+    body?.application_id !== applicationId
+    || body.attempt_id !== eventId
+    || body.found !== false
+    || safety?.kind !== 'safe_not_sent'
+    || safety.attemptId !== eventId
+    || safety.proofKind !== 'extension_cancelled_before_press'
+  ) throw new Error('The cancelled submission was not closed with exact not-sent proof.');
+  return safety;
+}
+
+async function postFreeManualSubmissionUnknownOnClose(
+  token: string,
+  state: FreeManualMonitoringState,
+): Promise<void> {
+  if (!state.boundaryLeaseId || !state.boundaryActivationId) {
+    throw new Error('The monitoring state has no exact boundary authorization.');
+  }
+  const response = await timeoutBackendFetch(
+    `/applications/${state.applicationId}/manual-submission-outcome`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Idempotency-Key': state.eventId,
+      },
+      body: JSON.stringify({
+        event_id: state.eventId,
+        lease_id: state.boundaryLeaseId,
+        activation_id: state.boundaryActivationId,
+        outcome: 'unknown',
+        final_url: state.startUrl,
+      }),
+    },
+    token,
+  );
+  if (!response.ok) throw await apiErrorFromResponse(response);
+  const body = await response.json().catch(() => null) as {
+    application_id?: unknown;
+    event_id?: unknown;
+    outcome?: unknown;
+  } | null;
+  if (
+    body?.application_id !== state.applicationId
+    || body.event_id !== state.eventId
+    || body.outcome !== 'unknown'
+  ) throw new Error('The closed tab outcome was not bound to the exact monitored submission.');
+}
+
+async function reconcileFreeManualSubmissionStatesForTab(tabId: number): Promise<void> {
+  await freeManualSubmissionStateMutations.run(freeManualSubmissionMutationKey(tabId), async () => {
+    const stored = await chrome.storage.session.get(null);
+    const entries = Object.entries(stored)
+      .filter(([key]) => key.startsWith(`${FREE_MANUAL_RESERVATION_PREFIX}:${tabId}:`));
+    if (entries.length === 0) return;
+    const token = await getStoredToken();
+    if (!token) return;
+    let accountId: string;
+    try {
+      accountId = (await refreshEntitlementSnapshot(token, currentAuthEpoch())).account_id;
+    } catch {
+      return;
+    }
+    for (const [key, value] of entries) {
+      const classified = classifyFreeManualSubmissionState(value);
+      const state = classified.kind === 'valid'
+        ? classified.state
+        : classified.kind === 'expired_reserved' || classified.kind === 'expired_monitoring'
+          ? classified.state
+          : null;
+      if (!state || state.accountId !== accountId) continue;
+      try {
+        if (
+          state.phase === 'monitoring'
+          && state.boundaryLeaseId
+          && state.boundaryActivationId
+        ) {
+          await postFreeManualSubmissionUnknownOnClose(token, state);
+        } else {
+          await postFreeManualSubmissionBeforeReplayCancellation(
+            token,
+            state.applicationId,
+            state.eventId,
+          );
+        }
+        await chrome.storage.session.remove(key);
+      } catch {
+        // Keep the exact durable local binding. A later wake can retry reconciliation, while
+        // deleting it here could lose post-click evidence or expose a second live capability.
+      }
+    }
+  });
+}
+
+async function reconcileAllFreeManualSubmissionStates(): Promise<void> {
+  const stored = await chrome.storage.session.get(null);
+  const tabIds = new Set<number>();
+  for (const key of Object.keys(stored)) {
+    const match = new RegExp(`^${FREE_MANUAL_RESERVATION_PREFIX}:(\\d+):\\d+$`).exec(key);
+    if (match) tabIds.add(Number(match[1]));
+  }
+  await Promise.all([...tabIds].map((tabId) => reconcileFreeManualSubmissionStatesForTab(tabId)));
+}
+
 async function clearApplicationRuntimeState(): Promise<void> {
   await armedHandoffMutations.run(ARMED_HANDOFF_MUTATION_KEY, () => chrome.storage.session.remove(ARMED_HANDOFF_KEY));
   const stored = await chrome.storage.session.get(null);
   const continuationKeys = Object.keys(stored).filter((key) => key.startsWith(`${GATED_ATTENDED_CONTINUATION_PREFIX}:`));
   await Promise.all(continuationKeys.map((key) =>
     withGatedContinuationMutation(key, () => chrome.storage.session.remove(key))));
-  const otherKeys = Object.keys(stored).filter((key) => key === 'lastDetectedJob' || key === 'pendingDrafts');
+  const otherKeys = Object.keys(stored).filter((key) =>
+    key === 'lastDetectedJob'
+    || key === 'pendingDrafts');
   if (otherKeys.length) await chrome.storage.session.remove(otherKeys);
   await handoffPacketBindingMutations.run(
     HANDOFF_PACKET_BINDING_MUTATION_KEY,
@@ -999,6 +1573,7 @@ async function clearApplicationRuntimeState(): Promise<void> {
 }
 
 async function clearExtensionAccountSession(): Promise<void> {
+  await reconcileAllFreeManualSubmissionStates();
   await Promise.all([
     clearStoredSession(),
     clearApplicationRuntimeState(),
@@ -1354,11 +1929,156 @@ async function renderBadge(): Promise<void> {
   if (state.color) chrome.action.setBadgeBackgroundColor({ color: state.color });
 }
 
+async function messageExistingContentScript<T>(tabId: number, message: unknown): Promise<T | null> {
+  try {
+    return await Promise.race([
+      chrome.tabs.sendMessage(tabId, message) as Promise<T>,
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 1_000)),
+    ]);
+  } catch {
+    return null;
+  }
+}
+
+// Every worker starts closed. Missing, corrupt, stale, or active storage is recovered by an exact
+// context inventory, and only a persisted ready record for this installed version opens the gate.
+const releaseUpdateFence = new ReleaseUpdateFenceController({
+  installedVersion: EXTENSION_VERSION,
+  readStoredState: async () => {
+    const stored = await chrome.storage.local.get(RELEASE_UPDATE_FENCE_STORAGE_KEY);
+    return stored[RELEASE_UPDATE_FENCE_STORAGE_KEY];
+  },
+  writeStoredState: (state) =>
+    chrome.storage.local.set({ [RELEASE_UPDATE_FENCE_STORAGE_KEY]: state }),
+  getContexts: async (tabIds) => {
+    if (typeof chrome.runtime.getContexts !== 'function') {
+      throw new Error('Chrome cannot inventory existing Litos tab contexts safely.');
+    }
+    const contexts = await chrome.runtime.getContexts({
+      contextTypes: ['TAB'],
+      ...(tabIds ? { tabIds: [...tabIds] } : {}),
+    });
+    // WXT evaluates the background module while building with a deliberately small fake runtime.
+    // Read the installed manifest only when Chrome asks for a live context inventory.
+    const manifestMatches = chrome.runtime.getManifest().content_scripts
+      ?.flatMap((script) => script.matches ?? []) ?? [];
+    return contexts.map((context) => ({
+      tabId: context.tabId,
+      frameId: context.frameId,
+      documentId: context.documentId,
+      persistsAfterReload: contentScriptPersistsAfterReload(
+        context.documentUrl,
+        manifestMatches,
+      ),
+    }));
+  },
+  cancelTabs: async (tabIds) => {
+    const results = await Promise.all(tabIds.map(async (tabId) => ({
+      tabId,
+      response: await messageExistingContentScript<{ ok?: boolean; blocked?: boolean }>(tabId, {
+        type: 'LITOS_RELEASE_FENCE_CANCEL',
+        releaseVersion: EXTENSION_VERSION,
+      }),
+    })));
+    return results
+      .filter(({ response }) => response?.ok === true && response.blocked === true)
+      .map(({ tabId }) => tabId);
+  },
+  cancelAllTabs: async () => {
+    const tabs = await chrome.tabs.query({});
+    const tabIds = tabs
+      .map((tab) => tab.id)
+      .filter((tabId): tabId is number => Number.isInteger(tabId));
+    const results = await Promise.all(tabIds.map(async (tabId) => ({
+      tabId,
+      response: await messageExistingContentScript<{ ok?: boolean; blocked?: boolean }>(tabId, {
+        type: 'LITOS_RELEASE_FENCE_CANCEL',
+        releaseVersion: EXTENSION_VERSION,
+      }),
+    })));
+    return results
+      .filter(({ response }) => response?.ok === true && response.blocked === true)
+      .map(({ tabId }) => tabId);
+  },
+  reloadTab: async (tabId) => {
+    try {
+      await chrome.tabs.reload(tabId);
+      return 'reloaded';
+    } catch {
+      try {
+        await chrome.tabs.get(tabId);
+        return 'failed_live';
+      } catch {
+        return 'missing';
+      }
+    }
+  },
+  reloadWorker: async () => { chrome.runtime.reload(); },
+  disableAutoSubmit: () => setAutoSubmitEnabled(false),
+});
+
+const releaseUpdateFenceBlocksSubmissions = () => releaseUpdateFence.blocksSubmissions();
+
+let releaseFenceResumeRetryTimer: ReturnType<typeof setTimeout> | null = null;
+function retryReleaseFenceResume(): void {
+  if (releaseFenceResumeRetryTimer !== null) return;
+  releaseFenceResumeRetryTimer = setTimeout(() => {
+    releaseFenceResumeRetryTimer = null;
+    void releaseUpdateFence.resume().catch(() => retryReleaseFenceResume());
+  }, 2_000);
+}
+
+let releaseFenceUpdateRetryTimer: ReturnType<typeof setTimeout> | null = null;
+function runReleaseFenceUpdate(releaseVersion: string): void {
+  void releaseUpdateFence.onUpdateAvailable(releaseVersion).catch(() => {
+    if (releaseFenceUpdateRetryTimer !== null) return;
+    releaseFenceUpdateRetryTimer = setTimeout(() => {
+      releaseFenceUpdateRetryTimer = null;
+      runReleaseFenceUpdate(releaseVersion);
+    }, 2_000);
+  });
+}
+
+let releaseFenceInstalledUpdateRetryTimer: ReturnType<typeof setTimeout> | null = null;
+function runReleaseFenceInstalled(reason: 'install' | 'update'): void {
+  void releaseUpdateFence.onInstalled(reason).catch(() => {
+    if (reason === 'install') {
+      retryReleaseFenceResume();
+      return;
+    }
+    if (releaseFenceInstalledUpdateRetryTimer !== null) return;
+    releaseFenceInstalledUpdateRetryTimer = setTimeout(() => {
+      releaseFenceInstalledUpdateRetryTimer = null;
+      runReleaseFenceInstalled('update');
+    }, 2_000);
+  });
+}
+
 export default defineBackground(() => {
+  // Updating a service worker does not replace JavaScript already running in an employer tab.
+  // Freeze first, then reload only tabs that prove they are running a Litos content script. The
+  // fence remains durable across worker suspension until every probed tab starts this release.
+  chrome.runtime.onInstalled.addListener((details) => {
+    if (details.reason !== 'install' && details.reason !== 'update') return;
+    runReleaseFenceInstalled(details.reason);
+  });
+  // This hook ships in 0.6.2 for every later release. It closes submissions before Chrome swaps
+  // the worker, asks the current content scripts to cancel live countdowns, then accepts the ready
+  // update. onInstalled in the new worker performs the tab reload and exact-version handshake.
+  chrome.runtime.onUpdateAvailable.addListener((details) => {
+    runReleaseFenceUpdate(details.version);
+  });
+  void releaseUpdateFence.resume().catch(() => retryReleaseFenceResume());
   // Retry privacy-sanitized events that were queued through a prior offline or interrupted wake.
   void flushAnalyticsQueue();
   chrome.tabs.onRemoved.addListener((tabId) => {
     closePendingSubmission(tabId).catch(() => {});
+    reconcileFreeManualSubmissionStatesForTab(tabId).catch(() => {});
+    void releaseUpdateFence.closed(tabId).catch(() => retryReleaseFenceResume());
+  });
+  chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
+    void releaseUpdateFence.replaced(removedTabId, addedTabId)
+      .catch(() => retryReleaseFenceResume());
   });
   // One-time copy of any legacy Volley-era storage keys to their new litos_* names, so a
   // published update never orphans an existing user's saved token/profile/settings.
@@ -1415,6 +2135,26 @@ export default defineBackground(() => {
   // closed before a response was received" once the popup unmounts.
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     switch (message.type) {
+      case 'LITOS_RELEASE_FENCE_READY': {
+        const tabId = sender.tab?.id;
+        if (tabId === undefined) {
+          sendResponse({ ok: false, blocked: true });
+          return false;
+        }
+        releaseUpdateFence.ready({
+          tabId,
+          releaseVersion: String(message.releaseVersion ?? ''),
+          documentId: sender.documentId,
+          frameId: sender.frameId,
+        })
+          .then((blocked) => sendResponse({ ok: true, blocked }))
+          .catch(() => {
+            retryReleaseFenceResume();
+            sendResponse({ ok: false, blocked: true });
+          });
+        return true;
+      }
+
       case 'LITOS_CLEAR_SESSION':
         return respondToClearSessionMessage(message, sendResponse);
 
@@ -1703,8 +2443,15 @@ export default defineBackground(() => {
 
       case 'GET_FREE_FILL_DATA': {
         const freeFillAuthEpoch = currentAuthEpoch();
+        const reservationTabId = sender.tab?.id;
+        const reservationFrameId = sender.frameId ?? 0;
+        if (reservationTabId === undefined) {
+          sendResponse({ error: 'Litos could not bind this manual submission to the current tab.' });
+          return false;
+        }
         const payload = message.payload as {
           application_id?: unknown;
+          submission_event_id?: unknown;
           company?: unknown;
           role?: unknown;
           portal_url?: unknown;
@@ -1713,23 +2460,46 @@ export default defineBackground(() => {
           sendResponse({ error: 'This Tracker application could not be identified.', code: 'invalid_application' });
           return false;
         }
+        if (!isValidFreeSubmissionEventId(payload?.submission_event_id)) {
+          sendResponse({
+            error: 'Litos could not reserve this manual submission safely. Nothing was filled.',
+            code: 'invalid_submission_event',
+          });
+          return false;
+        }
         const requestedApplicationId = isValidFreeFillApplicationId(payload?.application_id)
           ? payload.application_id.toLowerCase()
           : null;
+        const requestedSubmissionEventId = payload.submission_event_id.toLowerCase();
         const company = typeof payload?.company === 'string' ? payload.company.trim() : '';
         const role = typeof payload?.role === 'string' ? payload.role.trim() : '';
         const portalUrl = typeof payload?.portal_url === 'string' ? payload.portal_url : '';
+        if (!freeManualSubmissionAtsSupported(atsNameForPortalUrl(portalUrl))) {
+          sendResponse({
+            error: FREE_MANUAL_SUBMISSION_UNAVAILABLE_COPY,
+            code: 'free_manual_submission_ats_unavailable',
+          });
+          return false;
+        }
         getStoredToken().then(async (token) => {
           if (!token) {
             sendResponse({ error: NOT_SIGNED_IN_MESSAGE });
             return;
           }
+          let openedReservation: {
+            applicationId: string;
+            eventId: string;
+            stored: boolean;
+          } | null = null;
+          let failureApplicationId = requestedApplicationId;
+          let reservationAttempted = false;
           try {
             assertCurrentAuthEpoch(freeFillAuthEpoch);
-            const [profileResponse, applicationProfileResponse, postingCompensation] = await Promise.all([
+            const [profileResponse, applicationProfileResponse, postingCompensation, accountSnapshot] = await Promise.all([
               timeoutBackendFetch('/profile', {}, token),
               timeoutBackendFetch('/profile/application', {}, token),
               fetchAshbyPostingCompensation(portalUrl),
+              refreshEntitlementSnapshot(token, freeFillAuthEpoch),
             ]);
             assertCurrentAuthEpoch(freeFillAuthEpoch);
             const profile: UserProfile = profileResponse.ok ? await profileResponse.json() : EMPTY_PROFILE;
@@ -1740,37 +2510,8 @@ export default defineBackground(() => {
             let applicationId: string | null = null;
             let selectedResume: FreeFillResumePayload | null = null;
             let resume_error: string | undefined;
-            let tracking_error: string | undefined;
             if (requestedApplicationId) {
-              const fillData = await ownedFreeFillHandoffData(
-                token,
-                requestedApplicationId,
-                freeFillAuthEpoch,
-              ) as {
-                application_id?: unknown;
-                application?: unknown;
-                portal_url?: unknown;
-                selected_resume?: FreeFillResume | null;
-              } | null;
-              if (
-                typeof fillData?.application_id !== 'string'
-                || fillData.application_id.toLowerCase() !== requestedApplicationId
-              ) throw new Error('Litos could not verify this saved application.');
-              if (!freeFillPortalMatches(fillData.portal_url, portalUrl)) {
-                throw new Error('The company page no longer matches this Tracker application. Nothing was filled.');
-              }
-              application = fillData.application ?? null;
               applicationId = requestedApplicationId;
-              try {
-                selectedResume = await freeFillResumePayload(fillData.selected_resume, token);
-                assertCurrentAuthEpoch(freeFillAuthEpoch);
-                if (fillData.selected_resume && !selectedResume) {
-                  resume_error = 'Your saved resume could not be attached. Add it yourself before you submit.';
-                }
-              } catch {
-                assertCurrentAuthEpoch(freeFillAuthEpoch);
-                resume_error = 'Your saved resume could not be attached. Add it yourself before you submit.';
-              }
             } else if (company && role && portalUrl) {
               const applicationResponse = await timeoutBackendFetch('/applications', {
                 method: 'POST',
@@ -1778,28 +2519,76 @@ export default defineBackground(() => {
                 body: JSON.stringify({ company, role, portal_url: portalUrl, source: 'extension' }),
               }, token);
               assertCurrentAuthEpoch(freeFillAuthEpoch);
-              if (applicationResponse.ok) {
-                application = await applicationResponse.json().catch(() => null);
-                const created = application as { application?: { id?: unknown } } | null;
-                applicationId = typeof created?.application?.id === 'string' ? created.application.id : null;
-                if (applicationId) {
-                  try {
-                    const fillDataResponse = await timeoutBackendFetch(`/applications/${applicationId}/fill-data`, {}, token);
-                    assertCurrentAuthEpoch(freeFillAuthEpoch);
-                    if (fillDataResponse.ok) {
-                      const fillData = await fillDataResponse.json().catch(() => null) as {
-                        selected_resume?: FreeFillResume | null;
-                      } | null;
-                      selectedResume = await freeFillResumePayload(fillData?.selected_resume, token);
-                      if (fillData?.selected_resume && !selectedResume) {
-                        resume_error = 'Your saved resume could not be attached. Add it yourself before you submit.';
-                      }
-                    }
-                  } catch {
-                    resume_error = 'Your saved resume could not be attached. Add it yourself before you submit.';
-                  }
-                }
-              } else tracking_error = 'This fill could not be added to your Tracker yet.';
+              if (!applicationResponse.ok) throw await apiErrorFromResponse(applicationResponse);
+              application = await applicationResponse.json().catch(() => null);
+              const created = application as { application?: { id?: unknown } } | null;
+              applicationId = isValidFreeFillApplicationId(created?.application?.id)
+                ? created.application.id.toLowerCase()
+                : null;
+            }
+            if (!applicationId) {
+              throw new Error('Litos could not create the Tracker application required for a safe manual submission. Nothing was filled.');
+            }
+            failureApplicationId = applicationId;
+            const currentUrl = safeFreeSubmissionUrl(portalUrl);
+            if (!currentUrl) throw new Error('This company application URL is not safe to reserve. Nothing was filled.');
+            /* Persist the exact provisional binding before the POST. If its response is lost, a
+               navigation creates a new content-script instance, and only this record can keep the
+               document-start shield latched while cancellation or a server refresh settles it. */
+            const reservedState = reservedFreeManualSubmissionState({
+              eventId: requestedSubmissionEventId,
+              applicationId,
+              tabId: reservationTabId,
+              frameId: reservationFrameId,
+              accountId: accountSnapshot.account_id,
+              authEpoch: freeFillAuthEpoch,
+              startUrl: currentUrl,
+              startedAt: Date.now(),
+            });
+            if (!reservedState) throw new Error('The manual submission reservation state is invalid.');
+            await storePendingFreeManualReservation(reservedState);
+            openedReservation = { applicationId, eventId: requestedSubmissionEventId, stored: true };
+            reservationAttempted = true;
+            const reservation = await reserveFreeManualSubmission(
+              token,
+              applicationId,
+              requestedSubmissionEventId,
+              currentUrl,
+              freeFillAuthEpoch,
+            );
+            const submissionEventId = reservation.eventId;
+            assertCurrentAuthEpoch(freeFillAuthEpoch);
+            type OwnedFreeFillData = {
+              application_id?: unknown;
+              submission_event_id?: unknown;
+              application?: unknown;
+              portal_url?: unknown;
+              selected_resume?: FreeFillResume | null;
+            };
+            const fillData = await ownedFreeFillHandoffData(
+              token,
+              applicationId,
+              submissionEventId,
+              freeFillAuthEpoch,
+            ) as OwnedFreeFillData | null;
+            if (
+              typeof fillData?.application_id !== 'string'
+              || fillData.application_id.toLowerCase() !== applicationId
+              || fillData.submission_event_id !== submissionEventId
+              || !freeFillPortalMatches(fillData.portal_url, portalUrl)
+            ) {
+              throw new Error('The company page no longer matches this reserved Tracker application. Nothing was filled.');
+            }
+            application = fillData.application ?? application;
+            try {
+              selectedResume = await freeFillResumePayload(fillData.selected_resume, token);
+              assertCurrentAuthEpoch(freeFillAuthEpoch);
+              if (fillData.selected_resume && !selectedResume) {
+                resume_error = 'Your saved resume could not be attached. Add it yourself before you submit.';
+              }
+            } catch {
+              assertCurrentAuthEpoch(freeFillAuthEpoch);
+              resume_error = 'Your saved resume could not be attached. Add it yourself before you submit.';
             }
             assertCurrentAuthEpoch(freeFillAuthEpoch);
             sendResponse({
@@ -1807,15 +2596,122 @@ export default defineBackground(() => {
               applicationProfile,
               application,
               application_id: applicationId,
+              submission_event_id: submissionEventId,
               selected_resume: selectedResume,
               resume_error,
-              tracking_error,
               posting_compensation: postingCompensation,
             });
+            openedReservation = null;
           } catch (error) {
-            sendResponse({ error: error instanceof Error ? error.message : 'Could not load your saved answers.' });
+            let retrySafety = freeManualRetrySafetyFromError(error);
+            let cancellationSafety: FreeManualRetrySafety | null = null;
+            let cancellationError: unknown = null;
+            const cancellationApplicationId = openedReservation?.applicationId ?? failureApplicationId;
+            const cancellationEventId = openedReservation?.eventId ?? requestedSubmissionEventId;
+            if (reservationAttempted && cancellationApplicationId) {
+              try {
+                cancellationSafety = openedReservation?.stored
+                  ? await closeAndClearPendingFreeManualReservationWithCapturedToken({
+                    token,
+                    applicationId: cancellationApplicationId,
+                    eventId: cancellationEventId,
+                    tabId: reservationTabId,
+                    frameId: reservationFrameId,
+                  })
+                  : await postFreeManualSubmissionBeforeReplayCancellation(
+                    token,
+                    cancellationApplicationId,
+                    cancellationEventId,
+                  );
+                retrySafety = cancellationSafety;
+              } catch (failedCancellation) {
+                cancellationError = failedCancellation;
+                retrySafety = freeManualRetrySafetyFromError(failedCancellation) ?? retrySafety;
+              }
+            }
+            sendResponse({
+              error: error instanceof Error ? error.message : 'Could not load your saved answers.',
+              application_id: failureApplicationId,
+              submission_event_id: requestedSubmissionEventId,
+              retry_safety: retrySafety,
+              reservation_cancelled: cancellationSafety?.kind === 'safe_not_sent'
+                && cancellationSafety.attemptId === cancellationEventId
+                && cancellationSafety.proofKind === 'extension_cancelled_before_press',
+              ...(isLitosApiError(error) ? { code: error.body.code, http_status: error.status } : {}),
+              ...(cancellationError
+                ? { cancellation_error: cancellationError instanceof Error ? cancellationError.message : 'Cancellation failed.' }
+                : {}),
+            });
           }
         });
+        return true;
+      }
+
+      case 'REFRESH_FREE_MANUAL_RETRY_SAFETY': {
+        const refreshAuthEpoch = currentAuthEpoch();
+        const tabId = sender.tab?.id;
+        const frameId = sender.frameId ?? 0;
+        const payload = message.payload as {
+          application_id?: unknown;
+          current_url?: unknown;
+        } | undefined;
+        const applicationId = isValidFreeFillApplicationId(payload?.application_id)
+          ? payload.application_id.toLowerCase()
+          : '';
+        const currentUrl = safeFreeSubmissionUrl(payload?.current_url);
+        const senderUrl = safeFreeSubmissionUrl(sender.url);
+        if (
+          !applicationId
+          || tabId === undefined
+          || !currentUrl
+          || !senderUrl
+          || !freeSubmissionNavigationMatches(currentUrl, senderUrl)
+        ) {
+          sendResponse({ ok: false, retry_safe: false, retry_safety: null });
+          return false;
+        }
+        getStoredToken().then(async (token) => {
+          if (!token) throw new Error(NOT_SIGNED_IN_MESSAGE);
+          assertCurrentAuthEpoch(refreshAuthEpoch);
+          const startup = await pendingFreeManualSubmissionStartupState(tabId, frameId);
+          assertCurrentAuthEpoch(refreshAuthEpoch);
+          if (startup.pending || startup.blocked) {
+            sendResponse({
+              ok: true,
+              application_id: applicationId,
+              retry_safe: false,
+              retry_safety: null,
+              local_boundary_active: true,
+            });
+            return;
+          }
+          const response = await timeoutBackendFetch('/applications?limit=100', { cache: 'no-store' }, token);
+          assertCurrentAuthEpoch(refreshAuthEpoch);
+          if (!response.ok) throw await apiErrorFromResponse(response);
+          const body = await response.json().catch(() => null) as {
+            applications?: Array<{ id?: unknown; portal_url?: unknown; retry_safety?: unknown }>;
+          } | null;
+          const owned = body?.applications?.find((application) => application.id === applicationId);
+          if (!owned || !freeFillPortalMatches(owned.portal_url, senderUrl)) {
+            throw new Error('This retry-safety refresh did not match the exact Tracker application.');
+          }
+          const retrySafety = freeManualRetrySafetyFromUnknown(owned.retry_safety);
+          assertCurrentAuthEpoch(refreshAuthEpoch);
+          sendResponse({
+            ok: true,
+            application_id: applicationId,
+            retry_safety: retrySafety,
+            retry_safe: freeManualRetrySafetyAllowsRetry(retrySafety),
+            authoritative_refresh: true,
+          });
+        }).catch((error) => sendResponse({
+          ok: false,
+          application_id: applicationId,
+          retry_safe: false,
+          retry_safety: freeManualRetrySafetyFromError(error),
+          error: error instanceof Error ? error.message : 'Retry safety could not be refreshed.',
+          ...(isLitosApiError(error) ? { code: error.body.code, http_status: error.status } : {}),
+        }));
         return true;
       }
 
@@ -1909,11 +2805,191 @@ export default defineBackground(() => {
         return true;
       }
 
+      case 'PREFLIGHT_FREE_MANUAL_SUBMISSION': {
+        const preflightAuthEpoch = currentAuthEpoch();
+        const preflightTabId = sender.tab?.id;
+        const preflightFrameId = sender.frameId ?? 0;
+        const payload = message.payload as {
+          application_id?: unknown;
+          event_id?: unknown;
+          activation_id?: unknown;
+          current_url?: unknown;
+        } | undefined;
+        const applicationId = isValidFreeFillApplicationId(payload?.application_id)
+          ? payload.application_id.toLowerCase()
+          : '';
+        const eventId = isValidFreeSubmissionEventId(payload?.event_id)
+          ? payload.event_id.toLowerCase()
+          : '';
+        const activationId = isValidFreeSubmissionEventId(payload?.activation_id)
+          ? payload.activation_id.toLowerCase()
+          : '';
+        const currentUrl = safeFreeSubmissionUrl(payload?.current_url);
+        const senderUrl = safeFreeSubmissionUrl(sender.url);
+        if (
+          !applicationId
+          || !eventId
+          || !activationId
+          || preflightTabId === undefined
+          || !currentUrl
+          || !senderUrl
+          || !freeSubmissionNavigationMatches(currentUrl, senderUrl)
+        ) {
+          sendResponse({
+            ok: false,
+            error: 'This final submission check could not be bound to the current application page.',
+            code: 'invalid_manual_submission_preflight',
+          });
+          return false;
+        }
+        getStoredToken().then(async (token) => {
+          if (!token) throw new Error(NOT_SIGNED_IN_MESSAGE);
+          if (await releaseUpdateFenceBlocksSubmissions()) {
+            throw new Error('Litos was updated. Reload this application tab before sending anything.');
+          }
+          assertCurrentAuthEpoch(preflightAuthEpoch);
+          const response = await timeoutBackendFetch(
+            `/applications/${applicationId}/manual-submission-preflight`,
+            {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Idempotency-Key': eventId,
+              },
+              body: JSON.stringify({
+                event_id: eventId,
+                activation_id: activationId,
+                current_url: senderUrl,
+              }),
+            },
+            token,
+          );
+          assertCurrentAuthEpoch(preflightAuthEpoch);
+          if (!response.ok) throw await apiErrorFromResponse(response);
+          const preflightReceivedAtMs = Date.now();
+          const acknowledged = parseFreeSubmissionPreflight(
+            await response.json().catch(() => null),
+            applicationId,
+            eventId,
+            activationId,
+            preflightReceivedAtMs,
+          );
+          if (!acknowledged) throw new Error('The final submission acknowledgement was invalid.');
+          assertCurrentAuthEpoch(preflightAuthEpoch);
+          if (await releaseUpdateFenceBlocksSubmissions()) {
+            await closeAndClearPendingFreeManualReservation({
+              token,
+              applicationId,
+              eventId,
+              tabId: preflightTabId,
+              frameId: preflightFrameId,
+              authEpoch: preflightAuthEpoch,
+            });
+            throw new Error('Litos was updated after the final check. Nothing was clicked. Reload this application tab.');
+          }
+          await authorizePendingFreeManualSubmissionMonitor({
+            eventId,
+            applicationId,
+            tabId: preflightTabId,
+            frameId: preflightFrameId,
+            leaseId: acknowledged.leaseId,
+            activationId: acknowledged.activationId,
+            expiresAt: acknowledged.expiresAtMs,
+            authEpoch: preflightAuthEpoch,
+          });
+          assertCurrentAuthEpoch(preflightAuthEpoch);
+          if (await releaseUpdateFenceBlocksSubmissions()) {
+            await closeAuthorizedFreeManualSubmissionBeforeResponse({
+              token,
+              eventId,
+              applicationId,
+              tabId: preflightTabId,
+              frameId: preflightFrameId,
+              leaseId: acknowledged.leaseId,
+              activationId: acknowledged.activationId,
+              authEpoch: preflightAuthEpoch,
+            });
+            throw new Error('Litos was updated while the final check was being saved. Nothing was clicked. Reload this application tab.');
+          }
+          sendResponse({
+            ok: true,
+            application_id: acknowledged.applicationId,
+            event_id: acknowledged.eventId,
+            lease_id: acknowledged.leaseId,
+            attempt_id: acknowledged.attemptId,
+            activation_id: acknowledged.activationId,
+            authorized_at: acknowledged.authorizedAt,
+            expires_at: acknowledged.expiresAt,
+            server_now: acknowledged.serverNow,
+            preflight_received_at_ms: preflightReceivedAtMs,
+            authorized: true,
+          });
+        }).catch((error) => sendResponse({
+          ok: false,
+          error: error instanceof Error ? error.message : 'The final submission check failed.',
+          ...(isLitosApiError(error) ? { code: error.body.code } : {}),
+        }));
+        return true;
+      }
+
+      case 'CANCEL_FREE_MANUAL_SUBMISSION': {
+        const cancellationAuthEpoch = currentAuthEpoch();
+        const tabId = sender.tab?.id;
+        const frameId = sender.frameId ?? 0;
+        const payload = message.payload as {
+          application_id?: unknown;
+          event_id?: unknown;
+          current_url?: unknown;
+        } | undefined;
+        const applicationId = isValidFreeFillApplicationId(payload?.application_id)
+          ? payload.application_id.toLowerCase()
+          : '';
+        const eventId = isValidFreeSubmissionEventId(payload?.event_id)
+          ? payload.event_id.toLowerCase()
+          : '';
+        const currentUrl = safeFreeSubmissionUrl(payload?.current_url);
+        const senderUrl = safeFreeSubmissionUrl(sender.url);
+        if (
+          !applicationId
+          || !eventId
+          || tabId === undefined
+          || !currentUrl
+          || !senderUrl
+          || !freeSubmissionNavigationMatches(currentUrl, senderUrl)
+        ) {
+          sendResponse({
+            ok: false,
+            error: 'This cancelled submission could not be bound to the current application page.',
+            code: 'invalid_manual_submission_cancellation',
+          });
+          return false;
+        }
+        getStoredToken().then(async (token) => {
+          if (!token) throw new Error(NOT_SIGNED_IN_MESSAGE);
+          const retrySafety = await closeAndClearPendingFreeManualReservation({
+            token,
+            applicationId,
+            eventId,
+            tabId,
+            frameId,
+            authEpoch: cancellationAuthEpoch,
+          });
+          assertCurrentAuthEpoch(cancellationAuthEpoch);
+          sendResponse({ ok: true, retry_safety: retrySafety });
+        }).catch((error) => sendResponse({
+          ok: false,
+          error: error instanceof Error ? error.message : 'The cancelled submission could not be closed safely.',
+          retry_safety: freeManualRetrySafetyFromError(error),
+          ...(isLitosApiError(error) ? { code: error.body.code, http_status: error.status } : {}),
+        }));
+        return true;
+      }
+
       case 'START_FREE_SUBMISSION_OUTCOME_MONITOR': {
         const monitorAuthEpoch = currentAuthEpoch();
         const tabId = sender.tab?.id;
         const frameId = sender.frameId ?? 0;
-        const eventId = isValidFreeFillApplicationId(message.payload?.event_id)
+        const eventId = isValidFreeSubmissionEventId(message.payload?.event_id)
           ? message.payload.event_id.toLowerCase()
           : '';
         const applicationId = isValidFreeFillApplicationId(message.payload?.application_id)
@@ -1938,7 +3014,7 @@ export default defineBackground(() => {
           assertCurrentAuthEpoch(monitorAuthEpoch);
           const snapshot = await refreshEntitlementSnapshot(token, monitorAuthEpoch);
           assertCurrentAuthEpoch(monitorAuthEpoch);
-          await storePendingFreeSubmissionMonitor({
+          await transitionPendingFreeManualReservationToMonitor({
             eventId,
             applicationId,
             tabId,
@@ -1947,6 +3023,9 @@ export default defineBackground(() => {
             authEpoch: monitorAuthEpoch,
             startUrl,
             startedAt: Date.now(),
+            boundaryLeaseId: null,
+            boundaryActivationId: null,
+            boundaryExpiresAt: null,
           });
           assertCurrentAuthEpoch(monitorAuthEpoch);
           sendResponse({ ok: true });
@@ -1954,6 +3033,44 @@ export default defineBackground(() => {
           ok: false,
           error: error instanceof Error ? error.message : 'The Free submission monitor could not start.',
         })).finally(() => endFreeSubmissionMonitorStart(tabId));
+        return true;
+      }
+
+      case 'GET_PENDING_FREE_MANUAL_RESERVATION': {
+        const tabId = sender.tab?.id;
+        const frameId = sender.frameId ?? 0;
+        const currentUrl = safeFreeSubmissionUrl(sender.url);
+        if (tabId === undefined || !currentUrl) {
+          sendResponse({ pending: null, blocked: true });
+          return false;
+        }
+        reconcileRecoverableFreeManualSubmissionStates(tabId).then(() => Promise.all([
+          getStoredToken(),
+          pendingFreeManualSubmissionStartupState(tabId, frameId),
+        ])).then(([token, startup]) => {
+          const response = freeManualSubmissionStartupResponse(startup, {
+            tokenPresent: Boolean(token),
+            navigationMatches: Boolean(startup.pending)
+              && freeSubmissionNavigationMatches(startup.pending!.startUrl, currentUrl),
+          });
+          sendResponse(response);
+        }).catch(() => sendResponse({ pending: null, blocked: true }));
+        return true;
+      }
+
+      case 'CLEAR_PENDING_FREE_MANUAL_RESERVATION': {
+        const tabId = sender.tab?.id;
+        const frameId = sender.frameId ?? 0;
+        const eventId = isValidFreeSubmissionEventId(message.event_id)
+          ? message.event_id.toLowerCase()
+          : '';
+        if (tabId === undefined || !eventId) {
+          sendResponse({ ok: false });
+          return false;
+        }
+        clearPendingFreeManualReservation(tabId, frameId, eventId)
+          .then(() => sendResponse({ ok: true }))
+          .catch(() => sendResponse({ ok: false }));
         return true;
       }
 
@@ -2022,15 +3139,25 @@ export default defineBackground(() => {
       case 'ABANDON_FREE_SUBMISSION_OUTCOME_MONITOR': {
         const tabId = sender.tab?.id;
         const frameId = sender.frameId ?? 0;
-        const eventId = isValidFreeFillApplicationId(message.event_id)
+        const eventId = isValidFreeSubmissionEventId(message.event_id)
           ? message.event_id.toLowerCase()
           : '';
         if (tabId === undefined || !eventId) {
           sendResponse({ ok: false });
           return false;
         }
-        clearPendingFreeSubmissionMonitorForTabEvent(tabId, eventId)
-          .then(() => sendResponse({ ok: true }))
+        const key = freeManualReservationKey(tabId, frameId);
+        freeManualSubmissionStateMutations.run(freeManualSubmissionMutationKey(tabId), async () => {
+          const stored = await chrome.storage.session.get(key);
+          const classified = classifyFreeManualSubmissionState(stored[key]);
+          const state = classified.kind === 'valid'
+            ? classified.state
+            : classified.kind === 'expired_monitoring'
+              ? classified.state
+              : null;
+          return Boolean(state?.phase === 'monitoring' && state.eventId === eventId);
+        })
+          .then((ok) => sendResponse({ ok }))
           .catch(() => sendResponse({ ok: false }));
         return true;
       }
@@ -2044,7 +3171,7 @@ export default defineBackground(() => {
           final_url?: unknown;
           confirmation_text?: unknown;
         } | undefined;
-        const eventId = isValidFreeFillApplicationId(payload?.event_id)
+        const eventId = isValidFreeSubmissionEventId(payload?.event_id)
           ? payload.event_id.toLowerCase()
           : '';
         const applicationId = isValidFreeFillApplicationId(payload?.application_id)
@@ -2103,6 +3230,8 @@ export default defineBackground(() => {
             const {
               eventId: effectiveEventId,
               applicationId: effectiveApplicationId,
+              leaseId: effectiveLeaseId,
+              activationId: effectiveActivationId,
               outcome: effectiveOutcome,
               finalUrl: effectiveFinalUrl,
               confirmationText: effectiveConfirmationText,
@@ -2115,6 +3244,9 @@ export default defineBackground(() => {
               confirmationText,
               disposition,
             });
+            if (!effectiveLeaseId || !effectiveActivationId) {
+              throw new Error('This outcome has no exact final boundary authorization.');
+            }
             const response = await timeoutBackendFetch(
               `/applications/${effectiveApplicationId}/manual-submission-outcome`,
               {
@@ -2125,6 +3257,8 @@ export default defineBackground(() => {
                 },
                 body: JSON.stringify({
                   event_id: effectiveEventId,
+                  lease_id: effectiveLeaseId,
+                  activation_id: effectiveActivationId,
                   outcome: effectiveOutcome,
                   final_url: effectiveFinalUrl,
                   ...(effectiveConfirmationText ? { confirmation_text: effectiveConfirmationText } : {}),
@@ -2134,9 +3268,13 @@ export default defineBackground(() => {
             );
             assertCurrentAuthEpoch(outcomeAuthEpoch);
             if (!response.ok) throw await apiErrorFromResponse(response);
-            if (tabId !== undefined) {
-              await clearPendingFreeSubmissionMonitorForTabEvent(tabId, effectiveEventId);
-            }
+            await clearAcceptedFreeSubmissionOutcomeState({
+              pending,
+              eventId: effectiveEventId,
+              applicationId: effectiveApplicationId,
+              leaseId: effectiveLeaseId,
+              activationId: effectiveActivationId,
+            });
             sendResponse({ ok: true });
             void trackExtensionEvent('free_submission_outcome_recorded', { outcome: effectiveOutcome });
           } catch (error) {
@@ -2152,7 +3290,7 @@ export default defineBackground(() => {
 
       case 'GET_AUTOMATION_SETTINGS': {
         getStoredToken().then(async (token) => {
-          if (!token) {
+          if (!token || await releaseUpdateFenceBlocksSubmissions()) {
             sendResponse({ automatic_submission_enabled: false, automatic_verification_enabled: false, automatic_captcha_enabled: false });
             return;
           }
@@ -2169,6 +3307,11 @@ export default defineBackground(() => {
             } = await res.json();
             const automaticSubmission = automaticSubmissionEnabled(data)
               && featureEnabled(snapshot, 'automatic_submission');
+            if (await releaseUpdateFenceBlocksSubmissions()) {
+              await setAutoSubmitEnabled(false);
+              sendResponse({ automatic_submission_enabled: false, automatic_verification_enabled: false, automatic_captcha_enabled: false });
+              return;
+            }
             await setAutoSubmitEnabled(automaticSubmission);
             sendResponse({
               automatic_submission_enabled: automaticSubmission,
@@ -2191,6 +3334,9 @@ export default defineBackground(() => {
         Promise.all([getStoredToken(), Promise.resolve(sender.tab?.id)])
           .then(async ([token, tabId]) => {
             if (!token || tabId === undefined) throw new Error('Litos could not identify this application tab.');
+            if (await releaseUpdateFenceBlocksSubmissions()) {
+              throw new Error('Litos was updated. Reload this application tab before sending anything.');
+            }
             assertCurrentAuthEpoch(submissionAuthEpoch);
             const authorization = message.payload?.authorization === 'user_initiated'
               ? 'user_initiated'
@@ -2207,6 +3353,9 @@ export default defineBackground(() => {
             const currentUrl = sender.url ?? '';
             if (!currentUrl) throw new Error('Litos could not verify the current application page.');
             assertCurrentAuthEpoch(submissionAuthEpoch);
+            if (await releaseUpdateFenceBlocksSubmissions()) {
+              throw new Error('Litos was updated. Reload this application tab before sending anything.');
+            }
             const response = await timeoutBackendFetch(`/applications/${applicationId}/submission/extension-start`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -2745,11 +3894,13 @@ export default defineBackground(() => {
         void trackExtensionEvent('application_fill_completed', message.payload);
         getStoredToken().then((token) => {
           if (!token) return;
-          timeoutBackendFetch('/autofill/event', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(message.payload),
-          }, token).catch(() => {});
+          deliverAutofillEventWithStableId(message.payload, (stablePayload) => (
+            timeoutBackendFetch('/autofill/event', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(stablePayload),
+            }, token)
+          )).catch(() => {});
         });
         return false;
       }
@@ -3166,7 +4317,30 @@ export default defineBackground(() => {
             throw error;
           }
         },
-        readFillData: ownedFreeFillHandoffData,
+        readFillData: async (token, applicationId, portalUrl, authEpoch) => {
+          assertCurrentAuthEpoch(authEpoch);
+          const [snapshot, applicationsResponse] = await Promise.all([
+            refreshEntitlementSnapshot(token, authEpoch),
+            timeoutBackendFetch('/applications?limit=100', { cache: 'no-store' }, token),
+          ]);
+          assertCurrentAuthEpoch(authEpoch);
+          if (!applicationsResponse.ok) throw await apiErrorFromResponse(applicationsResponse);
+          const body = await applicationsResponse.json().catch(() => null) as {
+            applications?: Array<{ id?: unknown; portal_url?: unknown }>;
+          } | null;
+          const owned = body?.applications?.find((item) => item.id === applicationId);
+          if (!owned) {
+            throw new FreeFillHandoffRequestError(
+              'application_not_found',
+              'This Tracker application is no longer available to this account.',
+            );
+          }
+          return {
+            account_id: snapshot.account_id,
+            application_id: applicationId,
+            portal_url: owned.portal_url ?? portalUrl,
+          };
+        },
       })
         .then(async (result) => {
           if (!result.ok) return result;
@@ -3656,6 +4830,9 @@ export default defineBackground(() => {
     dashboardSubmissionsInFlight.add(applicationId);
     Promise.all([getStoredToken(), chrome.storage.session.get('litos_application_tabs')])
       .then(async ([token, stored]) => {
+        if (await releaseUpdateFenceBlocksSubmissions()) {
+          throw new Error('Litos was updated. Reload the company application tab before sending anything.');
+        }
         assertCurrentAuthEpoch(dashboardAuthEpoch);
         const storedTarget = ((stored.litos_application_tabs ?? {}) as Record<string, number | {
           tabId: number;
@@ -3686,6 +4863,9 @@ export default defineBackground(() => {
         });
         assertCurrentAuthEpoch(dashboardAuthEpoch);
         assertCurrentAuthEpoch(dashboardAuthEpoch);
+        if (await releaseUpdateFenceBlocksSubmissions()) {
+          throw new Error('Litos was updated. Reload the company application tab before sending anything.');
+        }
         const prepared = await chrome.tabs.sendMessage(tabId, {
           type: 'PREPARE_SUBMISSION_FROM_DASHBOARD',
           payload: { applicationId, resume: exactResume, expectedUrl: currentUrl },
@@ -3734,6 +4914,9 @@ export default defineBackground(() => {
           pdfSizeBytes: exactResume.packet_audit!.bindings.pdf.sizeBytes,
         }, dashboardAuthEpoch);
         assertCurrentAuthEpoch(dashboardAuthEpoch);
+        if (await releaseUpdateFenceBlocksSubmissions()) {
+          throw new Error('Litos was updated. Reload the company application tab before sending anything.');
+        }
         const startResponse = await timeoutBackendFetch(`/applications/${applicationId}/submission/extension-start`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -3756,6 +4939,16 @@ export default defineBackground(() => {
         };
         await setPendingSubmission(tabId, pending, dashboardAuthEpoch);
         assertCurrentAuthEpoch(dashboardAuthEpoch);
+        if (await releaseUpdateFenceBlocksSubmissions()) {
+          await postExtensionOutcome(
+            pending,
+            'cancelled',
+            verifiedCurrentUrl,
+            'The extension updated after reservation. Nothing was clicked.',
+          );
+          await setPendingSubmission(tabId, null);
+          throw new Error('Litos was updated. Reload the company application tab before sending anything.');
+        }
         try {
           assertCurrentAuthEpoch(dashboardAuthEpoch);
           const result = await chrome.tabs.sendMessage(tabId, {
