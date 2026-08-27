@@ -1417,7 +1417,7 @@ export default defineContentScript({
           box-sizing: border-box;
           animation: wp-slide-in 0.25s ease-out;
         ">
-          <button id="wp-close" style="position:absolute;top:10px;right:12px;background:none;border:none;cursor:pointer;font-size:17px;opacity:0.55;color:${COLOR.muted};padding:0;line-height:1;">×</button>
+          <button id="wp-close" aria-label="Close Litos outreach prompt" style="position:absolute;top:10px;right:12px;background:none;border:none;cursor:pointer;font-size:17px;opacity:0.55;color:${COLOR.muted};padding:0;line-height:1;">×</button>
           <div style="display:flex;align-items:flex-start;gap:9px;margin-bottom:12px;line-height:1.4;">
             <div>
               <div style="font-weight:500;font-size:13px;color:${COLOR.ink};line-height:1.4;">${escapeHtml(headline)}</div>
@@ -3333,7 +3333,7 @@ export default defineContentScript({
           font-size: 13px; line-height: 1.4; box-shadow: ${SHADOW.raised};
           width: 272px; box-sizing: border-box; animation: wp-slide-in 0.25s ease-out;
         ">
-          <button id="wp-account-close" style="position:absolute;top:10px;right:12px;background:none;border:none;cursor:pointer;font-size:17px;opacity:0.55;color:${COLOR.muted};padding:0;line-height:1;">×</button>
+          <button id="wp-account-close" aria-label="Close Litos Workday account setup" style="position:absolute;top:10px;right:12px;background:none;border:none;cursor:pointer;font-size:17px;opacity:0.55;color:${COLOR.muted};padding:0;line-height:1;">×</button>
           <div style="display:flex;align-items:flex-start;gap:9px;margin-bottom:12px;line-height:1.4;">
             ${markSvg()}
             <div>
@@ -3593,7 +3593,7 @@ export default defineContentScript({
           font-size: 13px; line-height: 1.4; box-shadow: ${SHADOW.raised};
           width: 272px; box-sizing: border-box; animation: wp-slide-in 0.25s ease-out;
         ">
-          <button id="wp-start-close" style="position:absolute;top:10px;right:12px;background:none;border:none;cursor:pointer;font-size:17px;opacity:0.55;color:${COLOR.muted};padding:0;line-height:1;">×</button>
+          <button id="wp-start-close" aria-label="Close Litos Workday guidance" style="position:absolute;top:10px;right:12px;background:none;border:none;cursor:pointer;font-size:17px;opacity:0.55;color:${COLOR.muted};padding:0;line-height:1;">×</button>
           <div style="display:flex;align-items:flex-start;gap:9px;margin-bottom:12px;line-height:1.4;">
             ${markSvg()}
             <div>
