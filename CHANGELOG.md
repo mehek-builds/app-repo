@@ -2,6 +2,20 @@
 
 All notable changes to the Litos extension are documented here.
 
+## [0.6.3] - 2026-08-28
+
+### Fixed
+- The persistent page launcher is now included in production builds, works by keyboard, and stays
+  clear of application cards at narrow and desktop widths.
+- Application status cards, the auto-submit countdown, banners, and Workday account messages now
+  contain long and unbroken content on mobile without hiding their primary controls.
+- Injected-card dismiss buttons now have accessible names, and fallback copy returns focus to the
+  action that opened it.
+
+### Quality
+- Added popup and injected-page stress coverage for narrow viewports, long content, missing data,
+  loading, error, disabled, and focus states.
+
 ## [0.6.1] - 2026-08-23
 
 ### Changed
