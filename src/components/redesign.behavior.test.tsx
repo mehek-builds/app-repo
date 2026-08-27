@@ -473,6 +473,38 @@ describe('redesigned popup workflows', () => {
     });
   });
 
+  it('restores the copy trigger focus after the legacy clipboard fallback', async () => {
+    vi.mocked(navigator.clipboard.writeText).mockRejectedValueOnce(new Error('Clipboard denied'));
+    Object.defineProperty(document, 'execCommand', {
+      configurable: true,
+      value: vi.fn().mockReturnValue(true),
+    });
+
+    try {
+      render(
+        <DraftEditor
+          contact={contact}
+          job={job}
+          token="token"
+          profile={profile}
+          onBack={vi.fn()}
+          onDraftAnother={vi.fn()}
+          prebuiltDraft={draft}
+        />,
+      );
+
+      const copy = await screen.findByRole('button', { name: 'Copy' });
+      copy.focus();
+      fireEvent.click(copy);
+
+      await waitFor(() => {
+        expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Copied' }));
+      });
+    } finally {
+      Reflect.deleteProperty(document, 'execCommand');
+    }
+  });
+
   it('logs the reviewed email as sent with the final edited content', async () => {
     const user = userEvent.setup();
     render(

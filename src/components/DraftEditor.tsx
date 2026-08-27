@@ -156,12 +156,19 @@ export default function DraftEditor({
       setTimeout(() => setCopied(false), 2000);
     } catch {
       try {
+        const returnFocus = document.activeElement instanceof HTMLElement
+          ? document.activeElement
+          : null;
         const textArea = document.createElement('textarea');
         textArea.value = `Subject: ${subject}\n\n${body}`;
         document.body.appendChild(textArea);
-        textArea.select();
-        document.execCommand('copy');
-        document.body.removeChild(textArea);
+        try {
+          textArea.select();
+          document.execCommand('copy');
+        } finally {
+          textArea.remove();
+          returnFocus?.focus({ preventScroll: true });
+        }
         setCopied(true);
         setTimeout(() => setCopied(false), 2000);
       } catch {
