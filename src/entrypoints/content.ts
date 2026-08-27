@@ -109,6 +109,7 @@ import {
   premiumRetryControlSelector,
   type ExtensionPremiumActionFeature,
 } from '../lib/extension-premium-action';
+import { installPersistentBadge } from '../lib/persistent-badge';
 
 export default defineContentScript({
   matches: [
@@ -188,6 +189,8 @@ export default defineContentScript({
   allFrames: true,
   runAt: 'document_idle',
   main() {
+    installPersistentBadge();
+
     async function serverCaptchaResumeEnabled(): Promise<boolean> {
       return new Promise((resolve) => {
         let settled = false;
@@ -1258,10 +1261,10 @@ export default defineContentScript({
             const host = document.createElement('div');
             host.id = 'litos-validation-card';
             host.style.cssText =
-              `position:fixed;right:${OVERLAY.right};bottom:${OVERLAY.bottom};z-index:${OVERLAY.z};width:${OVERLAY.width};` +
+              `width:${OVERLAY.width};max-width:calc(100vw - 40px);box-sizing:border-box;overflow-wrap:anywhere;` +
               `background:#fff;border:1px solid ${COLOR.border};border-radius:${RADIUS.card};box-shadow:${SHADOW.raised};` +
               `padding:12px 14px;font:13px/1.45 ${FONT.sans};color:${COLOR.ink};`;
-            document.documentElement.appendChild(host);
+            getCardStack().appendChild(host);
             state.statusEl = host;
           }
           renderFillSummary(state.statusEl, state.fillResult, {
@@ -1384,6 +1387,16 @@ export default defineContentScript({
         stack.style.cssText =
           `position:fixed;bottom:${OVERLAY.bottom};right:${OVERLAY.right};z-index:${OVERLAY.z};display:flex;flex-direction:column;align-items:flex-end;gap:${OVERLAY.gap};`;
         document.body.appendChild(stack);
+        const persistentBadge = document.getElementById('litos-persistent');
+        if (persistentBadge) {
+          const syncPersistentBadgeClearance = () => {
+            const stackHeight = stack?.getBoundingClientRect().height ?? 0;
+            const gap = stackHeight > 0 ? Number.parseFloat(OVERLAY.gap) : 0;
+            persistentBadge.style.setProperty('--litos-card-stack-clearance', `${stackHeight + gap}px`);
+          };
+          new ResizeObserver(syncPersistentBadgeClearance).observe(stack);
+          window.requestAnimationFrame(syncPersistentBadgeClearance);
+        }
       }
       return stack;
     }
@@ -1404,7 +1417,7 @@ export default defineContentScript({
           box-sizing: border-box;
           animation: wp-slide-in 0.25s ease-out;
         ">
-          <button id="wp-close" style="position:absolute;top:10px;right:12px;background:none;border:none;cursor:pointer;font-size:17px;opacity:0.55;color:${COLOR.muted};padding:0;line-height:1;">×</button>
+          <button id="wp-close" aria-label="Close Litos outreach prompt" style="position:absolute;top:10px;right:12px;background:none;border:none;cursor:pointer;font-size:17px;opacity:0.55;color:${COLOR.muted};padding:0;line-height:1;">×</button>
           <div style="display:flex;align-items:flex-start;gap:9px;margin-bottom:12px;line-height:1.4;">
             <div>
               <div style="font-weight:500;font-size:13px;color:${COLOR.ink};line-height:1.4;">${escapeHtml(headline)}</div>
@@ -1491,8 +1504,8 @@ export default defineContentScript({
               onSecondary?: () => void;
             }) => {
               inner.innerHTML = `
-                <div style="font-weight:500;font-size:13px;color:${COLOR.ink};line-height:1.4;"></div>
-                <div data-litos-outreach-detail style="font-size:12px;color:${COLOR.muted};margin-top:3px;line-height:1.4;"></div>
+                <div style="font-weight:500;font-size:13px;color:${COLOR.ink};line-height:1.4;overflow-wrap:anywhere;"></div>
+                <div data-litos-outreach-detail style="font-size:12px;color:${COLOR.muted};margin-top:3px;line-height:1.4;overflow-wrap:anywhere;"></div>
                 <div style="display:flex;gap:8px;margin-top:12px;">
                   <button data-litos-outreach-primary style="flex:1;background:${COLOR.brand};color:white;border:0;border-radius:${RADIUS.control};min-height:44px;padding:0 10px;font:500 12px ${FONT.sans};cursor:pointer;"></button>
                   ${input.secondary ? `<button data-litos-outreach-secondary style="flex:1;background:${COLOR.surfaceAlt};color:${COLOR.ink};border:0;border-radius:${RADIUS.control};min-height:44px;padding:0 10px;font:500 12px ${FONT.sans};cursor:pointer;"></button>` : ''}
@@ -1526,8 +1539,8 @@ export default defineContentScript({
             }
             if (response.ok && (response.count ?? 0) > 0) {
               inner.innerHTML = `
-                <div data-litos-outreach-heading style="font-weight:500;font-size:13px;color:${COLOR.ink};"></div>
-                <div data-litos-outreach-detail style="font-size:12px;color:${COLOR.muted};margin-top:2px;"></div>
+                <div data-litos-outreach-heading style="font-weight:500;font-size:13px;color:${COLOR.ink};overflow-wrap:anywhere;"></div>
+                <div data-litos-outreach-detail style="font-size:12px;color:${COLOR.muted};margin-top:2px;overflow-wrap:anywhere;"></div>
               `;
               const count = response.count ?? 0;
               const heading = inner.querySelector<HTMLElement>('[data-litos-outreach-heading]');
@@ -1642,14 +1655,14 @@ export default defineContentScript({
       const card = document.createElement('div');
       card.id = 'litos-submit-card';
       card.innerHTML = `
-        <div style="position:relative;background:white;border:1px solid ${COLOR.border};border-radius:${RADIUS.card};padding:16px;font-family:${FONT.sans};color-scheme:only light;font-size:13px;line-height:1.4;box-shadow:${SHADOW.raised};width:${OVERLAY.width};box-sizing:border-box;animation:wp-slide-in 0.25s ease-out;">
+        <div style="position:relative;background:white;border:1px solid ${COLOR.border};border-radius:${RADIUS.card};padding:16px;font-family:${FONT.sans};color-scheme:only light;font-size:13px;line-height:1.4;box-shadow:${SHADOW.raised};width:${OVERLAY.width};max-width:calc(100vw - 40px);box-sizing:border-box;animation:wp-slide-in 0.25s ease-out;">
           <button id="wp-submit-close" aria-label="Close Litos submission status" style="position:absolute;top:10px;right:12px;background:none;border:none;cursor:pointer;font-size:17px;opacity:0.55;color:${COLOR.muted};padding:0;line-height:1;">×</button>
           <div style="display:flex;align-items:flex-start;gap:9px;line-height:1.4;">
             <span id="wp-submit-icon" style="font-size:20px;flex-shrink:0;line-height:1.4;"><canvas id="wp-submit-orb"></canvas></span>
-            <div style="line-height:1.4;">
+            <div style="line-height:1.4;min-width:0;">
               <div id="wp-submit-title" style="font-weight:500;font-size:13px;color:${COLOR.ink};line-height:1.4;">Sending</div>
               <div style="font-size:12px;color:${COLOR.muted};margin-top:2px;word-break:break-word;line-height:1.4;">${escapeHtml(title)} at ${escapeHtml(company)}</div>
-              <div id="wp-submit-status" role="status" aria-live="polite" style="font-size:12.5px;font-family:${FONT.mono};color:${COLOR.muted};margin-top:8px;line-height:1.4;">${submissionProgress(0)}</div>
+              <div id="wp-submit-status" role="status" aria-live="polite" style="font-size:12.5px;font-family:${FONT.mono};color:${COLOR.muted};margin-top:8px;line-height:1.4;white-space:normal;overflow-wrap:anywhere;">${submissionProgress(0)}</div>
             </div>
           </div>
         </div>
@@ -1761,7 +1774,7 @@ export default defineContentScript({
           </div>
           <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;min-width:0;">
             <canvas id="wp-resume-orb" style="display:none;flex-shrink:0;"></canvas>
-            <div id="wp-resume-status" style="font-size:11px;color:${COLOR.muted};display:none;line-height:1.4;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></div>
+            <div id="wp-resume-status" style="font-size:11px;color:${COLOR.muted};display:none;line-height:1.4;flex:1;min-width:0;white-space:normal;overflow-wrap:anywhere;"></div>
           </div>
           <div id="wp-resume-announcer" role="status" aria-live="polite" aria-atomic="true" style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;"></div>
           <div style="display:flex;gap:8px;">
@@ -3049,7 +3062,7 @@ export default defineContentScript({
           pointer-events:auto;position:absolute;display:flex;align-items:center;gap:12px;
           background:${COLOR.surface};color:${COLOR.ink};border:1px solid ${COLOR.border};
           border-radius:${RADIUS.card};padding:10px 12px;
-          box-shadow:${SHADOW.raised};white-space:nowrap;
+          box-shadow:${SHADOW.raised};max-width:calc(100vw - 16px);box-sizing:border-box;white-space:normal;
           animation:wp-slide-in 0.2s ease-out;
         ">
           <div style="position:relative;width:46px;height:46px;flex-shrink:0;">
@@ -3061,7 +3074,7 @@ export default defineContentScript({
             </svg>
             <div id="wp-as-num" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:500;font-family:${FONT.mono};">${remaining}</div>
           </div>
-          <div style="display:flex;flex-direction:column;gap:2px;">
+          <div style="display:flex;flex-direction:column;gap:2px;min-width:0;">
             <div style="font-size:12px;font-weight:500;">${actionLabel} your application</div>
             <div id="wp-as-sub" style="font-size:11px;color:${COLOR.muted};">${fillResult.fields_filled} field${fillResult.fields_filled === 1 ? '' : 's'} filled. Auto-submits in ${remaining}s.</div>
           </div>
@@ -3320,7 +3333,7 @@ export default defineContentScript({
           font-size: 13px; line-height: 1.4; box-shadow: ${SHADOW.raised};
           width: 272px; box-sizing: border-box; animation: wp-slide-in 0.25s ease-out;
         ">
-          <button id="wp-account-close" style="position:absolute;top:10px;right:12px;background:none;border:none;cursor:pointer;font-size:17px;opacity:0.55;color:${COLOR.muted};padding:0;line-height:1;">×</button>
+          <button id="wp-account-close" aria-label="Close Litos Workday account setup" style="position:absolute;top:10px;right:12px;background:none;border:none;cursor:pointer;font-size:17px;opacity:0.55;color:${COLOR.muted};padding:0;line-height:1;">×</button>
           <div style="display:flex;align-items:flex-start;gap:9px;margin-bottom:12px;line-height:1.4;">
             ${markSvg()}
             <div>
@@ -3330,7 +3343,7 @@ export default defineContentScript({
           </div>
           <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;min-width:0;">
             <canvas id="wp-account-orb" style="display:none;flex-shrink:0;"></canvas>
-            <div id="wp-account-status" style="font-size:11px;color:${COLOR.muted};display:none;line-height:1.4;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></div>
+            <div id="wp-account-status" style="font-size:11px;color:${COLOR.muted};display:none;line-height:1.4;flex:1;min-width:0;white-space:normal;overflow-wrap:anywhere;"></div>
           </div>
           <div style="display:flex;gap:8px;">
             <button id="wp-account-yes" style="
@@ -3580,7 +3593,7 @@ export default defineContentScript({
           font-size: 13px; line-height: 1.4; box-shadow: ${SHADOW.raised};
           width: 272px; box-sizing: border-box; animation: wp-slide-in 0.25s ease-out;
         ">
-          <button id="wp-start-close" style="position:absolute;top:10px;right:12px;background:none;border:none;cursor:pointer;font-size:17px;opacity:0.55;color:${COLOR.muted};padding:0;line-height:1;">×</button>
+          <button id="wp-start-close" aria-label="Close Litos Workday guidance" style="position:absolute;top:10px;right:12px;background:none;border:none;cursor:pointer;font-size:17px;opacity:0.55;color:${COLOR.muted};padding:0;line-height:1;">×</button>
           <div style="display:flex;align-items:flex-start;gap:9px;margin-bottom:12px;line-height:1.4;">
             ${markSvg()}
             <div>

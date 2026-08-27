@@ -42,7 +42,7 @@ export default function WarningBanner({
       aria-live={variant === 'error' ? 'assertive' : 'polite'}
     >
       {icon}
-      <span>{message}</span>
+      <span className="[overflow-wrap:anywhere]">{message}</span>
     </div>
   );
 }

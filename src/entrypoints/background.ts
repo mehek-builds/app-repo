@@ -1403,6 +1403,39 @@ export default defineBackground(() => {
   }
 
   let lastDetectedJob: { title: string; company: string; url: string } | null = null;
+  let openLitosSurfacePromise: Promise<boolean> | null = null;
+
+  const openLitosSurface = (): Promise<boolean> => {
+    if (openLitosSurfacePromise) return openLitosSurfacePromise;
+
+    const openPopup = chrome.action.openPopup;
+    const popupAttempt = typeof openPopup === 'function'
+      ? Promise.resolve().then(() => chrome.action.openPopup())
+      : Promise.reject(new Error('chrome.action.openPopup is unavailable'));
+
+    const request = popupAttempt
+      .then(() => true)
+      .catch(async (popupError) => {
+        try {
+          await chrome.windows.create({
+            url: chrome.runtime.getURL('popup.html'),
+            type: 'popup',
+            width: 400,
+            height: 620,
+            focused: true,
+          });
+          return true;
+        } catch (windowError) {
+          console.warn('[Litos] Could not open the extension popup:', popupError, windowError);
+          return false;
+        }
+      });
+    openLitosSurfacePromise = request;
+    void request.finally(() => {
+      if (openLitosSurfacePromise === request) openLitosSurfacePromise = null;
+    });
+    return request;
+  };
 
   chrome.storage.session.get('lastDetectedJob').then((result) => {
     if (result.lastDetectedJob) lastDetectedJob = result.lastDetectedJob as { title: string; company: string; url: string };
@@ -1444,6 +1477,11 @@ export default defineBackground(() => {
       case 'GET_LAST_JOB': {
         sendResponse({ job: lastDetectedJob }); // synchronous response
         return false;
+      }
+
+      case 'OPEN_LITOS_POPUP': {
+        openLitosSurface().then((ok) => sendResponse({ ok }));
+        return true;
       }
 
       case 'GET_ENTITLEMENTS': {

@@ -3,8 +3,8 @@ import { describe, expect, it } from 'vitest';
 import packageMetadata from '../../package.json';
 
 describe('published extension release contract', () => {
-  it('uses a new installable version for the SmartRecruiters handoff build', () => {
-    expect(packageMetadata.version).toBe('0.6.1');
+  it('uses a new installable version for the current release', () => {
+    expect(packageMetadata.version).toBe('0.6.3');
   });
 
   it('reports the runtime manifest version to the website pairing gate', () => {

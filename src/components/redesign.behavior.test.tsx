@@ -12,6 +12,7 @@ import DraftEditor from './DraftEditor';
 import MainScreen from './MainScreen';
 import OnboardingScreen from './OnboardingScreen';
 import TrackingDashboard from './TrackingDashboard';
+import WarningBanner from './WarningBanner';
 
 vi.mock('../lib/api', () => ({
   createSession: vi.fn(),
@@ -123,6 +124,13 @@ describe('redesigned popup workflows', () => {
   afterEach(() => {
     cleanup();
     vi.unstubAllGlobals();
+  });
+
+  it('allows warning messages without breakpoints to wrap inside the popup', () => {
+    render(<WarningBanner message={'LITOSCONTENTWITHOUTBREAKPOINTS'.repeat(12)} />);
+
+    const message = screen.getByRole('status').querySelector('span');
+    expect(message?.className).toContain('[overflow-wrap:anywhere]');
   });
 
   it('preserves a manually edited job when asynchronous detection arrives', async () => {
@@ -463,6 +471,38 @@ describe('redesigned popup workflows', () => {
       expect(navigator.clipboard.writeText).toHaveBeenCalledWith(`Subject: ${draft.subject}\n\n${draft.body}`);
       expect(screen.getByRole('button', { name: 'Copied' })).toBeTruthy();
     });
+  });
+
+  it('restores the copy trigger focus after the legacy clipboard fallback', async () => {
+    vi.mocked(navigator.clipboard.writeText).mockRejectedValueOnce(new Error('Clipboard denied'));
+    Object.defineProperty(document, 'execCommand', {
+      configurable: true,
+      value: vi.fn().mockReturnValue(true),
+    });
+
+    try {
+      render(
+        <DraftEditor
+          contact={contact}
+          job={job}
+          token="token"
+          profile={profile}
+          onBack={vi.fn()}
+          onDraftAnother={vi.fn()}
+          prebuiltDraft={draft}
+        />,
+      );
+
+      const copy = await screen.findByRole('button', { name: 'Copy' });
+      copy.focus();
+      fireEvent.click(copy);
+
+      await waitFor(() => {
+        expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Copied' }));
+      });
+    } finally {
+      Reflect.deleteProperty(document, 'execCommand');
+    }
   });
 
   it('logs the reviewed email as sent with the final edited content', async () => {
