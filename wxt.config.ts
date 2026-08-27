@@ -19,7 +19,7 @@ export default defineConfig({
     // popup's "Fill the form on this page" button: the content script is injected on demand
     // into company-hosted career pages the manifest matches can't cover, only ever on the
     // tab the student invoked it from.
-    permissions: ['activeTab', 'scripting', 'storage', 'clipboardWrite'],
+    permissions: ['activeTab', 'scripting', 'storage', 'clipboardWrite', 'alarms'],
     host_permissions: command === 'serve' ? ['http://localhost:3001/*'] : [],
     externally_connectable: {
       matches: [

@@ -55,6 +55,8 @@ import type { PostingCompensation } from '../lib/adapters/salary';
 import { buildResumeReviewSummary } from '../lib/resume-review';
 import {
   escapeApplicationText,
+  measuredGreenhouseReceipt,
+  measuredWorkableReceipt,
   pageShowsSubmissionConfirmation,
   pageSubmissionFailureMessage,
   submissionProgress,
@@ -66,6 +68,12 @@ import {
 import { mountThinkingOrb } from '../lib/thinking-orb';
 import { derivePortalPassword, portalKeyForHost, currentSaltFingerprint } from '../lib/portal-password';
 import { automaticSubmissionEnabled } from '../lib/auto-submit-consent';
+import {
+  deadLetterSubmissionReceiptPresentation,
+  pendingSubmissionReceiptPresentation,
+  submissionReceiptPresentation,
+} from '../lib/submission-receipt-ui';
+import { renderBoundSubmissionReceipt } from '../lib/submission-receipt-renderer';
 import { applicantEmailForGeneratedPacket, atsNameForPortalUrl } from '../lib/applicant-email';
 import { frozenApplicantFillData } from '../lib/handoff-applicant-snapshot';
 import {
@@ -82,6 +90,7 @@ import { isValidFreeFillApplicationId } from '../lib/free-fill-handoff';
 import {
   FREE_MANUAL_SUBMISSION_UNAVAILABLE_COPY,
   freeManualSubmissionAtsSupported,
+  freeManualSubmissionPortalSupported,
 } from '../lib/free-manual-submission-capability';
 import {
   exactGatedAttendedReceipt,
@@ -211,6 +220,8 @@ export default defineContentScript({
       earlyWindow.__litosGenericInit?.();
       return;
     }
+    const receiptCardProvenance = crypto.randomUUID();
+    const ownedReceiptStatusCards = new WeakSet<HTMLElement>();
     let preArmBoundaryShield = initialPreArmBoundaryShieldState();
     const potentialFinalControl = (event: Event): HTMLElement | null => {
       for (const node of event.composedPath()) {
@@ -377,6 +388,7 @@ export default defineContentScript({
     }
 
     const monitoredSubmissionIds = new Set<string>();
+    const LATE_RECEIPT_OBSERVATION_MS = 5 * 60_000;
     const pendingRecoveryGate = new PendingSubmissionRecoveryGate();
 
     function visibleSubmissionOutcomeTexts(): string[] {
@@ -388,10 +400,221 @@ export default defineContentScript({
         .filter(Boolean);
     }
 
+    function measuredWorkableReceiptOnPage(startedUrl: string) {
+      const success = document.querySelector<HTMLElement>('[data-ui="successful-submit"]');
+      if (!success || success.getClientRects().length === 0 || getComputedStyle(success).visibility === 'hidden') return null;
+      return measuredWorkableReceipt({
+        startedUrl,
+        finalUrl: window.location.href,
+        successfulSubmitText: success.textContent ?? '',
+        formStillPresent: Boolean(document.querySelector('form')),
+      });
+    }
+
+    function measuredGreenhouseReceiptOnPage(startedUrl: string) {
+      const content = document.querySelector<HTMLElement>('.confirmation > .confirmation__content');
+      const body = document.querySelector<HTMLElement>('.confirmation > .confirmation__content .body');
+      if (!content || !body || !isElementVisible(content) || !isElementVisible(body)) return null;
+      const applicationMarkers = [
+        'form#application_form',
+        'input[name="job_application[first_name]"]',
+        'input[name="first_name"]',
+        'input[name="email"]',
+        'input[name="resume"]',
+      ];
+      const formStillPresent = applicationMarkers.some((selector) => {
+        const marker = document.querySelector<HTMLElement>(selector);
+        return Boolean(marker && isElementVisible(marker));
+      });
+      return measuredGreenhouseReceipt({
+        startedUrl,
+        finalUrl: window.location.href,
+        confirmationBodyText: body.textContent ?? '',
+        formStillPresent,
+      });
+    }
+
+    function measuredSupportedReceiptOnPage(startedUrl: string) {
+      return measuredWorkableReceiptOnPage(startedUrl) ?? measuredGreenhouseReceiptOnPage(startedUrl);
+    }
+
+    function renderReceiptSavingState(startUrl: string): boolean {
+      return renderBoundSubmissionReceipt({
+        frozenStartUrl: startUrl,
+        currentUrl: window.location.href,
+        provenance: receiptCardProvenance,
+        presentation: submissionReceiptPresentation(),
+        ensureCard: ensureReceiptStatusCard,
+      });
+    }
+
+    function renderReceiptPendingState(startUrl: string): boolean {
+      return renderBoundSubmissionReceipt({
+        frozenStartUrl: startUrl,
+        currentUrl: window.location.href,
+        provenance: receiptCardProvenance,
+        presentation: pendingSubmissionReceiptPresentation(),
+        ensureCard: ensureReceiptStatusCard,
+      });
+    }
+
+    function renderReceiptDeadLetterState(startUrl: string): boolean {
+      return renderBoundSubmissionReceipt({
+        frozenStartUrl: startUrl,
+        currentUrl: window.location.href,
+        provenance: receiptCardProvenance,
+        presentation: deadLetterSubmissionReceiptPresentation(),
+        ensureCard: ensureReceiptStatusCard,
+      });
+    }
+
+    function renderReceiptRepairState(startUrl: string): boolean {
+      return renderBoundSubmissionReceipt({
+        frozenStartUrl: startUrl,
+        currentUrl: window.location.href,
+        provenance: receiptCardProvenance,
+        presentation: submissionReceiptPresentation(undefined, true),
+        ensureCard: ensureReceiptStatusCard,
+      });
+    }
+
+    function renderSubmissionIntegrityRepairState(): void {
+      const presentation = submissionReceiptPresentation(undefined, true);
+      const card = ensureReceiptStatusCard();
+      const title = card?.querySelector<HTMLElement>('#wp-submit-title');
+      const status = card?.querySelector<HTMLElement>('#wp-submit-status');
+      if (title) title.textContent = presentation.title;
+      if (status) status.textContent = presentation.status;
+    }
+
+    function ensureReceiptStatusCard(): HTMLElement | null {
+      const existing = document.querySelector<HTMLElement>('#litos-submit-card');
+      if (existing) {
+        return ownedReceiptStatusCards.has(existing)
+          && existing.dataset.litosReceiptProvenance === receiptCardProvenance
+          ? existing
+          : null;
+      }
+      const card = document.createElement('div');
+      card.id = 'litos-submit-card';
+      card.dataset.litosReceiptProvenance = receiptCardProvenance;
+      card.innerHTML = `
+        <div style="background:white;border:1px solid ${COLOR.border};border-radius:${RADIUS.card};padding:16px;font-family:${FONT.sans};color-scheme:only light;font-size:13px;line-height:1.4;box-shadow:${SHADOW.raised};width:${OVERLAY.width};box-sizing:border-box;">
+          <div style="display:flex;align-items:flex-start;gap:9px;">
+            <span id="wp-submit-icon" style="font-size:20px;flex-shrink:0;"></span>
+            <div>
+              <div id="wp-submit-title" style="font-weight:500;font-size:13px;color:${COLOR.ink};"></div>
+              <div id="wp-submit-status" role="status" aria-live="polite" style="font-size:12.5px;font-family:${FONT.mono};color:${COLOR.muted};margin-top:8px;"></div>
+            </div>
+          </div>
+        </div>`;
+      ownedReceiptStatusCards.add(card);
+      getCardStack().appendChild(card);
+      if (card.isConnected) return card;
+      ownedReceiptStatusCards.delete(card);
+      return null;
+    }
+
+    function renderReceiptSubmittedState(startUrl: string): boolean {
+      return renderBoundSubmissionReceipt({
+        frozenStartUrl: startUrl,
+        currentUrl: window.location.href,
+        provenance: receiptCardProvenance,
+        presentation: submissionReceiptPresentation({ ok: true, submitted: true }),
+        ensureCard: ensureReceiptStatusCard,
+        setTerminalIcon: (icon) => setStatusIcon(icon, 'ok'),
+      });
+    }
+
+    type ReceiptAcknowledgementProjection = {
+      lane?: 'extension' | 'free';
+      applicationId?: string;
+      application_id?: string;
+      attemptId?: string;
+      attempt_id?: string;
+      startUrl?: string;
+      start_url?: string;
+    };
+
+    function renderRecoveredReceiptAcknowledgement(acknowledged: ReceiptAcknowledgementProjection): void {
+      const lane = acknowledged.lane;
+      const applicationId = acknowledged.applicationId ?? acknowledged.application_id;
+      const attemptId = acknowledged.attemptId ?? acknowledged.attempt_id;
+      const startUrl = acknowledged.startUrl ?? acknowledged.start_url;
+      if (!lane || !applicationId || !attemptId || !startUrl
+        || applicationFormIdentityKey(startUrl) !== applicationFormIdentityKey(window.location.href)) return;
+      if (!renderReceiptSubmittedState(startUrl)) return;
+      chrome.runtime.sendMessage({
+        type: 'SUBMISSION_RECEIPT_ACKNOWLEDGED_RENDERED',
+        lane,
+        application_id: applicationId,
+        attempt_id: attemptId,
+      });
+    }
+
+    function renderExtensionLateObservationExpiry(applicationId: string, startUrl: string): void {
+      chrome.runtime.sendMessage(
+        { type: 'GET_PENDING_EXTENSION_SUBMISSION' },
+        (response: {
+          pending?: { applicationId?: string; startUrl?: string } | null;
+          receipt_visibility?: 'pending' | 'dead_letter';
+          acknowledged?: ReceiptAcknowledgementProjection | null;
+        } | undefined) => {
+          if (response?.acknowledged) {
+            renderRecoveredReceiptAcknowledgement(response.acknowledged);
+            return;
+          }
+          const exact = response?.pending?.applicationId === applicationId
+            && response.pending.startUrl === startUrl;
+          if (exact && response?.receipt_visibility === 'dead_letter') {
+            renderReceiptDeadLetterState(startUrl);
+            return;
+          }
+          renderReceiptPendingState(startUrl);
+        },
+      );
+    }
+
+    function renderFreeLateObservationExpiry(
+      applicationId: string,
+      eventId: string,
+      startUrl: string,
+    ): void {
+      chrome.runtime.sendMessage(
+        { type: 'GET_PENDING_FREE_SUBMISSION_OUTCOME' },
+        (response: {
+          pending?: { applicationId?: string; eventId?: string; startUrl?: string } | null;
+          receipt_visibility?: 'pending' | 'dead_letter';
+          receipt_cleanup_pending?: boolean;
+          receipt_start_url?: string;
+          acknowledged?: ReceiptAcknowledgementProjection | null;
+        } | undefined) => {
+          if (response?.receipt_cleanup_pending) {
+            if (response.receipt_start_url) renderReceiptRepairState(response.receipt_start_url);
+            return;
+          }
+          if (response?.acknowledged) {
+            renderRecoveredReceiptAcknowledgement(response.acknowledged);
+            return;
+          }
+          const exact = response?.pending?.applicationId === applicationId
+            && response.pending.eventId === eventId
+            && response.pending.startUrl === startUrl;
+          if (exact && response?.receipt_visibility === 'dead_letter') {
+            renderReceiptDeadLetterState(startUrl);
+            return;
+          }
+          renderReceiptPendingState(startUrl);
+        },
+      );
+    }
+
     function monitorExtensionSubmission(
       applicationId: string,
-      baselineTexts: ReadonlySet<string> = new Set(),
-      strictReceipt?: { family: GatedAttendedFamily; startedUrl: string },
+      baselineTexts: ReadonlySet<string>,
+      startedUrl: string,
+      lateObservation = false,
+      timeoutMs?: number,
     ) {
       if (monitoredSubmissionIds.has(applicationId)) return;
       monitoredSubmissionIds.add(applicationId);
@@ -400,42 +623,73 @@ export default defineContentScript({
         .join(' ');
       let observer: MutationObserver | null = null;
       let interval: ReturnType<typeof setInterval>;
-      const report = (outcome: 'confirmed' | 'failed' | 'unknown', confirmationText?: string, attempt = 0) => {
-        // A confirmed submission means this application is no longer waiting on anyone, so it
-        // leaves the stall list. Without this the count only ever grows and the badge becomes a
-        // number people learn to ignore, which is worse than no badge at all.
-        if (outcome === 'confirmed') {
-          try {
-            chrome.runtime.sendMessage({ type: 'CAPTCHA_STALL_RESOLVED', payload: { url: window.location.href } });
-          } catch {
-            // Nothing here is worth failing an outcome report over.
-          }
-        }
+      const report = (
+        outcome: 'confirmed' | 'failed' | 'unknown',
+        confirmationText?: string,
+        receiptProof?: unknown,
+        attempt = 0,
+      ) => {
+        if (outcome === 'confirmed') renderReceiptSavingState(startedUrl);
         chrome.runtime.sendMessage({
           type: 'EXTENSION_SUBMISSION_OUTCOME',
-          payload: { applicationId, outcome, finalUrl: window.location.href, confirmationText },
-        }, (response: { ok?: boolean } | undefined) => {
-          if (!response?.ok && attempt < 4) window.setTimeout(() => report(outcome, confirmationText, attempt + 1), 1000 * (attempt + 1));
+          payload: { applicationId, outcome, confirmationText, receiptProof },
+        }, (response: {
+          ok?: boolean;
+          submitted?: boolean;
+          receipt_cleanup_pending?: boolean;
+        } | undefined) => {
+          if (response?.ok && response.receipt_cleanup_pending) {
+            renderReceiptRepairState(startedUrl);
+            return;
+          }
+          if (response?.ok && response.submitted === true && outcome === 'confirmed') {
+            renderReceiptSubmittedState(startedUrl);
+            try {
+              chrome.runtime.sendMessage({ type: 'CAPTCHA_STALL_RESOLVED', payload: { url: window.location.href } });
+            } catch {
+              // The authoritative receipt is already saved even if badge cleanup fails.
+            }
+            return;
+          }
+          if (!response?.ok && attempt < 4) {
+            window.setTimeout(() => report(outcome, confirmationText, receiptProof, attempt + 1), 1000 * (attempt + 1));
+          }
         });
       };
       const controller = createSubmissionOutcomeController({
         readText,
-        classify: strictReceipt
-          ? (text) => {
-            const failure = pageSubmissionFailureMessage(text);
-            if (failure) return { kind: 'failure', message: failure };
-            const receipt = exactGatedAttendedReceipt({
-              family: strictReceipt.family,
-              startedUrl: strictReceipt.startedUrl,
-              finalUrl: window.location.href,
-              employerText: text,
-            });
-            return receipt ? { kind: 'confirmed' } : null;
+        classify: (text) => {
+          const failure = pageSubmissionFailureMessage(text);
+          if (failure) return { kind: 'failure', message: failure };
+          return measuredSupportedReceiptOnPage(startedUrl) ? { kind: 'confirmed' } : null;
+        },
+        timeoutMs: timeoutMs ?? (lateObservation ? LATE_RECEIPT_OBSERVATION_MS : undefined),
+        onStop: () => {
+          clearInterval(interval);
+          observer?.disconnect();
+          monitoredSubmissionIds.delete(applicationId);
+        },
+        onOutcome: (outcome) => {
+          if (outcome.kind === 'failure') {
+            report('failed', outcome.message);
+            return;
           }
-          : undefined,
-        onStop: () => { clearInterval(interval); observer?.disconnect(); },
-        onOutcome: (outcome) => report(outcome.kind === 'failure' ? 'failed' : 'confirmed', outcome.kind === 'failure' ? outcome.message : readText().slice(0, 2000)),
-        onUnknown: () => report('unknown'),
+          const receipt = measuredSupportedReceiptOnPage(startedUrl);
+          if (receipt) report('confirmed', receipt.confirmationText, receipt.receiptProof);
+        },
+        onUnknown: () => {
+          if (!lateObservation) {
+            report('unknown');
+            window.setTimeout(() => monitorExtensionSubmission(
+              applicationId,
+              new Set(visibleSubmissionOutcomeTexts()),
+              startedUrl,
+              true,
+            ), 0);
+          } else {
+            renderExtensionLateObservationExpiry(applicationId, startedUrl);
+          }
+        },
       });
       interval = setInterval(controller.scan, 1000);
       observer = new MutationObserver(controller.queueScan);
@@ -496,21 +750,11 @@ export default defineContentScript({
             && !replayGuardError
             && !hasEmptyRequiredFields()
             && findProgrammaticFinalSubmitButton(atsName) === submitButton;
-          const clicked = replaySafe && atsName === 'workday'
-            ? replayWorkdayFinalSubmitIfAllowed({
-              expectedControl: submitButton,
-              tabVisible: !document.hidden,
-              tabFocused: document.hasFocus(),
-              requiredFieldsClear: !hasEmptyRequiredFields(),
-            })
-            : replaySafe && (() => { submitButton.click(); return true; })();
-          if (!clicked) {
-            const cancelReservation = (attempt = 0) => chrome.runtime.sendMessage({
+          const cancelReservation = (attempt = 0) => chrome.runtime.sendMessage({
                 type: 'EXTENSION_SUBMISSION_OUTCOME',
                 payload: {
                   applicationId,
                   outcome: 'cancelled',
-                  finalUrl: window.location.href,
                   confirmationText: 'The application changed after the reservation. Nothing was sent.',
                 },
               }, (cancelResponse: { ok?: boolean } | undefined) => {
@@ -520,19 +764,41 @@ export default defineContentScript({
                 }
                 pendingRecoveryGate.endLocal(applicationId);
               });
+          if (!replaySafe) {
             cancelReservation();
             if (statusEl) statusEl.textContent = replayGuardError ?? 'The application changed before submission. Review the final page and click Submit again.';
             return;
           }
-          submitButton.removeEventListener('click', onClick, true);
-          monitorExtensionSubmission(
-            applicationId,
-            baselineTexts,
-            atsName === 'jobvite' || atsName === 'icims'
-              ? { family: atsName, startedUrl: submissionStartedUrl }
-              : undefined,
-          );
-          pendingRecoveryGate.endLocal(applicationId);
+          chrome.runtime.sendMessage({
+            type: 'EXTENSION_SUBMISSION_PRESS_COMMITTED',
+            payload: { applicationId },
+          }, (pressResponse: { ok?: boolean; error?: string } | undefined) => {
+            const stillSafe = pressResponse?.ok === true
+              && submitButton.isConnected
+              && isElementVisible(submitButton)
+              && !document.hidden
+              && document.hasFocus()
+              && !(captchaWaiting || detectChallenge().waiting)
+              && !submissionGuard()
+              && !hasEmptyRequiredFields()
+              && findProgrammaticFinalSubmitButton(atsName) === submitButton;
+            const clicked = stillSafe && atsName === 'workday'
+              ? replayWorkdayFinalSubmitIfAllowed({
+                expectedControl: submitButton,
+                tabVisible: !document.hidden,
+                tabFocused: document.hasFocus(),
+                requiredFieldsClear: !hasEmptyRequiredFields(),
+              })
+              : stillSafe && (() => { submitButton.click(); return true; })();
+            if (!clicked) {
+              cancelReservation();
+              if (statusEl) statusEl.textContent = pressResponse?.error ?? 'The application changed before submission. Review the final page and click Submit again.';
+              return;
+            }
+            submitButton.removeEventListener('click', onClick, true);
+            monitorExtensionSubmission(applicationId, baselineTexts, submissionStartedUrl);
+            pendingRecoveryGate.endLocal(applicationId);
+          });
         });
       };
       submitButton.addEventListener('click', onClick, true);
@@ -545,11 +811,19 @@ export default defineContentScript({
       baselineUrl: string,
       outcome: 'confirmed' | 'failed' | 'unknown',
       confirmationText?: string,
+      receiptProof?: Parameters<ReturnType<typeof createFreeSubmissionOutcomeSync>['record']>[3],
       attempt = 0,
     ): void {
       const finalUrl = window.location.href || baselineUrl;
-      void outcomeSync.record(outcome, finalUrl, confirmationText).then((result) => {
-        if (result.ok) return;
+      void outcomeSync.record(outcome, finalUrl, confirmationText, receiptProof).then((result) => {
+        if (result.ok) {
+          if (result.receiptCleanupPending) {
+            renderReceiptRepairState(baselineUrl);
+            return;
+          }
+          if (result.submitted && outcome === 'confirmed') renderReceiptSubmittedState(baselineUrl);
+          return;
+        }
         if (attempt < 4) {
           window.setTimeout(
             () => reportFreeSubmissionOutcomeWithRetry(
@@ -557,6 +831,7 @@ export default defineContentScript({
               baselineUrl,
               outcome,
               confirmationText,
+              receiptProof,
               attempt + 1,
             ),
             1000 * (attempt + 1),
@@ -575,6 +850,7 @@ export default defineContentScript({
       baselineUrl: string;
       baselineTexts: ReadonlySet<string>;
       timeoutMs?: number;
+      lateObservation?: boolean;
     }): () => void {
       if (activeFreeSubmissionOutcomeEvents.has(input.outcomeSync.eventId)) return () => undefined;
       activeFreeSubmissionOutcomeEvents.add(input.outcomeSync.eventId);
@@ -593,30 +869,50 @@ export default defineContentScript({
       const controller = createSubmissionOutcomeController({
         readText: readNewReceiptText,
         timeoutMs: input.timeoutMs ?? FREE_SUBMISSION_OUTCOME_TIMEOUT_MS,
+        classify: (text) => {
+          const failure = pageSubmissionFailureMessage(text);
+          if (failure) return { kind: 'failure', message: failure };
+          return measuredSupportedReceiptOnPage(input.baselineUrl) ? { kind: 'confirmed' } : null;
+        },
         onStop: stopResources,
         onOutcome: (outcome) => {
-          const receiptText = readNewReceiptText().slice(0, 1000);
           if (outcome.kind === 'failure') {
             reportFreeSubmissionOutcomeWithRetry(
               input.outcomeSync,
               input.baselineUrl,
               'failed',
-              receiptText || outcome.message,
+              outcome.message,
             );
             return;
           }
+          const receipt = measuredSupportedReceiptOnPage(input.baselineUrl);
+          if (!receipt) return;
+          renderReceiptSavingState(input.baselineUrl);
           reportFreeSubmissionOutcomeWithRetry(
             input.outcomeSync,
             input.baselineUrl,
             'confirmed',
-            receiptText,
+            receipt.confirmationText,
+            receipt.receiptProof,
           );
         },
-        onUnknown: () => reportFreeSubmissionOutcomeWithRetry(
-          input.outcomeSync,
-          input.baselineUrl,
-          'unknown',
-        ),
+        onUnknown: () => {
+          if (!input.lateObservation) {
+            reportFreeSubmissionOutcomeWithRetry(input.outcomeSync, input.baselineUrl, 'unknown');
+            window.setTimeout(() => monitorFreeSubmissionOutcome({
+              ...input,
+              baselineTexts: new Set(visibleSubmissionOutcomeTexts()),
+              timeoutMs: LATE_RECEIPT_OBSERVATION_MS,
+              lateObservation: true,
+            }), 0);
+          } else {
+            renderFreeLateObservationExpiry(
+              input.outcomeSync.applicationId,
+              input.outcomeSync.eventId,
+              input.baselineUrl,
+            );
+          }
+        },
       });
       interval = setInterval(controller.scan, 1000);
       observer = new MutationObserver(controller.queueScan);
@@ -816,7 +1112,9 @@ export default defineContentScript({
       submitButton: HTMLElement,
       atsName: string,
     ): 'clicked' | 'pre_click_refusal' | 'ambiguous' {
-      if (!freeManualSubmissionAtsSupported(atsName) || !atsCanAutoSubmit(atsName)) {
+      if (!freeManualSubmissionAtsSupported(atsName)
+        || !freeManualSubmissionPortalSupported(window.location.href)
+        || !atsCanAutoSubmit(atsName)) {
         return 'pre_click_refusal';
       }
       if (atsName === 'workday') {
@@ -900,7 +1198,9 @@ export default defineContentScript({
       document.addEventListener('submit', blockFormSubmission, true);
       releasePreArmBoundaryShield(boundaryEpoch);
 
-      if (!freeManualSubmissionAtsSupported(atsName) || !atsCanAutoSubmit(atsName)) {
+      if (!freeManualSubmissionAtsSupported(atsName)
+        || !freeManualSubmissionPortalSupported(window.location.href)
+        || !atsCanAutoSubmit(atsName)) {
         clickListener = (event) => {
           const finalControl = findFreeManualFinalSubmitButton(atsName);
           if (!finalControl || !event.composedPath().includes(finalControl)) return;
@@ -1111,13 +1411,49 @@ export default defineContentScript({
     const checkPendingSubmission = (attempt = 0) => {
       chrome.runtime.sendMessage(
         { type: 'GET_PENDING_EXTENSION_SUBMISSION' },
-        (response: { pending?: { applicationId?: string; startedAt?: number; strictReceipt?: { family: GatedAttendedFamily; startedUrl: string } } | null } | undefined) => {
+        (response: { pending?: {
+          applicationId?: string;
+          startedAt?: number;
+          startUrl?: string;
+          journalPhase?: 'armed' | 'pressed' | 'outcome' | 'awaiting_receipt';
+          journalOutcome?: string | null;
+          journalRepairReason?: string | null;
+        } | null;
+          remaining_ms?: number;
+          receipt_visibility?: 'pending' | 'dead_letter';
+          acknowledged?: ReceiptAcknowledgementProjection | null;
+        } | undefined) => {
           const pending = response?.pending;
+          if (response?.acknowledged) {
+            renderRecoveredReceiptAcknowledgement(response.acknowledged);
+            return;
+          }
           if (pending?.applicationId && pendingRecoveryGate.shouldRecover(pending)) {
+            if (!pending.startUrl) {
+              renderSubmissionIntegrityRepairState();
+              return;
+            }
+            if (pending.journalRepairReason) {
+              renderReceiptRepairState(pending.startUrl);
+              return;
+            }
+            if (pending.journalPhase === 'outcome' && pending.journalOutcome === 'confirmed') {
+              renderReceiptSavingState(pending.startUrl);
+              return;
+            }
+            const recoveringWeakOutcome = (pending.journalPhase === 'outcome'
+              || pending.journalPhase === 'awaiting_receipt')
+              && pending.journalOutcome !== 'confirmed';
+            const remainingMs = Math.max(0, response?.remaining_ms ?? 0);
+            if (pending.journalPhase === 'pressed' || recoveringWeakOutcome) {
+              renderReceiptPendingState(pending.startUrl);
+            }
             monitorExtensionSubmission(
               pending.applicationId,
               new Set(),
-              pending.strictReceipt,
+              pending.startUrl,
+              recoveringWeakOutcome,
+              recoveringWeakOutcome ? remainingMs : undefined,
             );
           } else if (attempt < 60) {
             window.setTimeout(() => checkPendingSubmission(attempt + 1), 500);
@@ -1152,8 +1488,13 @@ export default defineContentScript({
             boundaryActivationId?: string | null;
           } | null;
           blocked?: boolean;
+          integrity_blocked?: boolean;
         } | null) => {
           if (preArmBoundaryShield.epoch !== startupManualReservationBoundaryEpoch) return;
+          if (response?.integrity_blocked) {
+            renderSubmissionIntegrityRepairState();
+            return;
+          }
           const pending = response?.pending;
           if (
             !isValidFreeFillApplicationId(pending?.applicationId)
@@ -1188,12 +1529,28 @@ export default defineContentScript({
             startUrl?: string;
             boundaryLeaseId?: string | null;
             boundaryActivationId?: string | null;
+            journalPhase?: 'armed' | 'pressed' | 'outcome' | 'awaiting_receipt';
+            journalOutcome?: string | null;
+            journalRepairReason?: string | null;
           } | null;
           force_unknown?: boolean;
           remaining_ms?: number;
           retry_pending?: boolean;
+          receipt_cleanup_pending?: boolean;
+          receipt_start_url?: string;
+          receipt_visibility?: 'pending' | 'dead_letter';
+          acknowledged?: ReceiptAcknowledgementProjection | null;
         } | undefined) => {
           const pending = response?.pending;
+          if (response?.receipt_cleanup_pending) {
+            if (response.receipt_start_url) renderReceiptRepairState(response.receipt_start_url);
+            else renderSubmissionIntegrityRepairState();
+            return;
+          }
+          if (response?.acknowledged) {
+            renderRecoveredReceiptAcknowledgement(response.acknowledged);
+            return;
+          }
           if (
             pending?.eventId
             && pending.applicationId
@@ -1201,6 +1558,14 @@ export default defineContentScript({
             && pending.boundaryLeaseId
             && pending.boundaryActivationId
           ) {
+            if (pending.journalRepairReason) {
+              renderReceiptRepairState(pending.startUrl);
+              return;
+            }
+            if (pending.journalPhase === 'outcome' && pending.journalOutcome === 'confirmed') {
+              renderReceiptSavingState(pending.startUrl);
+              return;
+            }
             const outcomeSync = createFreeSubmissionOutcomeSync(
               pending.applicationId,
               pending.eventId,
@@ -1208,7 +1573,13 @@ export default defineContentScript({
               pending.boundaryActivationId,
             );
             const remainingMs = Math.max(0, response?.remaining_ms ?? 0);
-            if (response?.force_unknown || remainingMs === 0) {
+            const recoveringWeakOutcome = (pending.journalPhase === 'outcome'
+              || pending.journalPhase === 'awaiting_receipt')
+              && pending.journalOutcome !== 'confirmed';
+            if (pending.journalPhase === 'pressed' || recoveringWeakOutcome) {
+              renderReceiptPendingState(pending.startUrl);
+            }
+            if (!recoveringWeakOutcome && (response?.force_unknown || remainingMs === 0)) {
               reportFreeSubmissionOutcomeWithRetry(
                 outcomeSync,
                 pending.startUrl,
@@ -1223,6 +1594,7 @@ export default defineContentScript({
               baselineUrl: pending.startUrl,
               baselineTexts: new Set(),
               timeoutMs: remainingMs,
+              lateObservation: recoveringWeakOutcome,
             });
             return;
           }
@@ -1238,7 +1610,13 @@ export default defineContentScript({
 
     let cardInjected = false;
     let approved = false; // true once user taps "Yes" on either card
-    let submitFromDashboard: ((questions: Array<{ id: string; question: string; answer: string }>) => Promise<{ ok: boolean; clicked?: boolean; error?: string; finalUrl?: string; confirmationText?: string }>) | null = null;
+    let submitFromDashboard: ((questions: Array<{ id: string; question: string; answer: string }>) => Promise<{
+      ok: boolean;
+      clicked?: boolean;
+      error?: string;
+      confirmationText?: string;
+      receiptProof?: unknown;
+    }>) | null = null;
     let prepareSubmissionFromDashboard: ((resume: GeneratedResume, expectedUrl: string) => Promise<string | null>) | null = null;
 
     function openLitosPlansFromPage(
@@ -1301,6 +1679,11 @@ export default defineContentScript({
     }
 
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+      if (message?.type === 'LITOS_SUBMISSION_RECEIPT_ACKNOWLEDGED') {
+        const startUrl = typeof message.start_url === 'string' ? message.start_url : '';
+        sendResponse({ rendered: renderReceiptSubmittedState(startUrl) });
+        return false;
+      }
       if (message?.type === 'FOCUS_PREMIUM_RETRY_CONTROL') {
         const focused = focusPremiumRetryControl(
           message.feature_key as ExtensionPremiumActionFeature,
@@ -2230,6 +2613,7 @@ export default defineContentScript({
 
       const card = document.createElement('div');
       card.id = 'litos-submit-card';
+      card.dataset.litosReceiptProvenance = receiptCardProvenance;
       card.innerHTML = `
         <div style="position:relative;background:white;border:1px solid ${COLOR.border};border-radius:${RADIUS.card};padding:16px;font-family:${FONT.sans};color-scheme:only light;font-size:13px;line-height:1.4;box-shadow:${SHADOW.raised};width:${OVERLAY.width};box-sizing:border-box;animation:wp-slide-in 0.25s ease-out;">
           <button id="wp-submit-close" aria-label="Close Litos submission status" style="position:absolute;top:10px;right:12px;background:none;border:none;cursor:pointer;font-size:17px;opacity:0.55;color:${COLOR.muted};padding:0;line-height:1;">×</button>
@@ -2243,6 +2627,7 @@ export default defineContentScript({
           </div>
         </div>
       `;
+      ownedReceiptStatusCards.add(card);
       getCardStack().appendChild(card);
 
       const startedAt = Date.now();
@@ -2287,9 +2672,8 @@ export default defineContentScript({
           if (titleEl) titleEl.textContent = 'Not sent';
           if (statusEl) statusEl.textContent = outcome.message;
         } else {
-          stopSubmitOrbAnd(() => { if (iconEl) setStatusIcon(iconEl, 'ok'); });
-          if (titleEl) titleEl.textContent = 'Sent';
-          if (statusEl) statusEl.textContent = 'The company confirmed they got it.';
+          if (titleEl) titleEl.textContent = 'Confirmation seen';
+          if (statusEl) statusEl.textContent = 'Employer confirmation seen, receipt not yet saved. Keep this page open and check your Litos Tracker.';
         }
         },
         onUnknown: () => {
@@ -2685,7 +3069,9 @@ export default defineContentScript({
           statusEl,
           actionBoundaryEpoch,
         );
-        if (!freeManualSubmissionAtsSupported(reservedAtsName) || !atsCanAutoSubmit(reservedAtsName)) {
+        if (!freeManualSubmissionAtsSupported(reservedAtsName)
+          || !freeManualSubmissionPortalSupported(window.location.href)
+          || !atsCanAutoSubmit(reservedAtsName)) {
           if (statusEl) {
             statusEl.textContent = FREE_MANUAL_SUBMISSION_UNAVAILABLE_COPY;
           }
@@ -3630,6 +4016,7 @@ export default defineContentScript({
           }
           const finalHandoffGuardError = handoffSubmissionGuard();
           if (finalHandoffGuardError) return { ok: false, error: finalHandoffGuardError };
+          const dashboardSubmissionStartedUrl = window.location.href;
           if (!clickDashboardSubmitIfAllowed(fillResult.ats_name, finalSubmitBtn)) {
             return { ok: false, error: 'This application needs your direct confirmation on the company page. Nothing was sent.' };
           }
@@ -3637,8 +4024,14 @@ export default defineContentScript({
           while (Date.now() - started < 45_000) {
             const text = document.body.innerText;
             const failure = pageSubmissionFailureMessage(text);
-            if (failure) return { ok: false, clicked: true, error: failure, finalUrl: window.location.href };
-            if (pageShowsSubmissionConfirmation(text)) return { ok: true, clicked: true, finalUrl: window.location.href, confirmationText: text.slice(0, 2000) };
+            if (failure) return { ok: false, clicked: true, error: failure };
+            const receipt = measuredSupportedReceiptOnPage(dashboardSubmissionStartedUrl);
+            if (receipt) return {
+              ok: true,
+              clicked: true,
+              confirmationText: receipt.confirmationText,
+              receiptProof: receipt.receiptProof,
+            };
             await new Promise((resolve) => setTimeout(resolve, 500));
           }
           return { ok: false, clicked: true, error: 'The company never confirmed it. Open the tab and check whether it went through.' };
@@ -3964,10 +4357,11 @@ export default defineContentScript({
                 if (started.ok && safeAfterReservation) {
                   if (statusEl) statusEl.textContent = `${actionLabel}...`;
                   const baselineTexts = new Set(visibleSubmissionOutcomeTexts());
+                  const submissionStartedUrl = window.location.href;
                   if (!clickAtsSubmitIfAllowed(
                     fillResult.ats_name,
                     target,
-                    () => monitorExtensionSubmission(applicationId, baselineTexts),
+                    () => monitorExtensionSubmission(applicationId, baselineTexts, submissionStartedUrl),
                   )) {
                     if (statusEl) statusEl.textContent = 'This application needs your direct confirmation. Nothing was sent.';
                     reportEvent(false);

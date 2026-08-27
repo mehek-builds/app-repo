@@ -41,9 +41,11 @@ describe('dashboard Free fill runtime wiring', () => {
     expect(canonicalSelection).toContain('applicationId = requestedApplicationId');
     expect(canonicalSelection).not.toContain("timeoutBackendFetch('/applications'");
     expect(freeData).toContain('ownedFreeFillHandoffData(');
-    expect(freeData).toContain('freeFillPortalMatches(fillData.portal_url, portalUrl)');
-    expect(freeData.indexOf('reserveFreeManualSubmission('))
-      .toBeLessThan(freeData.indexOf('ownedFreeFillHandoffData('));
+    expect(freeData).toContain('freeFillPortalMatches(candidate.portal_url, currentUrl)');
+    expect(freeData.indexOf('await validatedFillData()'))
+      .toBeLessThan(freeData.indexOf('reserveFreeManualSubmission('));
+    expect(freeData.indexOf('submissionOutcomeOutbox.arm({'))
+      .toBeLessThan(freeData.indexOf('reserveFreeManualSubmission('));
     expect(content).toMatch(/type: 'GET_FREE_FILL_DATA'[\s\S]*?application_id: dashboardFreeFillApplicationId/);
   });
 

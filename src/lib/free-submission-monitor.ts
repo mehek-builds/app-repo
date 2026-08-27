@@ -30,10 +30,12 @@ export function bindFreeSubmissionOutcome(input: {
   confirmationText: string;
   disposition: FreeSubmissionMonitorDisposition;
 }) {
+  const exactAttempt = input.pending.eventId === input.eventId
+    && input.pending.applicationId === input.applicationId;
   if (
-    input.disposition === 'resume'
-    && input.pending.eventId === input.eventId
-    && input.pending.applicationId === input.applicationId
+    exactAttempt
+    && (input.disposition === 'resume'
+      || (input.disposition === 'expired' && input.outcome === 'confirmed'))
   ) {
     return {
       eventId: input.eventId,

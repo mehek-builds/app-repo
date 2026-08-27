@@ -176,7 +176,7 @@ describe('Free manual final-submit outcome runtime', () => {
     expect(observer).toContain('createSubmissionOutcomeController');
     expect(observer).toMatch(/outcome\.kind === 'failure'[\s\S]*?reportFreeSubmissionOutcomeWithRetry\([\s\S]*?'failed'/);
     expect(observer).toMatch(/reportFreeSubmissionOutcomeWithRetry\([\s\S]*?'confirmed'/);
-    expect(observer).toMatch(/onUnknown: \(\) => reportFreeSubmissionOutcomeWithRetry\([\s\S]*?'unknown'/);
+    expect(observer).toMatch(/onUnknown: \(\) => \{[\s\S]*?reportFreeSubmissionOutcomeWithRetry\([\s\S]*?'unknown'/);
   });
 
   it('posts the owner-scoped manual endpoint with auth-epoch safety and no premium gate', () => {
@@ -184,13 +184,25 @@ describe('Free manual final-submit outcome runtime', () => {
       background.indexOf("case 'RECORD_FREE_SUBMISSION_OUTCOME'"),
       background.indexOf("case 'GET_AUTOMATION_SETTINGS'"),
     );
-    expect(handler).toContain('await refreshEntitlementSnapshot(token, outcomeAuthEpoch)');
-    expect(handler.match(/assertCurrentAuthEpoch\(outcomeAuthEpoch\)/g)?.length ?? 0).toBeGreaterThanOrEqual(3);
-    expect(handler).toContain('`/applications/${effectiveApplicationId}/manual-submission-outcome`');
-    expect(handler).toMatch(/'Idempotency-Key': effectiveEventId[\s\S]*?event_id: effectiveEventId[\s\S]*?outcome: effectiveOutcome,[\s\S]*?final_url: effectiveFinalUrl/);
+    expect(handler).toContain('const finalUrl = safeFreeSubmissionUrl(sender.url)');
+    expect(handler).not.toContain('getStoredToken()');
+    expect(handler).toMatch(/await postFreeSubmissionOutcome\([\s\S]*?effectiveOutcome,[\s\S]*?effectiveFinalUrl/);
+    const persistence = background.slice(
+      background.indexOf('async function postFreeSubmissionOutcome('),
+      background.indexOf('async function reconcileFreeManualSubmissionStatesForTab'),
+    );
+    expect(persistence).toContain('submissionOutcomeOutbox.persist({');
+    expect(persistence).toMatch(/eventId: pending\.eventId,[\s\S]*?leaseId: pending\.boundaryLeaseId![\s\S]*?activationId: pending\.boundaryActivationId![\s\S]*?outcome,[\s\S]*?finalUrl/);
+    expect(persistence.indexOf('submissionOutcomeOutbox.persist({')).toBeLessThan(persistence.indexOf('getStoredToken()'));
+    expect(persistence).toContain('refreshEntitlementSnapshot(token, expectedAuthEpoch)');
+    const sender = background.slice(
+      background.indexOf('async function sendPersistedSubmissionOutcome('),
+      background.indexOf('async function deliverSavedSubmissionOutcome('),
+    );
+    expect(sender).toMatch(/entry\.lane === 'free'[\s\S]*?'Idempotency-Key': entry\.attemptId/);
     expect(handler).not.toContain('requireFeature');
     expect(handler).not.toContain('automatic_submission');
-    expect(handler).toMatch(/if \(!response\.ok\)[\s\S]*?sendResponse\(\{ ok: true \}\)/);
+    expect(handler).toMatch(/await postFreeSubmissionOutcome\([\s\S]*?submitted: delivery\.submitted,[\s\S]*?receipt_cleanup_pending: delivery\.receiptCleanupPending/);
   });
 
   it('reuses the reserved event after hard navigation and forces mismatched bindings to unknown', () => {
@@ -207,8 +219,9 @@ describe('Free manual final-submit outcome runtime', () => {
       background.indexOf("case 'GET_PENDING_FREE_SUBMISSION_OUTCOME'"),
       background.indexOf("case 'ABANDON_FREE_SUBMISSION_OUTCOME_MONITOR'"),
     );
-    expect(getPending).toContain('pending ?? pendingFreeSubmissionMonitorForTab(tabId)');
-    expect(getPending).toContain("force_unknown: disposition !== 'resume'");
+    expect(getPending).toMatch(/pending \?\? pendingFreeSubmissionMonitorForTab\([\s\S]*?tabId/);
+    expect(getPending).toContain("const receiptLocked = journal?.phase === 'outcome' || journal?.phase === 'awaiting_receipt'");
+    expect(getPending).toContain("force_unknown: receiptLocked ? false : disposition !== 'resume'");
     expect(getPending).toContain('retry_pending: freeSubmissionMonitorStartsInFlight.has(tabId)');
     expect(recovery).toMatch(/attempt < 20 \|\| \(response\?\.retry_pending && attempt < 100\)/);
   });
@@ -218,9 +231,9 @@ describe('Free manual final-submit outcome runtime', () => {
       background.indexOf("case 'RECORD_FREE_SUBMISSION_OUTCOME'"),
       background.indexOf("case 'GET_AUTOMATION_SETTINGS'"),
     );
-    expect(handler).toContain('exact ?? pendingFreeSubmissionMonitorForTab(tabId)');
+    expect(handler).toMatch(/exact \?\? pendingFreeSubmissionMonitorForTab\([\s\S]*?tabId/);
     expect(handler).toMatch(/if \(!pending \|\| tabId === undefined\)[\s\S]*?submission_monitor_missing[\s\S]*?return;/);
-    expect(handler.indexOf('submission_monitor_missing')).toBeLessThan(handler.indexOf('manual-submission-outcome`'));
+    expect(handler.indexOf('submission_monitor_missing')).toBeLessThan(handler.indexOf('postFreeSubmissionOutcome('));
     expect(handler).toMatch(/bindFreeSubmissionOutcome\(\{[\s\S]*?pending,[\s\S]*?eventId,[\s\S]*?applicationId,[\s\S]*?disposition/);
   });
 
@@ -229,8 +242,13 @@ describe('Free manual final-submit outcome runtime', () => {
       background.indexOf("case 'RECORD_FREE_SUBMISSION_OUTCOME'"),
       background.indexOf("case 'GET_AUTOMATION_SETTINGS'"),
     );
-    expect(handler).toContain('if (!response.ok) throw await apiErrorFromResponse(response)');
-    expect(handler).toMatch(/if \(!response\.ok\) throw await apiErrorFromResponse\(response\)[\s\S]*?await clearAcceptedFreeSubmissionOutcomeState\(\{[\s\S]*?sendResponse\(\{ ok: true \}\)/);
+    expect(handler).toMatch(/await postFreeSubmissionOutcome\([\s\S]*?submitted: delivery\.submitted,[\s\S]*?receipt_cleanup_pending: delivery\.receiptCleanupPending/);
+    const delivery = background.slice(
+      background.indexOf('async function deliverSavedSubmissionOutcome('),
+      background.indexOf('async function postExtensionOutcome('),
+    );
+    expect(delivery).toContain('deliverPersistedSubmissionOutcome({');
+    expect(delivery).toContain('cleanupAcknowledgedSubmissionOutcome(exact)');
     const cleanup = background.slice(
       background.indexOf('async function clearAcceptedFreeSubmissionOutcomeState'),
       background.indexOf('async function transitionPendingFreeManualReservationToMonitor'),
@@ -250,6 +268,25 @@ describe('Free manual final-submit outcome runtime', () => {
     expect(abandon).not.toContain('chrome.storage.session.remove');
   });
 
+  it('does not report submitted or render Sent when acknowledged Free cleanup cannot be verified', () => {
+    const delivery = background.slice(
+      background.indexOf('async function deliverSavedSubmissionOutcome('),
+      background.indexOf('async function postExtensionOutcome('),
+    );
+    expect(delivery).toMatch(/wakeAcknowledgedSubmissionOutcome\(result\.entry, expectedAuthEpoch\)[\s\S]*?terminalReady: finalization\.terminalReady[\s\S]*?receiptCleanupPending: finalization\.cleanupPending/);
+    const freePost = background.slice(
+      background.indexOf('async function postFreeSubmissionOutcome('),
+      background.indexOf('async function reconcileFreeManualSubmissionStatesForTab'),
+    );
+    expect(freePost).toMatch(/submitted: result\.entry\.outcome === 'confirmed' && result\.delivery\.terminalReady/);
+    const reporter = content.slice(
+      content.indexOf('function reportFreeSubmissionOutcomeWithRetry'),
+      content.indexOf('function monitorFreeSubmissionOutcome'),
+    );
+    expect(reporter.indexOf('result.receiptCleanupPending')).toBeLessThan(reporter.indexOf('result.submitted'));
+    expect(reporter).toMatch(/result\.receiptCleanupPending[\s\S]*?renderReceiptRepairState\(baselineUrl\)[\s\S]*?return;/);
+  });
+
   it('uses a document-start shield and blocks cross-frame monitoring recovery', () => {
     expect(content).toContain("runAt: 'document_start'");
     const startup = content.slice(
@@ -264,7 +301,7 @@ describe('Free manual final-submit outcome runtime', () => {
       background.indexOf("case 'GET_PENDING_FREE_MANUAL_RESERVATION'"),
       background.indexOf("case 'CLEAR_PENDING_FREE_MANUAL_RESERVATION'"),
     );
-    expect(pending).toContain('pendingFreeManualSubmissionStartupState(tabId, frameId)');
+    expect(pending).toContain('pendingFreeManualSubmissionStartupState(tabId, frameId, currentUrl)');
     expect(pending).toContain('freeManualSubmissionStartupResponse(startup');
     expect(pending).toContain('catch(() => sendResponse({ pending: null, blocked: true }))');
     expect(pending).toMatch(/tabId === undefined \|\| !currentUrl[\s\S]*?blocked: true/);
@@ -316,13 +353,14 @@ describe('Free manual final-submit outcome runtime', () => {
     const reservationPost = handler.indexOf('const reservation = await reserveFreeManualSubmission(');
     expect(provisionalWrite).toBeGreaterThanOrEqual(0);
     expect(provisionalWrite).toBeLessThan(reservationPost);
-    expect(handler.slice(provisionalWrite, reservationPost)).toContain(
-      'openedReservation = { applicationId, eventId: requestedSubmissionEventId, stored: true }',
+    expect(handler.slice(provisionalWrite, reservationPost)).toMatch(
+      /openedReservation = \{[\s\S]*?applicationId,[\s\S]*?eventId: requestedSubmissionEventId,[\s\S]*?accountId: accountSnapshot\.account_id,[\s\S]*?stored: true/,
     );
+    expect(handler.slice(provisionalWrite, reservationPost)).toContain('await submissionOutcomeOutbox.arm({');
     expect(handler.slice(handler.lastIndexOf('} catch (error)'))).toMatch(
       /reservationAttempted && cancellationApplicationId[\s\S]*?closeAndClearPendingFreeManualReservationWithCapturedToken/,
     );
-    expect(handler.slice(handler.lastIndexOf('} catch (error)'))).not.toContain('.catch(() => undefined)');
+    expect(handler.slice(handler.lastIndexOf('} catch (error)'))).toContain("submissionOutcomeOutbox.cancelSafeNotSent(");
   });
 
   it('closes and clears an update-interrupted lease-less monitor and recovers it on startup', () => {

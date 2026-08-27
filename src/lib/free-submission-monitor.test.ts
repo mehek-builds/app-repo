@@ -96,4 +96,29 @@ describe('Free submission monitor recovery', () => {
       confirmationText: '',
     });
   });
+
+  it('keeps an exact confirmed receipt after monitor TTL while weaker timeout evidence stays unknown', () => {
+    expect(bindFreeSubmissionOutcome({
+      pending,
+      eventId: pending.eventId,
+      applicationId: pending.applicationId,
+      outcome: 'confirmed',
+      finalUrl: 'https://jobs.jobvite.com/acme/job/CaseId/confirmation',
+      confirmationText: 'Thank you for applying.',
+      disposition: 'expired',
+    })).toMatchObject({
+      outcome: 'confirmed',
+      finalUrl: 'https://jobs.jobvite.com/acme/job/CaseId/confirmation',
+      confirmationText: 'Thank you for applying.',
+    });
+    expect(bindFreeSubmissionOutcome({
+      pending,
+      eventId: pending.eventId,
+      applicationId: pending.applicationId,
+      outcome: 'unknown',
+      finalUrl: 'https://jobs.jobvite.com/acme/job/CaseId/confirmation',
+      confirmationText: '',
+      disposition: 'expired',
+    })).toMatchObject({ outcome: 'unknown', finalUrl: pending.startUrl });
+  });
 });

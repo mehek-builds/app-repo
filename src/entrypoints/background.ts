@@ -14,6 +14,7 @@ import {
   recordPendingPortalAccount,
   currentAuthEpoch,
   authEpochIsCurrent,
+  deactivateAuthSessionForClear,
   completeAuthSessionClear,
   pendingPortalAccountClaimIsCurrent,
 } from '../lib/storage';
@@ -128,12 +129,31 @@ import {
 import {
   FREE_MANUAL_SUBMISSION_UNAVAILABLE_COPY,
   freeManualSubmissionAtsSupported,
+  freeManualSubmissionPortalSupported,
 } from '../lib/free-manual-submission-capability';
 import {
   RELEASE_UPDATE_FENCE_STORAGE_KEY,
 } from '../lib/release-update-fence';
 import { ReleaseUpdateFenceController } from '../lib/release-update-fence-controller';
 import { contentScriptPersistsAfterReload } from '../lib/release-update-fence-url';
+import { SubmissionStartGate } from '../lib/submission-start-gate';
+import {
+  deliverPersistedSubmissionOutcome,
+  exactSubmissionReceiptProof,
+  SUBMISSION_OUTCOME_OUTBOX_ALARM,
+  SUBMISSION_OUTCOME_OUTBOX_LEGACY_STORAGE_KEY,
+  SUBMISSION_OUTCOME_OUTBOX_STORAGE_KEY,
+  SubmissionOutcomeOutbox,
+  submissionOutcomeAttemptKey,
+  submissionOutcomeLogoutCanPurge,
+  submissionOutcomeReceiptVisibility,
+  type SubmissionOutcome,
+  type SubmissionOutcomeAcknowledgement,
+  type SubmissionOutcomeOutboxEntry,
+  type SubmissionOutcomeOutboxValue,
+  type SubmissionReceiptProofV1,
+} from '../lib/submission-outcome-outbox';
+import { finalizeSubmissionAcknowledgement } from '../lib/submission-ack-finalizer';
 
 // Latched off once the backend reports onboarding complete. Service-worker memory is fine for
 // this: the worst case on a restart is one wasted 403, which re-latches it immediately.
@@ -142,15 +162,20 @@ let harvestStopped = false;
 type PendingExtensionSubmission = {
   applicationId: string;
   claimId: string;
+  accountId: string;
   startedAt: number;
   frameId: number;
+  capturedAuthEpoch: number;
+  startUrl: string;
   packetVersion: string;
   auditDigest: string;
-  strictReceipt?: { family: 'jobvite' | 'icims'; startedUrl: string };
+  journalPhase?: 'armed' | 'pressed' | 'outcome' | 'awaiting_receipt';
+  journalOutcome?: SubmissionOutcome | null;
+  nextAttemptAt?: number;
+  journalRepairReason?: string | null;
+  lateObservationDeadline?: number | null;
 };
 
-const PENDING_SUBMISSIONS_KEY = 'litos_pending_extension_submission';
-const PENDING_SUBMISSION_MAX_AGE_MS = 5 * 60_000;
 const HANDOFF_PACKET_BINDINGS_KEY = 'litos_extension_handoff_packet_bindings';
 const GATED_ATTENDED_CONTINUATION_PREFIX = 'litos_gated_attended_continuation';
 const GATED_ATTENDED_CONTINUATION_TTL_MS = 60 * 60_000;
@@ -163,7 +188,22 @@ const handoffPacketBindingMutations = new KeyedMutationQueue();
 const pendingSubmissionMutations = new KeyedMutationQueue();
 const applicationTabMutations = new KeyedMutationQueue();
 const freeManualSubmissionStateMutations = new KeyedMutationQueue();
+const submissionOutcomeDeliveryMutations = new KeyedMutationQueue();
 const freeSubmissionMonitorStartsInFlight = new Map<number, number>();
+const submissionStartGate = new SubmissionStartGate();
+const GENERATED_EXTENSION_SUBMISSION_ENABLED = false;
+
+function beginSubmissionStart(): () => void {
+  return submissionStartGate.begin();
+}
+
+async function closeSubmissionStartGate(): Promise<void> {
+  await submissionStartGate.closeAndDrain();
+}
+
+function reopenSubmissionStartGate(): void {
+  submissionStartGate.reopen();
+}
 const ARMED_HANDOFF_MUTATION_KEY = 'armed-handoffs';
 const HANDOFF_PACKET_BINDING_MUTATION_KEY = 'handoff-packet-bindings';
 const PENDING_SUBMISSION_MUTATION_KEY = 'pending-submissions';
@@ -172,6 +212,26 @@ const FREE_MANUAL_RESERVATION_PREFIX = 'litos_pending_free_manual_reservation';
 const PENDING_PREMIUM_ACTION_KEY = 'litos_pending_premium_action';
 const PENDING_PREMIUM_RETRY_FOCUS_KEY = 'litos_pending_premium_retry_focus';
 const PREMIUM_RETRY_FOCUS_TTL_MS = 5 * 60_000;
+
+const submissionOutcomeOutbox = new SubmissionOutcomeOutbox({
+  async read(): Promise<unknown> {
+    const stored = await chrome.storage.local.get(SUBMISSION_OUTCOME_OUTBOX_STORAGE_KEY);
+    return stored[SUBMISSION_OUTCOME_OUTBOX_STORAGE_KEY];
+  },
+  async write(value: SubmissionOutcomeOutboxValue): Promise<void> {
+    await chrome.storage.local.set({ [SUBMISSION_OUTCOME_OUTBOX_STORAGE_KEY]: value });
+  },
+  async remove(): Promise<void> {
+    await chrome.storage.local.remove(SUBMISSION_OUTCOME_OUTBOX_STORAGE_KEY);
+  },
+  async readLegacy(): Promise<unknown> {
+    const stored = await chrome.storage.local.get(SUBMISSION_OUTCOME_OUTBOX_LEGACY_STORAGE_KEY);
+    return stored[SUBMISSION_OUTCOME_OUTBOX_LEGACY_STORAGE_KEY];
+  },
+  async removeLegacy(): Promise<void> {
+    await chrome.storage.local.remove(SUBMISSION_OUTCOME_OUTBOX_LEGACY_STORAGE_KEY);
+  },
+});
 
 type PendingPremiumRetryFocus = {
   actionNonce: string;
@@ -416,26 +476,113 @@ async function fetchAndBindHandoffPacket(input: {
   return resume;
 }
 
-function pendingSubmissionKey(tabId: number): string {
-  return `${PENDING_SUBMISSIONS_KEY}:${tabId}`;
+async function pendingSubmission(
+  tabId: number,
+  applicationId?: string,
+  currentUrl?: string,
+  frameId?: number,
+): Promise<PendingExtensionSubmission | null> {
+  const currentIdentity = currentUrl ? applicationFormIdentityKey(currentUrl) : null;
+  const entries = (await submissionOutcomeOutbox.list())
+    .filter((entry) => entry.lane === 'extension')
+    .filter((entry) => !applicationId || entry.applicationId === applicationId)
+    .filter((entry) => currentIdentity
+      ? applicationFormIdentityKey(entry.startUrl) === currentIdentity
+      : entry.tabId === tabId && (frameId === undefined || entry.frameId === frameId));
+  if (entries.length !== 1) return null;
+  let entry = entries[0]!;
+  if (frameId !== undefined && (entry.tabId !== tabId || entry.frameId !== frameId)) {
+    if (!currentUrl || !currentIdentity) return null;
+    entry = entry.phase === 'armed'
+      ? await submissionOutcomeOutbox.rebindArmedContext({
+        lane: 'extension',
+        attemptId: entry.attemptId,
+        accountId: entry.accountId,
+        tabId,
+        frameId,
+      })
+      : await submissionOutcomeOutbox.rebindRecoverableContext({
+        lane: 'extension',
+        accountId: entry.accountId,
+        applicationId: entry.applicationId,
+        attemptId: entry.attemptId,
+        startUrl: entry.startUrl,
+        currentUrl,
+        tabId,
+        frameId,
+      });
+  }
+  return {
+    applicationId: entry.applicationId,
+    claimId: entry.claimId!,
+    accountId: entry.accountId,
+    startedAt: entry.pressedAt ?? entry.startedAt,
+    frameId: entry.frameId,
+    capturedAuthEpoch: entry.capturedAuthEpoch,
+    startUrl: entry.startUrl,
+    packetVersion: entry.packetVersion!,
+    auditDigest: entry.auditDigest!,
+    journalPhase: entry.phase,
+    journalOutcome: entry.outcome,
+    nextAttemptAt: entry.nextAttemptAt,
+    journalRepairReason: entry.repairReason,
+    lateObservationDeadline: entry.lateObservationDeadline,
+  };
 }
 
-async function pendingSubmission(tabId: number): Promise<PendingExtensionSubmission | null> {
-  const key = pendingSubmissionKey(tabId);
-  const stored = await chrome.storage.session.get(key);
-  return (stored[key] as PendingExtensionSubmission | undefined) ?? null;
+async function acknowledgedSubmissionForContext(
+  lane: 'extension' | 'free',
+  tabId: number,
+  frameId: number,
+  currentUrl: string,
+  applicationId?: string,
+  attemptId?: string,
+) {
+  const currentIdentity = applicationFormIdentityKey(currentUrl);
+  if (!currentIdentity) return null;
+  const candidates = (await submissionOutcomeOutbox.listAcknowledgements())
+    .filter((entry) => entry.lane === lane)
+    .filter((entry) => !applicationId || entry.applicationId === applicationId)
+    .filter((entry) => !attemptId || entry.attemptId === attemptId)
+    .filter((entry) => applicationFormIdentityKey(entry.startUrl) === currentIdentity);
+  if (candidates.length !== 1) return null;
+  const acknowledgement = candidates[0]!;
+  return acknowledgement.tabId === tabId && acknowledgement.frameId === frameId
+    ? acknowledgement
+    : submissionOutcomeOutbox.rebindAcknowledgementContext({
+      lane,
+      accountId: acknowledgement.accountId,
+      applicationId: acknowledgement.applicationId,
+      attemptId: acknowledgement.attemptId,
+      startUrl: acknowledgement.startUrl,
+      currentUrl,
+      tabId,
+      frameId,
+    });
 }
 
 async function setPendingSubmission(tabId: number, pending: PendingExtensionSubmission | null, authEpoch?: number) {
   await pendingSubmissionMutations.run(PENDING_SUBMISSION_MUTATION_KEY, async () => {
     if (authEpoch !== undefined) assertCurrentAuthEpoch(authEpoch);
-    const key = pendingSubmissionKey(tabId);
-    if (pending) await chrome.storage.session.set({ [key]: pending });
-    else await chrome.storage.session.remove(key);
-    if (authEpoch !== undefined && !authEpochIsCurrent(authEpoch)) {
-      await chrome.storage.session.remove(key);
-      assertCurrentAuthEpoch(authEpoch);
+    if (pending) {
+      await submissionOutcomeOutbox.arm({
+        lane: 'extension',
+        accountId: pending.accountId,
+        applicationId: pending.applicationId,
+        claimId: pending.claimId,
+        tabId,
+        frameId: pending.frameId,
+        capturedAuthEpoch: pending.capturedAuthEpoch,
+        startUrl: pending.startUrl,
+        startedAt: pending.startedAt,
+        packetVersion: pending.packetVersion,
+        auditDigest: pending.auditDigest,
+      });
+    } else {
+      const exact = await pendingSubmission(tabId);
+      if (exact) await submissionOutcomeOutbox.cancelSafeNotSent('extension', exact.claimId, exact.accountId);
     }
+    if (authEpoch !== undefined) assertCurrentAuthEpoch(authEpoch);
   });
 }
 
@@ -450,13 +597,44 @@ function freeManualSubmissionMutationKey(tabId: number): string {
 async function pendingFreeManualSubmissionStartupState(
   tabId: number,
   frameId: number,
-): Promise<{ pending: FreeManualReservedState | null; blocked: boolean }> {
+  currentUrl?: string,
+): Promise<{ pending: FreeManualReservedState | null; blocked: boolean; integrityBlocked?: boolean }> {
   return freeManualSubmissionStateMutations.run(freeManualSubmissionMutationKey(tabId), async () => {
     const stored = await chrome.storage.session.get(null);
     const values = Object.entries(stored)
       .filter(([key]) => key.startsWith(`${FREE_MANUAL_RESERVATION_PREFIX}:${tabId}:`))
       .map(([, value]) => value);
-    return freeManualSubmissionStartupState(values, frameId);
+    if (values.some((value) => classifyFreeManualSubmissionState(value).kind === 'malformed')) {
+      return { pending: null, blocked: true, integrityBlocked: true };
+    }
+    const startup = freeManualSubmissionStartupState(values, frameId);
+    if (startup.pending || startup.blocked || !currentUrl) return startup;
+    const currentIdentity = applicationFormIdentityKey(currentUrl);
+    const candidates = (await submissionOutcomeOutbox.list())
+      .filter((entry) => entry.lane === 'free')
+      .filter((entry) => currentIdentity && applicationFormIdentityKey(entry.startUrl) === currentIdentity);
+    if (candidates.length !== 1) return { pending: null, blocked: candidates.length > 1 };
+    if (candidates[0]!.phase !== 'armed') return { pending: null, blocked: true };
+    const entry = await submissionOutcomeOutbox.rebindArmedContext({
+      lane: 'free',
+      attemptId: candidates[0]!.attemptId,
+      accountId: candidates[0]!.accountId,
+      tabId,
+      frameId,
+    });
+    const recovered = reservedFreeManualSubmissionState({
+      eventId: entry.eventId!,
+      applicationId: entry.applicationId,
+      tabId,
+      frameId,
+      accountId: entry.accountId,
+      authEpoch: entry.capturedAuthEpoch,
+      startUrl: entry.startUrl,
+      startedAt: entry.startedAt,
+    });
+    if (!recovered) return { pending: null, blocked: true };
+    await chrome.storage.session.set({ [freeManualReservationKey(tabId, frameId)]: recovered });
+    return { pending: recovered, blocked: false };
   });
 }
 
@@ -553,6 +731,7 @@ async function closeAndClearPendingFreeManualReservationWithCapturedToken(input:
       throw new Error('A newer or authorized manual submission state replaced the closed attempt.');
     }
     if (disposition === 'remove') await chrome.storage.session.remove(key);
+    await submissionOutcomeOutbox.cancelSafeNotSent('free', state.eventId, state.accountId);
     return safety;
   });
 }
@@ -798,6 +977,9 @@ async function restoreExtensionPremiumActionControl(
 async function pendingFreeSubmissionMonitor(
   tabId: number,
   frameId: number,
+  currentUrl?: string,
+  eventId?: string,
+  applicationId?: string,
 ): Promise<PendingFreeSubmissionMonitor | null> {
   const key = freeManualReservationKey(tabId, frameId);
   const stored = await chrome.storage.session.get(key);
@@ -807,7 +989,8 @@ async function pendingFreeSubmissionMonitor(
     : classified.kind === 'expired_monitoring'
       ? classified.state
       : null;
-  return state ? {
+  const currentIdentity = currentUrl ? applicationFormIdentityKey(currentUrl) : null;
+  if (state && (!currentIdentity || applicationFormIdentityKey(state.startUrl) === currentIdentity)) return {
     eventId: state.eventId,
     applicationId: state.applicationId,
     tabId: state.tabId,
@@ -819,14 +1002,53 @@ async function pendingFreeSubmissionMonitor(
     boundaryLeaseId: state.boundaryLeaseId,
     boundaryActivationId: state.boundaryActivationId,
     boundaryExpiresAt: state.boundaryExpiresAt,
+  };
+  const candidates = (await submissionOutcomeOutbox.list())
+    .filter((entry) => entry.lane === 'free' && entry.phase !== 'armed')
+    .filter((entry) => !eventId || entry.eventId === eventId)
+    .filter((entry) => !applicationId || entry.applicationId === applicationId)
+    .filter((entry) => currentIdentity
+      ? applicationFormIdentityKey(entry.startUrl) === currentIdentity
+      : entry.tabId === tabId && entry.frameId === frameId);
+  if (candidates.length !== 1) return null;
+  let journal = candidates[0]!;
+  if ((journal.tabId !== tabId || journal.frameId !== frameId) && currentUrl) {
+    journal = await submissionOutcomeOutbox.rebindRecoverableContext({
+      lane: 'free',
+      accountId: journal.accountId,
+      applicationId: journal.applicationId,
+      attemptId: journal.attemptId,
+      startUrl: journal.startUrl,
+      currentUrl,
+      tabId,
+      frameId,
+    });
+  }
+  return journal ? {
+    eventId: journal.eventId!,
+    applicationId: journal.applicationId,
+    tabId: journal.tabId,
+    frameId: journal.frameId,
+    accountId: journal.accountId,
+    authEpoch: journal.capturedAuthEpoch,
+    startUrl: journal.startUrl,
+    startedAt: journal.pressedAt ?? journal.startedAt,
+    boundaryLeaseId: journal.leaseId,
+    boundaryActivationId: journal.activationId,
+    boundaryExpiresAt: journal.boundaryExpiresAt,
   } : null;
 }
 
 async function pendingFreeSubmissionMonitorForTab(
   tabId: number,
+  currentUrl?: string,
+  eventId?: string,
+  applicationId?: string,
+  reboundFrameId = 0,
 ): Promise<PendingFreeSubmissionMonitor | null> {
   const stored = await chrome.storage.session.get(null);
-  return Object.entries(stored)
+  const currentIdentity = currentUrl ? applicationFormIdentityKey(currentUrl) : null;
+  const session = Object.entries(stored)
     .filter(([key]) => key.startsWith(`${FREE_MANUAL_RESERVATION_PREFIX}:${tabId}:`))
     .map(([, value]) => {
       const classified = classifyFreeManualSubmissionState(value);
@@ -837,6 +1059,7 @@ async function pendingFreeSubmissionMonitorForTab(
           : null;
     })
     .filter((value): value is FreeManualMonitoringState => Boolean(value))
+    .filter((state) => !currentIdentity || applicationFormIdentityKey(state.startUrl) === currentIdentity)
     .sort((left, right) => right.monitoringStartedAt - left.monitoringStartedAt)
     .map((state) => ({
       eventId: state.eventId,
@@ -850,7 +1073,42 @@ async function pendingFreeSubmissionMonitorForTab(
       boundaryLeaseId: state.boundaryLeaseId,
       boundaryActivationId: state.boundaryActivationId,
       boundaryExpiresAt: state.boundaryExpiresAt,
-    }))[0] ?? null;
+  }))[0] ?? null;
+  if (session) return session;
+  const candidates = (await submissionOutcomeOutbox.list())
+    .filter((entry) => entry.lane === 'free' && entry.phase !== 'armed')
+    .filter((entry) => !eventId || entry.eventId === eventId)
+    .filter((entry) => !applicationId || entry.applicationId === applicationId)
+    .filter((entry) => currentIdentity
+      ? applicationFormIdentityKey(entry.startUrl) === currentIdentity
+      : entry.tabId === tabId);
+  if (candidates.length !== 1) return null;
+  let journal = candidates[0]!;
+  if ((journal.tabId !== tabId || journal.frameId !== reboundFrameId) && currentUrl) {
+    journal = await submissionOutcomeOutbox.rebindRecoverableContext({
+      lane: 'free',
+      accountId: journal.accountId,
+      applicationId: journal.applicationId,
+      attemptId: journal.attemptId,
+      startUrl: journal.startUrl,
+      currentUrl,
+      tabId,
+      frameId: reboundFrameId,
+    });
+  }
+  return journal ? {
+    eventId: journal.eventId!,
+    applicationId: journal.applicationId,
+    tabId: journal.tabId,
+    frameId: journal.frameId,
+    accountId: journal.accountId,
+    authEpoch: journal.capturedAuthEpoch,
+    startUrl: journal.startUrl,
+    startedAt: journal.pressedAt ?? journal.startedAt,
+    boundaryLeaseId: journal.leaseId,
+    boundaryActivationId: journal.activationId,
+    boundaryExpiresAt: journal.boundaryExpiresAt,
+  } : null;
 }
 
 async function clearAcceptedFreeSubmissionOutcomeState(input: {
@@ -883,6 +1141,64 @@ async function clearAcceptedFreeSubmissionOutcomeState(input: {
       await chrome.storage.session.remove(key);
     },
   );
+}
+
+async function clearAcknowledgedFreeSubmissionSessionCache(
+  acknowledgement: SubmissionOutcomeAcknowledgement,
+): Promise<void> {
+  if (acknowledgement.lane !== 'free') return;
+  const stored = await chrome.storage.session.get(null);
+  const matches = Object.entries(stored).flatMap(([key, value]) => {
+    if (!key.startsWith(`${FREE_MANUAL_RESERVATION_PREFIX}:`)) return [];
+    const classified = classifyFreeManualSubmissionState(value);
+    const state = classified.kind === 'valid'
+      ? classified.state
+      : classified.kind === 'expired_reserved' || classified.kind === 'expired_monitoring'
+        ? classified.state
+        : null;
+    return state
+      && state.eventId === acknowledgement.attemptId
+      && state.applicationId === acknowledgement.applicationId
+      && state.accountId === acknowledgement.accountId
+      && state.startUrl === acknowledgement.startUrl
+      ? [{ key, tabId: state.tabId }]
+      : [];
+  });
+  await Promise.all(matches.map(({ key, tabId }) => freeManualSubmissionStateMutations.run(
+    freeManualSubmissionMutationKey(tabId),
+    async () => {
+      const current = await chrome.storage.session.get(key);
+      const classified = classifyFreeManualSubmissionState(current[key]);
+      const state = classified.kind === 'valid'
+        ? classified.state
+        : classified.kind === 'expired_reserved' || classified.kind === 'expired_monitoring'
+          ? classified.state
+          : null;
+      if (state
+        && state.eventId === acknowledgement.attemptId
+        && state.applicationId === acknowledgement.applicationId
+        && state.accountId === acknowledgement.accountId
+        && state.startUrl === acknowledgement.startUrl) {
+        await chrome.storage.session.remove(key);
+      }
+    },
+  )));
+  const verified = await chrome.storage.session.get(null);
+  const stillPresent = Object.entries(verified).some(([key, value]) => {
+    if (!key.startsWith(`${FREE_MANUAL_RESERVATION_PREFIX}:`)) return false;
+    const classified = classifyFreeManualSubmissionState(value);
+    const state = classified.kind === 'valid'
+      ? classified.state
+      : classified.kind === 'expired_reserved' || classified.kind === 'expired_monitoring'
+        ? classified.state
+        : null;
+    return Boolean(state
+      && state.eventId === acknowledgement.attemptId
+      && state.applicationId === acknowledgement.applicationId
+      && state.accountId === acknowledgement.accountId
+      && state.startUrl === acknowledgement.startUrl);
+  });
+  if (stillPresent) throw new Error('The accepted Free receipt session cleanup could not be verified.');
 }
 
 async function transitionPendingFreeManualReservationToMonitor(pending: PendingFreeSubmissionMonitor): Promise<void> {
@@ -943,6 +1259,14 @@ async function authorizePendingFreeManualSubmissionMonitor(input: {
       now: Date.now(),
     });
     if (!authorized) throw new Error('The final boundary authorization did not match this monitor.');
+    await submissionOutcomeOutbox.markPressed({
+      lane: 'free',
+      attemptId: input.eventId,
+      accountId: current.accountId,
+      leaseId: input.leaseId,
+      activationId: input.activationId,
+      boundaryExpiresAt: input.expiresAt,
+    });
     await chrome.storage.session.set({ [key]: authorized });
     if (!authEpochIsCurrent(input.authEpoch)) {
       await chrome.storage.session.remove(key);
@@ -983,44 +1307,236 @@ async function closeAuthorizedFreeManualSubmissionBeforeResponse(input: {
       input.eventId,
     );
     assertCurrentAuthEpoch(input.authEpoch);
+    await submissionOutcomeOutbox.cancelSafeNotSent('free', current.eventId, current.accountId);
     await chrome.storage.session.remove(key);
     return safety;
   });
 }
 
-async function postExtensionOutcome(pending: PendingExtensionSubmission, outcome: 'confirmed' | 'failed' | 'unknown' | 'cancelled', finalUrl: string, confirmationText?: string) {
+async function assertSubmissionOutcomeCapacity(attemptKey?: string): Promise<void> {
+  const session = await chrome.storage.session.get(null);
+  const malformedFreeSession = Object.entries(session).some(([key, value]) =>
+    key.startsWith(`${FREE_MANUAL_RESERVATION_PREFIX}:`)
+    && classifyFreeManualSubmissionState(value).kind === 'malformed');
+  if (malformedFreeSession) {
+    throw new Error('A saved Free submission session needs repair before another employer submission can start.');
+  }
+  const entries = await submissionOutcomeOutbox.list();
+  if (attemptKey && entries.some((entry) => submissionOutcomeAttemptKey(entry.lane, entry.attemptId) === attemptKey)) return;
+  if (await submissionOutcomeOutbox.hasCapacity()) return;
+  throw new Error('Litos is still syncing saved submission receipts. No employer submission can start until that queue drains.');
+}
+
+function outcomeEpochAllowsPending(capturedAuthEpoch: number, expectedAuthEpoch: number): boolean {
+  return expectedAuthEpoch === 0 || capturedAuthEpoch === expectedAuthEpoch;
+}
+
+async function cleanupAcknowledgedSubmissionOutcome(entry: SubmissionOutcomeOutboxEntry): Promise<void> {
+  if (entry.lane === 'extension') {
+    return;
+  }
+  await clearAcceptedFreeSubmissionOutcomeState({
+    pending: {
+      eventId: entry.eventId!,
+      applicationId: entry.applicationId,
+      tabId: entry.tabId,
+      frameId: entry.frameId,
+      accountId: entry.accountId,
+      authEpoch: entry.capturedAuthEpoch,
+      startUrl: entry.startUrl,
+      startedAt: entry.pressedAt ?? entry.startedAt,
+      boundaryLeaseId: entry.leaseId,
+      boundaryActivationId: entry.activationId,
+      boundaryExpiresAt: entry.boundaryExpiresAt,
+    },
+    eventId: entry.eventId!,
+    applicationId: entry.applicationId,
+    leaseId: entry.leaseId!,
+    activationId: entry.activationId!,
+  });
+}
+
+async function sendPersistedSubmissionOutcome(
+  entry: SubmissionOutcomeOutboxEntry,
+  token: string,
+  accountId: string,
+  expectedAuthEpoch: number,
+  timeoutMs = FETCH_TIMEOUT_MS,
+) {
+  assertCurrentAuthEpoch(expectedAuthEpoch);
+  if (entry.accountId !== accountId) throw new Error('The saved submission outcome belongs to a different account.');
+  const response = await timeoutBackendFetch(entry.requestPath, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(entry.lane === 'free' ? { 'Idempotency-Key': entry.attemptId } : {}),
+    },
+    body: entry.serializedBody,
+  }, token, timeoutMs);
+  const body = await response.json().catch(() => null);
+  assertCurrentAuthEpoch(expectedAuthEpoch);
+  return { ok: response.ok, status: response.status, body };
+}
+
+async function wakeAcknowledgedSubmissionOutcome(
+  entry: SubmissionOutcomeOutboxEntry,
+  expectedAuthEpoch: number,
+): Promise<{
+  terminalReady: boolean;
+  cleanupPending: boolean;
+}> {
+  if (entry.outcome !== 'confirmed') return { terminalReady: false, cleanupPending: false };
+  const projection = (await submissionOutcomeOutbox.listAcknowledgements())
+    .find((candidate) => candidate.lane === entry.lane && candidate.attemptId === entry.attemptId);
+  if (!projection) return { terminalReady: false, cleanupPending: false };
+  return finalizeSubmissionAcknowledgement({
+    requiresSessionCleanup: projection.lane === 'free',
+    cleanup: async () => {
+      assertCurrentAuthEpoch(expectedAuthEpoch);
+      await clearAcknowledgedFreeSubmissionSessionCache(projection);
+      assertCurrentAuthEpoch(expectedAuthEpoch);
+    },
+    render: async () => {
+      assertCurrentAuthEpoch(expectedAuthEpoch);
+      const response = await chrome.tabs.sendMessage(projection.tabId, {
+        type: 'LITOS_SUBMISSION_RECEIPT_ACKNOWLEDGED',
+        lane: projection.lane,
+        application_id: projection.applicationId,
+        attempt_id: projection.attemptId,
+        start_url: projection.startUrl,
+      }, { frameId: projection.frameId }).catch(() => null) as { rendered?: unknown } | null;
+      assertCurrentAuthEpoch(expectedAuthEpoch);
+      return response?.rendered === true;
+    },
+    consume: async () => {
+      assertCurrentAuthEpoch(expectedAuthEpoch);
+      const consumed = await submissionOutcomeOutbox.consumeAcknowledgement(projection);
+      assertCurrentAuthEpoch(expectedAuthEpoch);
+      return consumed;
+    },
+  });
+}
+
+async function deliverSavedSubmissionOutcome(
+  entry: SubmissionOutcomeOutboxEntry,
+  token: string,
+  accountId: string,
+  expectedAuthEpoch: number,
+  timeoutMs = FETCH_TIMEOUT_MS,
+): Promise<{
+  acknowledged: boolean;
+  terminalReady: boolean;
+  receiptCleanupPending: boolean;
+}> {
+  const result = await deliverPersistedSubmissionOutcome({
+    outbox: submissionOutcomeOutbox,
+    entry,
+    send: (exact) => sendPersistedSubmissionOutcome(exact, token, accountId, expectedAuthEpoch, timeoutMs),
+    cleanup: async (exact) => {
+      assertCurrentAuthEpoch(expectedAuthEpoch);
+      await cleanupAcknowledgedSubmissionOutcome(exact);
+      assertCurrentAuthEpoch(expectedAuthEpoch);
+    },
+  });
+  if (!result.acknowledged) {
+    return { acknowledged: false, terminalReady: false, receiptCleanupPending: false };
+  }
+  if (result.entry.outcome !== 'confirmed') {
+    return { acknowledged: true, terminalReady: false, receiptCleanupPending: false };
+  }
+  const finalization = await wakeAcknowledgedSubmissionOutcome(result.entry, expectedAuthEpoch);
+  return {
+    acknowledged: true,
+    terminalReady: finalization.terminalReady,
+    receiptCleanupPending: finalization.cleanupPending,
+  };
+}
+
+async function postExtensionOutcome(
+  tabId: number,
+  pending: PendingExtensionSubmission,
+  outcome: SubmissionOutcome,
+  finalUrl: string,
+  confirmationText?: string,
+  receiptProof?: SubmissionReceiptProofV1 | null,
+): Promise<{ submitted: boolean }> {
   if (!validHandoffVersion(pending.packetVersion) || !validHandoffVersion(pending.auditDigest)) {
     throw new Error('The audited application packet is no longer available. Nothing was recorded.');
   }
-  const token = await getStoredToken();
-  if (!token) throw new Error('Sign in to Litos again before updating this application.');
-  const response = await timeoutBackendFetch(`/applications/${pending.applicationId}/submission/extension-outcome`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      claim_id: pending.claimId,
+  const outcomeAuthEpoch = currentAuthEpoch();
+  const key = submissionOutcomeAttemptKey('extension', pending.claimId);
+  const result = await submissionOutcomeDeliveryMutations.run(key, async () => {
+    const entry = await submissionOutcomeOutbox.persist({
+      lane: 'extension',
+      accountId: pending.accountId,
+      applicationId: pending.applicationId,
+      claimId: pending.claimId,
+      tabId,
+      frameId: pending.frameId,
+      capturedAuthEpoch: pending.capturedAuthEpoch,
+      startUrl: pending.startUrl,
       outcome,
-      final_url: finalUrl,
-      ...(confirmationText ? { confirmation_text: confirmationText.slice(0, 2000) } : {}),
-    }),
-  }, token);
-  if (!response.ok) {
-    const body = await response.json().catch(() => null) as { error?: string } | null;
-    throw new Error(body?.error ?? `Could not update application (${response.status})`);
+      finalUrl,
+      confirmationText,
+      receiptProof,
+    });
+    if (!outcomeEpochAllowsPending(pending.capturedAuthEpoch, outcomeAuthEpoch)) {
+      throw new Error('The exact submission outcome is saved, but the active Litos account changed before delivery.');
+    }
+    const token = await getStoredToken();
+    if (!token) throw new Error('Sign in to Litos again before updating this application.');
+    assertCurrentAuthEpoch(outcomeAuthEpoch);
+    const snapshot = await refreshEntitlementSnapshot(token, outcomeAuthEpoch);
+    assertCurrentAuthEpoch(outcomeAuthEpoch);
+    if (snapshot.account_id !== pending.accountId) {
+      throw new Error('This submission outcome belongs to a different Litos account.');
+    }
+    return {
+      entry,
+      delivery: await deliverSavedSubmissionOutcome(
+        entry,
+        token,
+        snapshot.account_id,
+        outcomeAuthEpoch,
+      ),
+    };
+  });
+  if (!result.delivery.acknowledged) {
+    throw new Error('The submission outcome is saved locally and will retry after Litos reconnects.');
   }
-  void trackExtensionEvent('application_submission_outcome_recorded', { outcome });
-  if (outcome === 'confirmed') void trackExtensionEvent('application_submission_completed');
+  void trackExtensionEvent('application_submission_outcome_recorded', { outcome: result.entry.outcome });
+  if (result.entry.outcome === 'confirmed') void trackExtensionEvent('application_submission_completed');
+  return {
+    submitted: result.entry.outcome === 'confirmed' && result.delivery.terminalReady,
+  };
 }
 
-async function closePendingSubmission(tabId: number, finalUrl = 'https://trylitos.com') {
-  const pending = await pendingSubmission(tabId);
-  if (!pending) return;
-  try {
-    await postExtensionOutcome(pending, 'unknown', finalUrl);
-    await setPendingSubmission(tabId, null);
-  } catch {
-    // Keep the claim in session storage. A later page wake can retry the safe unknown outcome.
-  }
+let submissionOutcomeReplayInFlight: Promise<void> | null = null;
+function replaySubmissionOutcomeOutbox(force = false, timeoutMs = FETCH_TIMEOUT_MS): Promise<void> {
+  if (submissionOutcomeReplayInFlight) return submissionOutcomeReplayInFlight;
+  submissionOutcomeReplayInFlight = (async () => {
+    const token = await getStoredToken();
+    if (!token) return;
+    const replayAuthEpoch = currentAuthEpoch();
+    assertCurrentAuthEpoch(replayAuthEpoch);
+    const snapshot = await refreshEntitlementSnapshot(token, replayAuthEpoch);
+    assertCurrentAuthEpoch(replayAuthEpoch);
+    const due = await submissionOutcomeOutbox.due(snapshot.account_id, Date.now(), force);
+    for (const candidate of due) {
+      const key = submissionOutcomeAttemptKey(candidate.lane, candidate.attemptId);
+      await submissionOutcomeDeliveryMutations.run(key, async () => {
+        assertCurrentAuthEpoch(replayAuthEpoch);
+        const current = (await submissionOutcomeOutbox.list()).find(
+          (entry) => submissionOutcomeAttemptKey(entry.lane, entry.attemptId) === key,
+        );
+        if (!current || current.accountId !== snapshot.account_id) return;
+        await deliverSavedSubmissionOutcome(current, token, snapshot.account_id, replayAuthEpoch, timeoutMs);
+      });
+    }
+  })().finally(() => {
+    submissionOutcomeReplayInFlight = null;
+  });
+  return submissionOutcomeReplayInFlight;
 }
 
 /**
@@ -1452,87 +1968,116 @@ async function postFreeManualSubmissionBeforeReplayCancellation(
   return safety;
 }
 
-async function postFreeManualSubmissionUnknownOnClose(
-  token: string,
-  state: FreeManualMonitoringState,
-): Promise<void> {
-  if (!state.boundaryLeaseId || !state.boundaryActivationId) {
-    throw new Error('The monitoring state has no exact boundary authorization.');
-  }
-  const response = await timeoutBackendFetch(
-    `/applications/${state.applicationId}/manual-submission-outcome`,
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Idempotency-Key': state.eventId,
-      },
-      body: JSON.stringify({
-        event_id: state.eventId,
-        lease_id: state.boundaryLeaseId,
-        activation_id: state.boundaryActivationId,
-        outcome: 'unknown',
-        final_url: state.startUrl,
-      }),
-    },
-    token,
-  );
-  if (!response.ok) throw await apiErrorFromResponse(response);
-  const body = await response.json().catch(() => null) as {
-    application_id?: unknown;
-    event_id?: unknown;
-    outcome?: unknown;
-  } | null;
+async function postFreeSubmissionOutcome(
+  pending: PendingFreeSubmissionMonitor,
+  outcome: 'confirmed' | 'failed' | 'unknown',
+  finalUrl: string,
+  confirmationText: string,
+  expectedAuthEpoch: number,
+  receiptProof?: SubmissionReceiptProofV1 | null,
+): Promise<{ submitted: boolean; receiptCleanupPending: boolean }> {
   if (
-    body?.application_id !== state.applicationId
-    || body.event_id !== state.eventId
-    || body.outcome !== 'unknown'
-  ) throw new Error('The closed tab outcome was not bound to the exact monitored submission.');
+    !pending.boundaryLeaseId
+    || !pending.boundaryActivationId
+  ) throw new Error('The Free submission outcome does not match the active account and boundary.');
+  const key = submissionOutcomeAttemptKey('free', pending.eventId);
+  const result = await submissionOutcomeDeliveryMutations.run(key, async () => {
+    const entry = await submissionOutcomeOutbox.persist({
+      lane: 'free',
+      accountId: pending.accountId,
+      applicationId: pending.applicationId,
+      eventId: pending.eventId,
+      leaseId: pending.boundaryLeaseId!,
+      activationId: pending.boundaryActivationId!,
+      tabId: pending.tabId,
+      frameId: pending.frameId,
+      capturedAuthEpoch: pending.authEpoch,
+      startUrl: pending.startUrl,
+      outcome,
+      finalUrl,
+      confirmationText,
+      receiptProof,
+    });
+    if (!outcomeEpochAllowsPending(pending.authEpoch, expectedAuthEpoch)) {
+      throw new Error('The exact Free outcome is saved, but the active Litos account changed before delivery.');
+    }
+    const token = await getStoredToken();
+    if (!token) throw new Error('Sign in to Litos again before updating this application.');
+    assertCurrentAuthEpoch(expectedAuthEpoch);
+    const snapshot = await refreshEntitlementSnapshot(token, expectedAuthEpoch);
+    assertCurrentAuthEpoch(expectedAuthEpoch);
+    if (snapshot.account_id !== pending.accountId) {
+      throw new Error('This Free submission outcome belongs to a different Litos account.');
+    }
+    return {
+      entry,
+      delivery: await deliverSavedSubmissionOutcome(
+        entry,
+        token,
+        snapshot.account_id,
+        expectedAuthEpoch,
+      ),
+    };
+  });
+  if (!result.delivery.acknowledged) {
+    throw new Error('The Free submission outcome is saved locally and will retry after Litos reconnects.');
+  }
+  void trackExtensionEvent('free_submission_outcome_recorded', { outcome: result.entry.outcome });
+  return {
+    submitted: result.entry.outcome === 'confirmed' && result.delivery.terminalReady,
+    receiptCleanupPending: result.delivery.receiptCleanupPending,
+  };
 }
 
 async function reconcileFreeManualSubmissionStatesForTab(tabId: number): Promise<void> {
-  await freeManualSubmissionStateMutations.run(freeManualSubmissionMutationKey(tabId), async () => {
+  const candidates = await freeManualSubmissionStateMutations.run(freeManualSubmissionMutationKey(tabId), async () => {
     const stored = await chrome.storage.session.get(null);
-    const entries = Object.entries(stored)
-      .filter(([key]) => key.startsWith(`${FREE_MANUAL_RESERVATION_PREFIX}:${tabId}:`));
-    if (entries.length === 0) return;
-    const token = await getStoredToken();
-    if (!token) return;
-    let accountId: string;
-    try {
-      accountId = (await refreshEntitlementSnapshot(token, currentAuthEpoch())).account_id;
-    } catch {
-      return;
-    }
-    for (const [key, value] of entries) {
+    return Object.entries(stored)
+      .filter(([key]) => key.startsWith(`${FREE_MANUAL_RESERVATION_PREFIX}:${tabId}:`))
+      .flatMap<FreeManualSubmissionState>(([, value]) => {
       const classified = classifyFreeManualSubmissionState(value);
       const state = classified.kind === 'valid'
         ? classified.state
         : classified.kind === 'expired_reserved' || classified.kind === 'expired_monitoring'
           ? classified.state
           : null;
-      if (!state || state.accountId !== accountId) continue;
-      try {
-        if (
-          state.phase === 'monitoring'
-          && state.boundaryLeaseId
-          && state.boundaryActivationId
-        ) {
-          await postFreeManualSubmissionUnknownOnClose(token, state);
-        } else {
-          await postFreeManualSubmissionBeforeReplayCancellation(
-            token,
-            state.applicationId,
-            state.eventId,
-          );
-        }
-        await chrome.storage.session.remove(key);
-      } catch {
-        // Keep the exact durable local binding. A later wake can retry reconciliation, while
-        // deleting it here could lose post-click evidence or expose a second live capability.
-      }
-    }
+      return state ? [state] : [];
+    });
   });
+  if (candidates.length === 0) return;
+  const token = await getStoredToken();
+  if (!token) return;
+  const authEpoch = currentAuthEpoch();
+  let accountId: string;
+  try {
+    accountId = (await refreshEntitlementSnapshot(token, authEpoch)).account_id;
+  } catch {
+    return;
+  }
+  for (const state of candidates) {
+    if (state.accountId !== accountId) continue;
+    try {
+      if (
+        state.phase === 'monitoring'
+        && state.boundaryLeaseId
+        && state.boundaryActivationId
+      ) {
+        await postFreeSubmissionOutcome(state, 'unknown', state.startUrl, '', authEpoch);
+      } else {
+        await closeAndClearPendingFreeManualReservation({
+          token,
+          applicationId: state.applicationId,
+          eventId: state.eventId,
+          tabId: state.tabId,
+          frameId: state.frameId,
+          authEpoch,
+          expectedState: state,
+        });
+      }
+    } catch {
+      // Keep the exact durable local binding. A later wake can retry without losing evidence.
+    }
+  }
 }
 
 async function reconcileAllFreeManualSubmissionStates(): Promise<void> {
@@ -1559,11 +2104,6 @@ async function clearApplicationRuntimeState(): Promise<void> {
     HANDOFF_PACKET_BINDING_MUTATION_KEY,
     () => chrome.storage.session.remove(HANDOFF_PACKET_BINDINGS_KEY),
   );
-  await pendingSubmissionMutations.run(PENDING_SUBMISSION_MUTATION_KEY, async () => {
-    const pendingKeys = Object.keys(await chrome.storage.session.get(null))
-      .filter((key) => key.startsWith(`${PENDING_SUBMISSIONS_KEY}:`));
-    if (pendingKeys.length) await chrome.storage.session.remove(pendingKeys);
-  });
   await applicationTabMutations.run(
     APPLICATION_TAB_MUTATION_KEY,
     () => chrome.storage.session.remove('litos_application_tabs'),
@@ -1572,8 +2112,152 @@ async function clearApplicationRuntimeState(): Promise<void> {
   gatedPreparationsInFlight.clear();
 }
 
-async function clearExtensionAccountSession(): Promise<void> {
-  await reconcileAllFreeManualSubmissionStates();
+type LogoutSubmissionState = {
+  entries: SubmissionOutcomeOutboxEntry[];
+  acknowledgements: SubmissionOutcomeAcknowledgement[];
+  candidateAccountIds: Set<string>;
+  activeAttemptAccountIds: Set<string>;
+  quarantinedCount: number;
+  malformedFreeSessionCount: number;
+};
+
+async function logoutSubmissionState(): Promise<LogoutSubmissionState> {
+  const entries = await submissionOutcomeOutbox.list();
+  const acknowledgements = await submissionOutcomeOutbox.listAcknowledgements();
+  const { quarantined: quarantinedCount } = await submissionOutcomeOutbox.health();
+  const candidateAccountIds = new Set(entries.map((entry) => entry.accountId));
+  for (const acknowledgement of acknowledgements) candidateAccountIds.add(acknowledgement.accountId);
+  const activeAttemptAccountIds = new Set(entries.map((entry) => entry.accountId));
+  for (const acknowledgement of acknowledgements) activeAttemptAccountIds.add(acknowledgement.accountId);
+  const local = await chrome.storage.local.get(null);
+  const durableEntitlementOwner = local['litos:entitlements:v2:current-account'];
+  if (typeof durableEntitlementOwner === 'string' && durableEntitlementOwner) {
+    candidateAccountIds.add(durableEntitlementOwner);
+  }
+  const session = await chrome.storage.session.get(null);
+  let malformedFreeSessionCount = 0;
+  for (const [key, value] of Object.entries(session)) {
+    if (!key.startsWith(`${FREE_MANUAL_RESERVATION_PREFIX}:`)) continue;
+    const classified = classifyFreeManualSubmissionState(value);
+    if (classified.kind === 'malformed') {
+      malformedFreeSessionCount += 1;
+      continue;
+    }
+    const state = classified.kind === 'valid'
+      ? classified.state
+      : classified.kind === 'expired_reserved' || classified.kind === 'expired_monitoring'
+        ? classified.state
+        : null;
+    if (!state) continue;
+    candidateAccountIds.add(state.accountId);
+    activeAttemptAccountIds.add(state.accountId);
+  }
+  return {
+    entries,
+    acknowledgements,
+    candidateAccountIds,
+    activeAttemptAccountIds,
+    quarantinedCount,
+    malformedFreeSessionCount,
+  };
+}
+
+async function boundedLogoutOutcomeDrain(token: string, accountId: string): Promise<void> {
+  const entries = await submissionOutcomeOutbox.due(accountId, Date.now(), true);
+  await Promise.all(entries.map((entry) => {
+    const key = submissionOutcomeAttemptKey(entry.lane, entry.attemptId);
+    return submissionOutcomeDeliveryMutations.run(key, async () => {
+      const current = (await submissionOutcomeOutbox.list()).find(
+        (candidate) => submissionOutcomeAttemptKey(candidate.lane, candidate.attemptId) === key,
+      );
+      if (!current || current.accountId !== accountId) return;
+      await deliverPersistedSubmissionOutcome({
+        outbox: submissionOutcomeOutbox,
+        entry: current,
+        send: async (exact) => {
+          if (exact.accountId !== accountId) throw new Error('The logout drain account changed.');
+          const response = await timeoutBackendFetch(exact.requestPath, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              ...(exact.lane === 'free' ? { 'Idempotency-Key': exact.attemptId } : {}),
+            },
+            body: exact.serializedBody,
+          }, token, 750);
+          return {
+            ok: response.ok,
+            status: response.status,
+            body: await response.json().catch(() => null),
+          };
+        },
+        cleanup: cleanupAcknowledgedSubmissionOutcome,
+      });
+    });
+  }));
+}
+
+async function clearExtensionAccountSessionWithinClosedGate(): Promise<void> {
+  const token = await getStoredToken().catch(() => null);
+  let state: LogoutSubmissionState;
+  try {
+    state = await logoutSubmissionState();
+  } catch {
+    throw new Error('Litos could not verify saved application attempts, so sign out was stopped. Try again.');
+  }
+  let liveAccountId: string | null = null;
+  if (token) {
+    const authEpoch = currentAuthEpoch();
+    liveAccountId = await refreshEntitlementSnapshot(token, authEpoch)
+      .then((snapshot) => snapshot.account_id)
+      .catch(() => null);
+  }
+  if (liveAccountId) state.candidateAccountIds.add(liveAccountId);
+  if (state.candidateAccountIds.size > 1) {
+    throw new Error('Saved application attempts belong to more than one account, so sign out was stopped for review.');
+  }
+  if (state.quarantinedCount > 0) {
+    throw new Error('A damaged submission journal entry needs repair, so sign out was stopped without deleting it.');
+  }
+  if (state.malformedFreeSessionCount > 0) {
+    throw new Error('A damaged Free submission session needs repair, so sign out was stopped without deleting it.');
+  }
+  const accountId = liveAccountId ?? [...state.candidateAccountIds][0] ?? null;
+  if (state.activeAttemptAccountIds.size > 0) {
+    throw new Error('An application attempt is still waiting for its exact outcome, so sign out was stopped. Check the employer page first.');
+  }
+  if (!accountId && state.entries.length > 0) {
+    throw new Error('Litos could not identify the owner of saved submission evidence, so sign out was stopped.');
+  }
+  deactivateAuthSessionForClear();
+  if (accountId) {
+    if (token) {
+      await Promise.race([
+        boundedLogoutOutcomeDrain(token, accountId),
+        sleep(2_500),
+      ]).catch(() => undefined);
+    }
+    let remaining: SubmissionOutcomeOutboxEntry[];
+    let remainingAcknowledgements: SubmissionOutcomeAcknowledgement[];
+    try {
+      remaining = await submissionOutcomeOutbox.list();
+      remainingAcknowledgements = await submissionOutcomeOutbox.listAcknowledgements();
+    } catch {
+      completeAuthSessionClear();
+      throw new Error('Litos could not verify saved submission receipts, so sign out was stopped. Try again after the receipts sync.');
+    }
+    if (!submissionOutcomeLogoutCanPurge(remaining, accountId, remainingAcknowledgements)) {
+      completeAuthSessionClear();
+      throw new Error('Application outcome evidence is still syncing, so sign out was stopped. Try again after it is saved to Litos.');
+    }
+    try {
+      await submissionOutcomeOutbox.purgeAccount(accountId);
+    } catch {
+      completeAuthSessionClear();
+      throw new Error('Litos could not finish private receipt cleanup, so sign out was stopped. Try again.');
+    }
+  } else {
+    await submissionOutcomeOutbox.clear();
+  }
   await Promise.all([
     clearStoredSession(),
     clearApplicationRuntimeState(),
@@ -1584,6 +2268,15 @@ async function clearExtensionAccountSession(): Promise<void> {
     ]),
   ]);
   completeAuthSessionClear();
+}
+
+async function clearExtensionAccountSession(): Promise<void> {
+  await closeSubmissionStartGate();
+  try {
+    await clearExtensionAccountSessionWithinClosedGate();
+  } finally {
+    reopenSubmissionStartGate();
+  }
 }
 
 const respondToClearSessionMessage = createSessionClearMessageHandler(clearExtensionAccountSession);
@@ -2061,6 +2754,7 @@ export default defineBackground(() => {
   chrome.runtime.onInstalled.addListener((details) => {
     if (details.reason !== 'install' && details.reason !== 'update') return;
     runReleaseFenceInstalled(details.reason);
+    void replaySubmissionOutcomeOutbox(false).catch(() => undefined);
   });
   // This hook ships in 0.6.2 for every later release. It closes submissions before Chrome swaps
   // the worker, asks the current content scripts to cancel live countdowns, then accepts the ready
@@ -2069,10 +2763,22 @@ export default defineBackground(() => {
     runReleaseFenceUpdate(details.version);
   });
   void releaseUpdateFence.resume().catch(() => retryReleaseFenceResume());
+  void replaySubmissionOutcomeOutbox(false).catch(() => undefined);
+  void chrome.alarms.create(SUBMISSION_OUTCOME_OUTBOX_ALARM, { periodInMinutes: 1 });
+  chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name === SUBMISSION_OUTCOME_OUTBOX_ALARM) {
+      void replaySubmissionOutcomeOutbox(false).catch(() => undefined);
+    }
+  });
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (
+      areaName === 'local'
+      && (changes.litos_token || changes.rolequick_token || changes.volley_token)
+    ) void replaySubmissionOutcomeOutbox(false).catch(() => undefined);
+  });
   // Retry privacy-sanitized events that were queued through a prior offline or interrupted wake.
   void flushAnalyticsQueue();
   chrome.tabs.onRemoved.addListener((tabId) => {
-    closePendingSubmission(tabId).catch(() => {});
     reconcileFreeManualSubmissionStatesForTab(tabId).catch(() => {});
     void releaseUpdateFence.closed(tabId).catch(() => retryReleaseFenceResume());
   });
@@ -2112,7 +2818,10 @@ export default defineBackground(() => {
   // earlier version of this sat inside the VITE_QA_TOKEN block, which ensure-no-qa-token.mjs
   // guarantees is false in every shippable build - so the fix was live only where it was not needed.
   void renderBadge();
-  chrome.runtime.onStartup?.addListener(() => { void renderBadge(); });
+  chrome.runtime.onStartup?.addListener(() => {
+    void renderBadge();
+    void replaySubmissionOutcomeOutbox(false).catch(() => undefined);
+  });
 
   if (import.meta.env.VITE_QA_TOKEN) {
     chrome.runtime.onInstalled.addListener(() => {
@@ -2473,12 +3182,31 @@ export default defineBackground(() => {
         const requestedSubmissionEventId = payload.submission_event_id.toLowerCase();
         const company = typeof payload?.company === 'string' ? payload.company.trim() : '';
         const role = typeof payload?.role === 'string' ? payload.role.trim() : '';
-        const portalUrl = typeof payload?.portal_url === 'string' ? payload.portal_url : '';
-        if (!freeManualSubmissionAtsSupported(atsNameForPortalUrl(portalUrl))) {
+        const claimedPortalUrl = typeof payload?.portal_url === 'string' ? payload.portal_url : '';
+        const trustedSenderUrl = safeFreeSubmissionUrl(sender.url);
+        if (!trustedSenderUrl
+          || !freeSubmissionNavigationMatches(claimedPortalUrl, trustedSenderUrl)
+          || applicationFormIdentityKey(claimedPortalUrl) !== applicationFormIdentityKey(trustedSenderUrl)) {
+          sendResponse({
+            error: 'This Greenhouse frame does not match the requested Tracker application. Nothing was filled.',
+            code: 'free_manual_submission_context_mismatch',
+          });
+          return false;
+        }
+        const portalUrl = trustedSenderUrl;
+        if (!freeManualSubmissionAtsSupported(atsNameForPortalUrl(portalUrl))
+          || !freeManualSubmissionPortalSupported(portalUrl)) {
           sendResponse({
             error: FREE_MANUAL_SUBMISSION_UNAVAILABLE_COPY,
             code: 'free_manual_submission_ats_unavailable',
           });
+          return false;
+        }
+        let releaseSubmissionStart: () => void;
+        try {
+          releaseSubmissionStart = beginSubmissionStart();
+        } catch (error) {
+          sendResponse({ error: error instanceof Error ? error.message : 'Submission is temporarily blocked.' });
           return false;
         }
         getStoredToken().then(async (token) => {
@@ -2489,6 +3217,7 @@ export default defineBackground(() => {
           let openedReservation: {
             applicationId: string;
             eventId: string;
+            accountId: string;
             stored: boolean;
           } | null = null;
           let failureApplicationId = requestedApplicationId;
@@ -2530,8 +3259,34 @@ export default defineBackground(() => {
               throw new Error('Litos could not create the Tracker application required for a safe manual submission. Nothing was filled.');
             }
             failureApplicationId = applicationId;
-            const currentUrl = safeFreeSubmissionUrl(portalUrl);
-            if (!currentUrl) throw new Error('This company application URL is not safe to reserve. Nothing was filled.');
+            const currentUrl = trustedSenderUrl;
+            type OwnedFreeFillData = {
+              application_id?: unknown;
+              submission_event_id?: unknown;
+              application?: unknown;
+              portal_url?: unknown;
+              selected_resume?: FreeFillResume | null;
+            };
+            const validatedFillData = async (): Promise<OwnedFreeFillData> => {
+              const candidate = await ownedFreeFillHandoffData(
+                token,
+                applicationId!,
+                requestedSubmissionEventId,
+                freeFillAuthEpoch,
+              ) as OwnedFreeFillData | null;
+              if (
+                typeof candidate?.application_id !== 'string'
+                || candidate.application_id.toLowerCase() !== applicationId
+                || candidate.submission_event_id !== requestedSubmissionEventId
+                || !freeFillPortalMatches(candidate.portal_url, currentUrl)
+                || !freeSubmissionNavigationMatches(String(candidate.portal_url ?? ''), currentUrl)
+                || applicationFormIdentityKey(String(candidate.portal_url ?? '')) !== applicationFormIdentityKey(currentUrl)
+              ) throw new Error('The company page no longer matches this Tracker application. Nothing was filled.');
+              return candidate;
+            };
+            await validatedFillData();
+            await assertSubmissionOutcomeCapacity();
+            assertCurrentAuthEpoch(freeFillAuthEpoch);
             /* Persist the exact provisional binding before the POST. If its response is lost, a
                navigation creates a new content-script instance, and only this record can keep the
                document-start shield latched while cancellation or a server refresh settles it. */
@@ -2547,7 +3302,23 @@ export default defineBackground(() => {
             });
             if (!reservedState) throw new Error('The manual submission reservation state is invalid.');
             await storePendingFreeManualReservation(reservedState);
-            openedReservation = { applicationId, eventId: requestedSubmissionEventId, stored: true };
+            openedReservation = {
+              applicationId,
+              eventId: requestedSubmissionEventId,
+              accountId: accountSnapshot.account_id,
+              stored: true,
+            };
+            await submissionOutcomeOutbox.arm({
+              lane: 'free',
+              accountId: accountSnapshot.account_id,
+              applicationId,
+              eventId: requestedSubmissionEventId,
+              tabId: reservationTabId,
+              frameId: reservationFrameId,
+              capturedAuthEpoch: freeFillAuthEpoch,
+              startUrl: currentUrl,
+              startedAt: reservedState.startedAt,
+            });
             reservationAttempted = true;
             const reservation = await reserveFreeManualSubmission(
               token,
@@ -2558,27 +3329,11 @@ export default defineBackground(() => {
             );
             const submissionEventId = reservation.eventId;
             assertCurrentAuthEpoch(freeFillAuthEpoch);
-            type OwnedFreeFillData = {
-              application_id?: unknown;
-              submission_event_id?: unknown;
-              application?: unknown;
-              portal_url?: unknown;
-              selected_resume?: FreeFillResume | null;
-            };
-            const fillData = await ownedFreeFillHandoffData(
-              token,
-              applicationId,
-              submissionEventId,
-              freeFillAuthEpoch,
-            ) as OwnedFreeFillData | null;
-            if (
-              typeof fillData?.application_id !== 'string'
-              || fillData.application_id.toLowerCase() !== applicationId
-              || fillData.submission_event_id !== submissionEventId
-              || !freeFillPortalMatches(fillData.portal_url, portalUrl)
-            ) {
-              throw new Error('The company page no longer matches this reserved Tracker application. Nothing was filled.');
+            if (submissionEventId !== requestedSubmissionEventId) {
+              throw new Error('The reserved Tracker event changed before fill data could be released. Nothing was filled.');
             }
+            assertCurrentAuthEpoch(freeFillAuthEpoch);
+            const fillData = await validatedFillData();
             application = fillData.application ?? application;
             try {
               selectedResume = await freeFillResumePayload(fillData.selected_resume, token);
@@ -2628,6 +3383,17 @@ export default defineBackground(() => {
                 cancellationError = failedCancellation;
                 retrySafety = freeManualRetrySafetyFromError(failedCancellation) ?? retrySafety;
               }
+            } else if (openedReservation?.stored) {
+              await clearPendingFreeManualReservation(
+                reservationTabId,
+                reservationFrameId,
+                openedReservation.eventId,
+              ).catch(() => undefined);
+              await submissionOutcomeOutbox.cancelSafeNotSent(
+                'free',
+                openedReservation.eventId,
+                openedReservation.accountId,
+              ).catch(() => false);
             }
             sendResponse({
               error: error instanceof Error ? error.message : 'Could not load your saved answers.',
@@ -2643,7 +3409,7 @@ export default defineBackground(() => {
                 : {}),
             });
           }
-        });
+        }).finally(releaseSubmissionStart);
         return true;
       }
 
@@ -2673,7 +3439,7 @@ export default defineBackground(() => {
         getStoredToken().then(async (token) => {
           if (!token) throw new Error(NOT_SIGNED_IN_MESSAGE);
           assertCurrentAuthEpoch(refreshAuthEpoch);
-          const startup = await pendingFreeManualSubmissionStartupState(tabId, frameId);
+          const startup = await pendingFreeManualSubmissionStartupState(tabId, frameId, currentUrl);
           assertCurrentAuthEpoch(refreshAuthEpoch);
           if (startup.pending || startup.blocked) {
             sendResponse({
@@ -2842,11 +3608,20 @@ export default defineBackground(() => {
           });
           return false;
         }
+        let releaseSubmissionStart: () => void;
+        try {
+          releaseSubmissionStart = beginSubmissionStart();
+        } catch (error) {
+          sendResponse({ ok: false, error: error instanceof Error ? error.message : 'Submission is temporarily blocked.' });
+          return false;
+        }
         getStoredToken().then(async (token) => {
           if (!token) throw new Error(NOT_SIGNED_IN_MESSAGE);
           if (await releaseUpdateFenceBlocksSubmissions()) {
             throw new Error('Litos was updated. Reload this application tab before sending anything.');
           }
+          assertCurrentAuthEpoch(preflightAuthEpoch);
+          await assertSubmissionOutcomeCapacity(submissionOutcomeAttemptKey('free', eventId));
           assertCurrentAuthEpoch(preflightAuthEpoch);
           const response = await timeoutBackendFetch(
             `/applications/${applicationId}/manual-submission-preflight`,
@@ -2928,7 +3703,7 @@ export default defineBackground(() => {
           ok: false,
           error: error instanceof Error ? error.message : 'The final submission check failed.',
           ...(isLitosApiError(error) ? { code: error.body.code } : {}),
-        }));
+        })).finally(releaseSubmissionStart);
         return true;
       }
 
@@ -3014,6 +3789,8 @@ export default defineBackground(() => {
           assertCurrentAuthEpoch(monitorAuthEpoch);
           const snapshot = await refreshEntitlementSnapshot(token, monitorAuthEpoch);
           assertCurrentAuthEpoch(monitorAuthEpoch);
+          await assertSubmissionOutcomeCapacity(submissionOutcomeAttemptKey('free', eventId));
+          assertCurrentAuthEpoch(monitorAuthEpoch);
           await transitionPendingFreeManualReservationToMonitor({
             eventId,
             applicationId,
@@ -3037,6 +3814,7 @@ export default defineBackground(() => {
       }
 
       case 'GET_PENDING_FREE_MANUAL_RESERVATION': {
+        void replaySubmissionOutcomeOutbox(false).catch(() => undefined);
         const tabId = sender.tab?.id;
         const frameId = sender.frameId ?? 0;
         const currentUrl = safeFreeSubmissionUrl(sender.url);
@@ -3046,14 +3824,14 @@ export default defineBackground(() => {
         }
         reconcileRecoverableFreeManualSubmissionStates(tabId).then(() => Promise.all([
           getStoredToken(),
-          pendingFreeManualSubmissionStartupState(tabId, frameId),
+          pendingFreeManualSubmissionStartupState(tabId, frameId, currentUrl),
         ])).then(([token, startup]) => {
           const response = freeManualSubmissionStartupResponse(startup, {
             tokenPresent: Boolean(token),
             navigationMatches: Boolean(startup.pending)
               && freeSubmissionNavigationMatches(startup.pending!.startUrl, currentUrl),
           });
-          sendResponse(response);
+          sendResponse({ ...response, integrity_blocked: startup.integrityBlocked === true });
         }).catch(() => sendResponse({ pending: null, blocked: true }));
         return true;
       }
@@ -3075,6 +3853,7 @@ export default defineBackground(() => {
       }
 
       case 'GET_PENDING_FREE_SUBMISSION_OUTCOME': {
+        void replaySubmissionOutcomeOutbox(false).catch(() => undefined);
         const recoveryAuthEpoch = currentAuthEpoch();
         const tabId = sender.tab?.id;
         const frameId = sender.frameId ?? 0;
@@ -3085,18 +3864,63 @@ export default defineBackground(() => {
         }
         Promise.all([
           getStoredToken(),
-          pendingFreeSubmissionMonitor(tabId, frameId)
-            .then((pending) => pending ?? pendingFreeSubmissionMonitorForTab(tabId)),
-        ]).then(async ([token, pending]) => {
+          pendingFreeSubmissionMonitor(tabId, frameId, currentUrl)
+            .then((pending) => pending ?? pendingFreeSubmissionMonitorForTab(tabId, currentUrl, undefined, undefined, frameId)),
+          submissionOutcomeOutbox.list(),
+        ]).then(async ([token, pending, journalEntries]) => {
+          const acknowledged = await acknowledgedSubmissionForContext('free', tabId, frameId, currentUrl);
+          if (acknowledged) {
+            try {
+              await clearAcknowledgedFreeSubmissionSessionCache(acknowledged);
+            } catch {
+              sendResponse({
+                pending: null,
+                acknowledged: null,
+                receipt_cleanup_pending: true,
+                receipt_start_url: acknowledged.startUrl,
+                retry_pending: false,
+              });
+              return;
+            }
+            sendResponse({
+              pending: null,
+              acknowledged,
+              retry_pending: false,
+            });
+            return;
+          }
           if (!pending) {
             sendResponse({
               pending: null,
+              acknowledged: null,
               retry_pending: freeSubmissionMonitorStartsInFlight.has(tabId),
             });
             return;
           }
+          const journal = journalEntries.find((entry) => entry.lane === 'free' && entry.eventId === pending.eventId);
+          const pendingWithJournal = {
+            ...pending,
+            journalPhase: journal?.phase,
+            journalOutcome: journal?.outcome,
+            nextAttemptAt: journal?.nextAttemptAt,
+            journalRepairReason: journal?.repairReason,
+            lateObservationDeadline: journal?.lateObservationDeadline,
+          };
+          const receiptLocked = journal?.phase === 'outcome' || journal?.phase === 'awaiting_receipt';
+          const now = Date.now();
+          const receiptVisibility = journal ? submissionOutcomeReceiptVisibility(journal, now) : null;
+          const elapsed = now - (journal?.pressedAt ?? pending.startedAt);
+          const weakObservationRemaining = journal?.outcome && journal.outcome !== 'confirmed'
+            && journal.lateObservationDeadline !== null
+            ? Math.max(0, journal.lateObservationDeadline - now)
+            : null;
           if (!token) {
-            sendResponse({ pending, force_unknown: true, remaining_ms: 0 });
+            sendResponse({
+              pending: pendingWithJournal,
+              force_unknown: !receiptLocked,
+              remaining_ms: weakObservationRemaining ?? 0,
+              receipt_visibility: receiptVisibility,
+            });
             return;
           }
           assertCurrentAuthEpoch(recoveryAuthEpoch);
@@ -3111,26 +3935,62 @@ export default defineBackground(() => {
             currentUrl,
             now: Date.now(),
           });
-          const elapsed = Date.now() - pending.startedAt;
           sendResponse({
-            pending,
-            force_unknown: disposition !== 'resume',
-            remaining_ms: disposition === 'resume'
+            pending: pendingWithJournal,
+            force_unknown: receiptLocked ? false : disposition !== 'resume',
+            remaining_ms: weakObservationRemaining !== null
+              ? weakObservationRemaining
+              : disposition === 'resume'
               ? Math.max(0, Math.min(
                 FREE_SUBMISSION_MONITOR_TTL_MS - elapsed,
                 FREE_SUBMISSION_OUTCOME_TIMEOUT_MS - elapsed,
               ))
               : 0,
+            receipt_visibility: receiptVisibility,
           });
         }).catch(async () => {
-          const pending = await pendingFreeSubmissionMonitor(tabId, frameId)
-            .then((exact) => exact ?? pendingFreeSubmissionMonitorForTab(tabId))
+          const pending = await pendingFreeSubmissionMonitor(tabId, frameId, currentUrl)
+            .then((exact) => exact ?? pendingFreeSubmissionMonitorForTab(tabId, currentUrl, undefined, undefined, frameId))
             .catch(() => null);
+          const journal = pending
+            ? (await submissionOutcomeOutbox.list().catch(() => []))
+              .find((entry) => entry.lane === 'free' && entry.eventId === pending.eventId)
+            : null;
+          const acknowledged = await acknowledgedSubmissionForContext('free', tabId, frameId, currentUrl)
+            .catch(() => null);
+          if (acknowledged) {
+            try {
+              await clearAcknowledgedFreeSubmissionSessionCache(acknowledged);
+            } catch {
+              sendResponse({
+                pending: null,
+                acknowledged: null,
+                receipt_cleanup_pending: true,
+                receipt_start_url: acknowledged.startUrl,
+                retry_pending: false,
+              });
+              return;
+            }
+          }
           sendResponse({
-            pending,
-            force_unknown: Boolean(pending),
-            remaining_ms: 0,
-            retry_pending: !pending && freeSubmissionMonitorStartsInFlight.has(tabId),
+            pending: acknowledged
+              ? null
+              : pending ? {
+                ...pending,
+                journalPhase: journal?.phase,
+                journalOutcome: journal?.outcome,
+                journalRepairReason: journal?.repairReason,
+                lateObservationDeadline: journal?.lateObservationDeadline,
+              } : null,
+            acknowledged,
+            force_unknown: !acknowledged && Boolean(pending)
+              && journal?.phase !== 'outcome' && journal?.phase !== 'awaiting_receipt',
+            remaining_ms: journal?.outcome && journal.outcome !== 'confirmed'
+              && journal.lateObservationDeadline !== null
+              ? Math.max(0, journal.lateObservationDeadline - Date.now())
+              : 0,
+            receipt_visibility: journal ? submissionOutcomeReceiptVisibility(journal) : null,
+            retry_pending: !acknowledged && !pending && freeSubmissionMonitorStartsInFlight.has(tabId),
           });
         });
         return true;
@@ -3170,6 +4030,7 @@ export default defineBackground(() => {
           outcome?: unknown;
           final_url?: unknown;
           confirmation_text?: unknown;
+          receipt_proof?: unknown;
         } | undefined;
         const eventId = isValidFreeSubmissionEventId(payload?.event_id)
           ? payload.event_id.toLowerCase()
@@ -3182,7 +4043,7 @@ export default defineBackground(() => {
           || payload?.outcome === 'unknown'
           ? payload.outcome
           : null;
-        const finalUrl = safeFreeSubmissionUrl(payload?.final_url) ?? '';
+        const finalUrl = safeFreeSubmissionUrl(sender.url) ?? '';
         if (!eventId || !applicationId || !outcome || !finalUrl) {
           sendResponse({
             ok: false,
@@ -3192,23 +4053,24 @@ export default defineBackground(() => {
           return false;
         }
         const confirmationText = typeof payload?.confirmation_text === 'string'
-          ? payload.confirmation_text.replace(/\s+/g, ' ').trim().slice(0, 1000)
+          ? payload.confirmation_text.replace(/\s+/g, ' ').trim().slice(0, 2000)
           : '';
-        getStoredToken().then(async (token) => {
-          if (!token) {
-            sendResponse({ ok: false, error: NOT_SIGNED_IN_MESSAGE, code: 'authentication_required' });
-            return;
-          }
+        const receiptProof = exactSubmissionReceiptProof(payload?.receipt_proof);
+        Promise.resolve().then(async () => {
           try {
-            assertCurrentAuthEpoch(outcomeAuthEpoch);
-            const snapshot = await refreshEntitlementSnapshot(token, outcomeAuthEpoch);
-            assertCurrentAuthEpoch(outcomeAuthEpoch);
             const tabId = sender.tab?.id;
             const frameId = sender.frameId ?? 0;
+            const currentUrl = safeFreeSubmissionUrl(sender.url) ?? finalUrl;
             const pending = tabId === undefined
               ? null
-              : await pendingFreeSubmissionMonitor(tabId, frameId)
-                .then((exact) => exact ?? pendingFreeSubmissionMonitorForTab(tabId));
+              : await pendingFreeSubmissionMonitor(tabId, frameId, currentUrl, eventId, applicationId)
+                .then((exact) => exact ?? pendingFreeSubmissionMonitorForTab(
+                  tabId,
+                  currentUrl,
+                  eventId,
+                  applicationId,
+                  frameId,
+                ));
             if (!pending || tabId === undefined) {
               sendResponse({
                 ok: false,
@@ -3217,16 +4079,22 @@ export default defineBackground(() => {
               });
               return;
             }
-            const currentUrl = safeFreeSubmissionUrl(sender.url) ?? finalUrl;
+            const authFenceChanged = outcomeAuthEpoch !== 0 && pending.authEpoch !== outcomeAuthEpoch;
+            if (authFenceChanged && (outcome !== 'confirmed' || !receiptProof)) {
+              throw new Error('A stale Free callback cannot weaken the saved submission attempt.');
+            }
             const disposition = freeSubmissionMonitorDisposition({
               pending,
               tabId,
               frameId,
-              accountId: snapshot.account_id,
-              currentAuthEpoch: outcomeAuthEpoch,
+              accountId: pending.accountId,
+              currentAuthEpoch: authFenceChanged ? 0 : outcomeAuthEpoch,
               currentUrl,
               now: Date.now(),
             });
+            if (disposition === 'force_unknown') {
+              throw new Error('This Free submission callback no longer matches the active page and account.');
+            }
             const {
               eventId: effectiveEventId,
               applicationId: effectiveApplicationId,
@@ -3247,36 +4115,25 @@ export default defineBackground(() => {
             if (!effectiveLeaseId || !effectiveActivationId) {
               throw new Error('This outcome has no exact final boundary authorization.');
             }
-            const response = await timeoutBackendFetch(
-              `/applications/${effectiveApplicationId}/manual-submission-outcome`,
+            const delivery = await postFreeSubmissionOutcome(
               {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  'Idempotency-Key': effectiveEventId,
-                },
-                body: JSON.stringify({
-                  event_id: effectiveEventId,
-                  lease_id: effectiveLeaseId,
-                  activation_id: effectiveActivationId,
-                  outcome: effectiveOutcome,
-                  final_url: effectiveFinalUrl,
-                  ...(effectiveConfirmationText ? { confirmation_text: effectiveConfirmationText } : {}),
-                }),
+                ...pending,
+                eventId: effectiveEventId,
+                applicationId: effectiveApplicationId,
+                boundaryLeaseId: effectiveLeaseId,
+                boundaryActivationId: effectiveActivationId,
               },
-              token,
+              effectiveOutcome,
+              effectiveFinalUrl,
+              effectiveConfirmationText,
+              outcomeAuthEpoch,
+              effectiveOutcome === 'confirmed' ? receiptProof : null,
             );
-            assertCurrentAuthEpoch(outcomeAuthEpoch);
-            if (!response.ok) throw await apiErrorFromResponse(response);
-            await clearAcceptedFreeSubmissionOutcomeState({
-              pending,
-              eventId: effectiveEventId,
-              applicationId: effectiveApplicationId,
-              leaseId: effectiveLeaseId,
-              activationId: effectiveActivationId,
+            sendResponse({
+              ok: true,
+              submitted: delivery.submitted,
+              receipt_cleanup_pending: delivery.receiptCleanupPending,
             });
-            sendResponse({ ok: true });
-            void trackExtensionEvent('free_submission_outcome_recorded', { outcome: effectiveOutcome });
           } catch (error) {
             sendResponse({
               ok: false,
@@ -3330,7 +4187,18 @@ export default defineBackground(() => {
       }
 
       case 'EXTENSION_SUBMISSION_START': {
+        if (!GENERATED_EXTENSION_SUBMISSION_ENABLED) {
+          sendResponse({ ok: false, error: 'Generated extension submission is paused in this release.' });
+          return false;
+        }
         const submissionAuthEpoch = currentAuthEpoch();
+        let releaseSubmissionStart: () => void;
+        try {
+          releaseSubmissionStart = beginSubmissionStart();
+        } catch (error) {
+          sendResponse({ ok: false, error: error instanceof Error ? error.message : 'Submission is temporarily blocked.' });
+          return false;
+        }
         Promise.all([getStoredToken(), Promise.resolve(sender.tab?.id)])
           .then(async ([token, tabId]) => {
             if (!token || tabId === undefined) throw new Error('Litos could not identify this application tab.');
@@ -3341,10 +4209,12 @@ export default defineBackground(() => {
             const authorization = message.payload?.authorization === 'user_initiated'
               ? 'user_initiated'
               : 'standing_consent';
-            if (needsAutomaticSubmissionEntitlement(authorization)) {
-              await requireFeature(token, 'automatic_submission');
-              assertCurrentAuthEpoch(submissionAuthEpoch);
-            }
+            const submissionOwner = needsAutomaticSubmissionEntitlement(authorization)
+              ? await requireFeature(token, 'automatic_submission')
+              : await refreshEntitlementSnapshot(token, submissionAuthEpoch);
+            assertCurrentAuthEpoch(submissionAuthEpoch);
+            await assertSubmissionOutcomeCapacity();
+            assertCurrentAuthEpoch(submissionAuthEpoch);
             const applicationId = String(message.payload?.applicationId ?? '');
             const frameId = sender.frameId ?? 0;
             const binding = await handoffPacketBinding(applicationId, tabId, frameId);
@@ -3368,15 +4238,16 @@ export default defineBackground(() => {
             const body = await response.json().catch(() => null) as { claim_id?: string; error?: string; already_submitted?: boolean } | null;
             assertCurrentAuthEpoch(submissionAuthEpoch);
             if (!response.ok || !body?.claim_id) throw new Error(body?.error ?? 'Litos could not reserve this application.');
-            const gatedIdentity = gatedAttendedIdentity(currentUrl);
             const pending: PendingExtensionSubmission = {
               applicationId,
               claimId: body.claim_id,
+              accountId: submissionOwner.account_id,
               startedAt: Date.now(),
               frameId: sender.frameId ?? 0,
+              capturedAuthEpoch: submissionAuthEpoch,
+              startUrl: currentUrl,
               packetVersion: binding.packetVersion,
               auditDigest: binding.auditDigest,
-              ...(gatedIdentity ? { strictReceipt: { family: gatedIdentity.family, startedUrl: currentUrl } } : {}),
             };
             assertCurrentAuthEpoch(submissionAuthEpoch);
             await setPendingSubmission(tabId, pending, submissionAuthEpoch);
@@ -3388,6 +4259,33 @@ export default defineBackground(() => {
             ok: false,
             error: error instanceof Error ? error.message : 'Submission could not start.',
             ...(isLitosApiError(error) ? { api_error: serializeLitosApiError(error) } : {}),
+          }))
+          .finally(releaseSubmissionStart);
+        return true;
+      }
+
+      case 'EXTENSION_SUBMISSION_PRESS_COMMITTED': {
+        const tabId = sender.tab?.id;
+        const applicationId = String(message.payload?.applicationId ?? '');
+        if (tabId === undefined || !applicationId) {
+          sendResponse({ ok: false, error: 'The exact armed application tab is missing.' });
+          return false;
+        }
+        pendingSubmission(tabId, applicationId, String(sender.url ?? ''), sender.frameId ?? 0)
+          .then(async (pending) => {
+            if (!pending || pending.applicationId !== applicationId || pending.frameId !== (sender.frameId ?? 0)) {
+              throw new Error('The exact armed submission attempt is missing.');
+            }
+            await submissionOutcomeOutbox.markPressed({
+              lane: 'extension',
+              attemptId: pending.claimId,
+              accountId: pending.accountId,
+            });
+            sendResponse({ ok: true, claimId: pending.claimId });
+          })
+          .catch((error) => sendResponse({
+            ok: false,
+            error: error instanceof Error ? error.message : 'The submission press could not be journaled.',
           }));
         return true;
       }
@@ -3398,18 +4296,18 @@ export default defineBackground(() => {
           sendResponse({ ok: false, error: 'Litos could not identify this application tab.' });
           return false;
         }
-        pendingSubmission(tabId).then(async (pending) => {
+        pendingSubmission(
+          tabId,
+          String(message.payload?.applicationId ?? ''),
+          String(sender.url ?? ''),
+          sender.frameId ?? 0,
+        ).then(async (pending) => {
           if (!pending || pending.applicationId !== String(message.payload?.applicationId ?? '')) {
             throw new Error('This application is no longer waiting for a confirmation.');
           }
           if (pending.frameId !== (sender.frameId ?? 0)) throw new Error('This confirmation came from a different page frame.');
-          if (Date.now() - pending.startedAt > PENDING_SUBMISSION_MAX_AGE_MS) {
-            await postExtensionOutcome(pending, 'unknown', String(sender.tab?.url ?? 'https://trylitos.com'));
-            await setPendingSubmission(tabId, null);
-            sendResponse({ ok: false, error: 'The confirmation window expired. Check the employer portal.' });
-            return;
-          }
-          await postExtensionOutcome(
+          const delivery = await postExtensionOutcome(
+            tabId,
             pending,
             message.payload?.outcome === 'confirmed'
               ? 'confirmed'
@@ -3418,29 +4316,73 @@ export default defineBackground(() => {
                 : message.payload?.outcome === 'cancelled'
                   ? 'cancelled'
                   : 'unknown',
-            String(message.payload?.finalUrl ?? sender.tab?.url ?? 'https://trylitos.com'),
+            String(sender.url ?? ''),
             typeof message.payload?.confirmationText === 'string' ? message.payload.confirmationText : undefined,
+            exactSubmissionReceiptProof(message.payload?.receiptProof),
           );
-          await setPendingSubmission(tabId, null);
-          sendResponse({ ok: true });
+          sendResponse({ ok: true, submitted: delivery.submitted });
         }).catch((error) => sendResponse({ ok: false, error: error instanceof Error ? error.message : 'Could not record the outcome.' }));
         return true;
       }
 
       case 'GET_PENDING_EXTENSION_SUBMISSION': {
+        void replaySubmissionOutcomeOutbox(false).catch(() => undefined);
         const tabId = sender.tab?.id;
         if (tabId === undefined) {
           sendResponse({ pending: null });
           return false;
         }
-        pendingSubmission(tabId).then((pending) => {
-          if (pending && Date.now() - pending.startedAt > PENDING_SUBMISSION_MAX_AGE_MS) {
-            closePendingSubmission(tabId, String(sender.tab?.url ?? 'https://trylitos.com'))
-              .finally(() => sendResponse({ pending: null }));
+        const frameId = sender.frameId ?? 0;
+        const currentUrl = String(sender.url ?? sender.tab?.url ?? '');
+        pendingSubmission(tabId, undefined, currentUrl, frameId).then(async (pending) => {
+          const acknowledged = pending ? null : await acknowledgedSubmissionForContext(
+            'extension', tabId, frameId, currentUrl,
+          );
+          const exactPending = pending?.frameId === frameId ? pending : null;
+          const receiptVisibility = exactPending
+            ? submissionOutcomeReceiptVisibility({
+              phase: exactPending.journalPhase ?? 'armed',
+              outcome: exactPending.journalOutcome ?? null,
+              lateObservationDeadline: exactPending.lateObservationDeadline ?? null,
+            })
+            : null;
+          sendResponse({
+            pending: exactPending,
+            acknowledged,
+            receipt_visibility: receiptVisibility,
+            remaining_ms: exactPending?.journalOutcome && exactPending.journalOutcome !== 'confirmed'
+              && exactPending.lateObservationDeadline !== null
+              && exactPending.lateObservationDeadline !== undefined
+              ? Math.max(0, exactPending.lateObservationDeadline - Date.now())
+              : undefined,
+          });
+        });
+        return true;
+      }
+
+      case 'SUBMISSION_RECEIPT_ACKNOWLEDGED_RENDERED': {
+        const tabId = sender.tab?.id;
+        const frameId = sender.frameId ?? 0;
+        const lane = message.lane === 'extension' || message.lane === 'free' ? message.lane : null;
+        const applicationId = String(message.application_id ?? '').toLowerCase();
+        const attemptId = String(message.attempt_id ?? '').toLowerCase();
+        const currentUrl = String(sender.url ?? '');
+        if (tabId === undefined || !lane || !applicationId || !attemptId || !currentUrl) {
+          sendResponse({ ok: false });
+          return false;
+        }
+        acknowledgedSubmissionForContext(
+          lane, tabId, frameId, currentUrl, applicationId, attemptId,
+        ).then(async (acknowledged) => {
+          if (!acknowledged) {
+            sendResponse({ ok: false });
             return;
           }
-          sendResponse({ pending: pending?.frameId === (sender.frameId ?? 0) ? pending : null });
-        });
+          if (acknowledged.lane === 'free') {
+            await clearAcknowledgedFreeSubmissionSessionCache(acknowledged);
+          }
+          sendResponse({ ok: await submissionOutcomeOutbox.consumeAcknowledgement(acknowledged) });
+        }).catch(() => sendResponse({ ok: false }));
         return true;
       }
 
@@ -4821,10 +5763,22 @@ export default defineBackground(() => {
 
     if (message?.type !== 'LITOS_SUBMIT_APPLICATION') return false;
 
+    if (!GENERATED_EXTENSION_SUBMISSION_ENABLED) {
+      sendResponse({ error: 'Generated extension submission is paused in this release.' });
+      return false;
+    }
+
     const dashboardAuthEpoch = currentAuthEpoch();
     const applicationId = String(message.applicationId ?? '');
     if (dashboardSubmissionsInFlight.has(applicationId)) {
       sendResponse({ error: 'This application is already being prepared for submission.' });
+      return false;
+    }
+    let releaseSubmissionStart: () => void;
+    try {
+      releaseSubmissionStart = beginSubmissionStart();
+    } catch (error) {
+      sendResponse({ error: error instanceof Error ? error.message : 'Submission is temporarily blocked.' });
       return false;
     }
     dashboardSubmissionsInFlight.add(applicationId);
@@ -4844,7 +5798,8 @@ export default defineBackground(() => {
         const tabId = typeof storedTarget === 'number' ? storedTarget : storedTarget?.tabId;
         const frameId = typeof storedTarget === 'number' ? 0 : storedTarget?.frameId ?? 0;
         if (!token || tabId === undefined) throw new Error('That tab is no longer open. Go back to the job and start it again.');
-        await requireFeature(token, 'automatic_submission');
+        const dashboardOwner = await requireFeature(token, 'automatic_submission');
+        await assertSubmissionOutcomeCapacity();
         assertCurrentAuthEpoch(dashboardAuthEpoch);
         const livePage = await chrome.tabs.sendMessage(tabId, {
           type: 'GET_CURRENT_APPLICATION_URL',
@@ -4932,8 +5887,11 @@ export default defineBackground(() => {
         const pending: PendingExtensionSubmission = {
           applicationId,
           claimId: started.claim_id,
+          accountId: dashboardOwner.account_id,
           startedAt: Date.now(),
           frameId,
+          capturedAuthEpoch: dashboardAuthEpoch,
+          startUrl: verifiedCurrentUrl,
           packetVersion: exactResume.packet_audit!.packet_version,
           auditDigest: exactResume.packet_audit!.audit_digest,
         };
@@ -4941,29 +5899,42 @@ export default defineBackground(() => {
         assertCurrentAuthEpoch(dashboardAuthEpoch);
         if (await releaseUpdateFenceBlocksSubmissions()) {
           await postExtensionOutcome(
+            tabId,
             pending,
             'cancelled',
             verifiedCurrentUrl,
             'The extension updated after reservation. Nothing was clicked.',
           );
-          await setPendingSubmission(tabId, null);
           throw new Error('Litos was updated. Reload the company application tab before sending anything.');
         }
         try {
           assertCurrentAuthEpoch(dashboardAuthEpoch);
+          await submissionOutcomeOutbox.markPressed({
+            lane: 'extension',
+            attemptId: pending.claimId,
+            accountId: pending.accountId,
+          });
           const result = await chrome.tabs.sendMessage(tabId, {
             type: 'SUBMIT_FROM_DASHBOARD',
             payload: { applicationId, questions: [] },
-          }, { frameId }) as { ok?: boolean; clicked?: boolean; error?: string; finalUrl?: string; confirmationText?: string };
+          }, { frameId }) as {
+            ok?: boolean;
+            clicked?: boolean;
+            error?: string;
+            confirmationText?: string;
+            receiptProof?: unknown;
+          };
           assertCurrentAuthEpoch(dashboardAuthEpoch);
+          const trustedFinalUrl = (await chrome.tabs.get(tabId)).url ?? verifiedCurrentUrl;
           await postExtensionOutcome(
+            tabId,
             pending,
             result?.ok ? 'confirmed' : result?.clicked ? 'unknown' : 'cancelled',
-            result?.finalUrl ?? sender.url ?? 'https://trylitos.com',
+            trustedFinalUrl,
             result?.confirmationText ?? result?.error,
+            exactSubmissionReceiptProof(result?.receiptProof),
           );
           assertCurrentAuthEpoch(dashboardAuthEpoch);
-          await setPendingSubmission(tabId, null);
           if (!result?.ok) {
             sendResponse({ error: result?.error ?? 'The company never confirmed it arrived.' });
             return;
@@ -4971,8 +5942,7 @@ export default defineBackground(() => {
           sendResponse({ ok: true });
         } catch (error) {
           try {
-            await postExtensionOutcome(pending, 'unknown', sender.url ?? 'https://trylitos.com');
-            await setPendingSubmission(tabId, null);
+            await postExtensionOutcome(tabId, pending, 'unknown', verifiedCurrentUrl);
           } catch {
             // Retain the pending claim so a later tab wake can safely reconcile it.
           }
@@ -4983,7 +5953,10 @@ export default defineBackground(() => {
         error: error instanceof Error ? error.message : 'Submission failed.',
         ...(isLitosApiError(error) ? { api_error: serializeLitosApiError(error) } : {}),
       }))
-      .finally(() => dashboardSubmissionsInFlight.delete(applicationId));
+      .finally(() => {
+        dashboardSubmissionsInFlight.delete(applicationId);
+        releaseSubmissionStart();
+      });
     return true;
   });
 });

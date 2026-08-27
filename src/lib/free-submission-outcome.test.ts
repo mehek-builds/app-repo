@@ -211,7 +211,7 @@ describe('Free manual submission outcome sync', () => {
     expect(replay).not.toHaveBeenCalled();
   });
 
-  it('disarms page monitoring but never marks an authorized refusal safe not-sent', async () => {
+  it('disarms page monitoring and closes an exact authorized pre-click refusal once', async () => {
     const disarmOutcome = vi.fn();
     const cancelBeforeReplay = vi.fn(async () => undefined);
     await expect(runFreeSubmissionReplayGate({
@@ -224,7 +224,7 @@ describe('Free manual submission outcome sync', () => {
       monotonicNow: () => 10_001,
     })).resolves.toMatchObject({ ok: false, stage: 'replay' });
     expect(disarmOutcome).toHaveBeenCalledOnce();
-    expect(cancelBeforeReplay).not.toHaveBeenCalled();
+    expect(cancelBeforeReplay).toHaveBeenCalledOnce();
   });
 
   it('keeps monitoring and immutable risk open when replay failure is ambiguous', async () => {
@@ -258,7 +258,49 @@ describe('Free manual submission outcome sync', () => {
     })).resolves.toMatchObject({ ok: false, stage: 'preflight' });
     expect(armOutcome).not.toHaveBeenCalled();
     expect(replay).not.toHaveBeenCalled();
-    expect(cancelBeforeReplay).not.toHaveBeenCalled();
+    expect(cancelBeforeReplay).toHaveBeenCalledOnce();
+  });
+
+  it('cancels exactly once when the trusted context changes before outcome monitoring is armed', async () => {
+    const armOutcome = vi.fn();
+    const replay = vi.fn(() => 'clicked' as const);
+    const cancelBeforeReplay = vi.fn(async () => undefined);
+    await expect(runFreeSubmissionReplayGate({
+      startMonitor: async () => ({ ok: true }),
+      preflight: async () => successfulPreflight,
+      contextStillSafe: () => false,
+      armOutcome,
+      replay,
+      cancelBeforeReplay,
+      monotonicNow: () => successfulPreflight.replayDeadlineMonotonicMs - 1,
+    })).resolves.toMatchObject({ ok: false, stage: 'context_changed' });
+    expect(armOutcome).not.toHaveBeenCalled();
+    expect(replay).not.toHaveBeenCalled();
+    expect(cancelBeforeReplay).toHaveBeenCalledOnce();
+  });
+
+  it('disarms then cancels exactly once when authorization expires after monitor arming', async () => {
+    const disarmOutcome = vi.fn();
+    const replay = vi.fn(() => 'clicked' as const);
+    const cancelBeforeReplay = vi.fn(async () => undefined);
+    let clockReads = 0;
+    await expect(runFreeSubmissionReplayGate({
+      startMonitor: async () => ({ ok: true }),
+      preflight: async () => successfulPreflight,
+      contextStillSafe: () => true,
+      armOutcome: () => disarmOutcome,
+      replay,
+      cancelBeforeReplay,
+      monotonicNow: () => {
+        clockReads += 1;
+        return clockReads === 1
+          ? successfulPreflight.replayDeadlineMonotonicMs - 1
+          : successfulPreflight.replayDeadlineMonotonicMs;
+      },
+    })).resolves.toMatchObject({ ok: false, stage: 'preflight' });
+    expect(disarmOutcome).toHaveBeenCalledOnce();
+    expect(replay).not.toHaveBeenCalled();
+    expect(cancelBeforeReplay).toHaveBeenCalledOnce();
   });
 
   it('reports a transport failure without throwing into the native employer click', async () => {
@@ -272,6 +314,21 @@ describe('Free manual submission outcome sync', () => {
       { type: 'RECORD_FREE_SUBMISSION_OUTCOME', payload },
       expect.any(Function),
     );
+    vi.unstubAllGlobals();
+  });
+
+  it('keeps terminal Sent gated when acknowledged Free session cleanup is pending', async () => {
+    vi.stubGlobal('chrome', { runtime: { lastError: undefined } });
+    const sendMessage = vi.fn((_message, callback) => callback({
+      ok: true,
+      submitted: false,
+      receipt_cleanup_pending: true,
+    }));
+    await expect(recordFreeSubmissionOutcome(payload, sendMessage)).resolves.toEqual({
+      ok: true,
+      submitted: false,
+      receiptCleanupPending: true,
+    });
     vi.unstubAllGlobals();
   });
 
@@ -312,5 +369,24 @@ describe('Free manual submission outcome sync', () => {
     await sync.record('unknown', 'https://jobs.example.com/application');
     expect(attempts[0]).toMatchObject({ outcome: 'unknown' });
     expect(attempts[0]).not.toHaveProperty('confirmation_text');
+  });
+
+  it('preserves the full 2,000-character receipt evidence budget', async () => {
+    const attempts: FreeSubmissionOutcomePayload[] = [];
+    const sync = createFreeSubmissionOutcomeSync(
+      payload.application_id,
+      payload.event_id,
+      payload.lease_id,
+      payload.activation_id,
+      async (attempt) => {
+        attempts.push(attempt);
+        return { ok: true };
+      },
+    );
+    const marker = ' Your application has been submitted successfully.';
+    const evidence = `${'x'.repeat(2_000 - marker.length)}${marker}`;
+    await sync.record('confirmed', payload.final_url, evidence);
+    expect(evidence).toHaveLength(2_000);
+    expect(attempts[0]?.confirmation_text).toBe(evidence);
   });
 });

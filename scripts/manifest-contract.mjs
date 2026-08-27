@@ -1,4 +1,4 @@
-export const EXPECTED_PERMISSIONS = ['activeTab', 'scripting', 'storage', 'clipboardWrite'];
+export const EXPECTED_PERMISSIONS = ['activeTab', 'scripting', 'storage', 'clipboardWrite', 'alarms'];
 
 export const EXPECTED_MINIMUM_CHROME_VERSION = '116';
 

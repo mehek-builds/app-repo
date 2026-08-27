@@ -86,6 +86,23 @@ describe('application task orchestration', () => {
     expect(closedUnknown).not.toHaveBeenCalled();
   });
 
+  it('allows one synchronous receipt scan before a zero remaining deadline fires', () => {
+    const onOutcome = vi.fn();
+    const onUnknown = vi.fn();
+    const controller = createSubmissionOutcomeController({
+      readText: () => 'measured portal receipt',
+      classify: () => ({ kind: 'confirmed' }),
+      onOutcome,
+      onUnknown,
+      onStop: vi.fn(),
+      timeoutMs: 0,
+    });
+    expect(controller.scan()).toBe(true);
+    vi.runAllTimers();
+    expect(onOutcome).toHaveBeenCalledWith({ kind: 'confirmed' });
+    expect(onUnknown).not.toHaveBeenCalled();
+  });
+
   it('focuses the replacement review action and restores focus after Not now', async () => {
     const status = document.createElement('div');
     const yes = document.createElement('button');

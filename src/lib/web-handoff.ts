@@ -116,8 +116,17 @@ export function applicationFormIdentityKey(raw: string): string | null {
     if (host.includes('greenhouse.io')) {
       const token = url.searchParams.get('token');
       const board = url.searchParams.get('for');
-      if (token) return `${url.origin}${path}?${board ? `for=${encodeURIComponent(board)}&` : ''}token=${encodeURIComponent(token)}`;
+      if (token) {
+        const embedPath = path.replace(/\/confirmation$/i, '');
+        return `${url.origin}${embedPath}?${board ? `for=${encodeURIComponent(board)}&` : ''}token=${encodeURIComponent(token)}`;
+      }
+      const directJob = /^\/([^/]+)\/jobs\/([^/]+?)(?:\/confirmation)?$/i.exec(path);
+      if (directJob) return `${url.origin}/${directJob[1]}/jobs/${directJob[2]}`;
       return clearNoise();
+    }
+    if (host === 'apply.workable.com') {
+      const directJob = /^\/([^/]+)\/j\/([0-9a-f]{10})\/apply$/i.exec(path);
+      return directJob ? `${url.origin}/${directJob[1]}/j/${directJob[2].toLowerCase()}/apply` : null;
     }
     const embeddedGreenhouseJob = url.searchParams.get('gh_jid');
     if (embeddedGreenhouseJob) return `${url.origin}${path}?gh_jid=${encodeURIComponent(embeddedGreenhouseJob)}`;

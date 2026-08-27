@@ -1,3 +1,5 @@
+import type { SubmissionReceiptProofV1 } from './submission-outcome-outbox';
+
 export type FreeSubmissionOutcome = 'confirmed' | 'failed' | 'unknown';
 
 export type FreeSubmissionOutcomePayload = {
@@ -8,10 +10,11 @@ export type FreeSubmissionOutcomePayload = {
   outcome: FreeSubmissionOutcome;
   final_url: string;
   confirmation_text?: string;
+  receipt_proof?: SubmissionReceiptProofV1;
 };
 
 export type FreeSubmissionOutcomeResult =
-  | { ok: true }
+  | { ok: true; submitted?: boolean; receiptCleanupPending?: boolean }
   | { ok: false; error: string; code?: string };
 
 export type FreeSubmissionReservation = {
@@ -267,6 +270,7 @@ export async function runFreeSubmissionReplayGate(input: {
   const authorizationFresh = () =>
     preflight.replayDeadlineMonotonicMs > now();
   if (!authorizationFresh()) {
+    await input.cancelBeforeReplay();
     return {
       ok: false,
       stage: 'preflight',
@@ -274,6 +278,7 @@ export async function runFreeSubmissionReplayGate(input: {
     };
   }
   if (!input.contextStillSafe()) {
+    await input.cancelBeforeReplay();
     return {
       ok: false,
       stage: 'context_changed',
@@ -283,6 +288,7 @@ export async function runFreeSubmissionReplayGate(input: {
   const disarmOutcome = input.armOutcome(preflight);
   if (!authorizationFresh()) {
     disarmOutcome?.();
+    await input.cancelBeforeReplay();
     return {
       ok: false,
       stage: 'preflight',
@@ -292,6 +298,7 @@ export async function runFreeSubmissionReplayGate(input: {
   const replay = input.replay(preflight);
   if (replay === 'pre_click_refusal') {
     disarmOutcome?.();
+    await input.cancelBeforeReplay();
     return {
       ok: false,
       stage: 'replay',
@@ -310,7 +317,13 @@ export async function runFreeSubmissionReplayGate(input: {
 
 type SendMessage = (
   message: { type: 'RECORD_FREE_SUBMISSION_OUTCOME'; payload: FreeSubmissionOutcomePayload },
-  callback: (response?: { ok?: boolean; error?: string; code?: string }) => void,
+  callback: (response?: {
+    ok?: boolean;
+    submitted?: boolean;
+    receipt_cleanup_pending?: boolean;
+    error?: string;
+    code?: string;
+  }) => void,
 ) => void;
 
 export function recordFreeSubmissionOutcome(
@@ -329,7 +342,11 @@ export function recordFreeSubmissionOutcome(
           });
           return;
         }
-        resolve({ ok: true });
+        resolve({
+          ok: true,
+          submitted: response.submitted === true,
+          ...(response.receipt_cleanup_pending === true ? { receiptCleanupPending: true } : {}),
+        });
       });
     } catch (error) {
       resolve({
@@ -352,13 +369,15 @@ export function createFreeSubmissionOutcomeSync(
   record: (payload: FreeSubmissionOutcomePayload) => Promise<FreeSubmissionOutcomeResult> = recordFreeSubmissionOutcome,
 ) {
   return {
+    applicationId,
     eventId,
     record(
       outcome: FreeSubmissionOutcome,
       finalUrl: string,
       confirmationText?: string,
+      receiptProof?: SubmissionReceiptProofV1 | null,
     ): Promise<FreeSubmissionOutcomeResult> {
-      const normalizedConfirmation = confirmationText?.trim().slice(0, 1000) ?? '';
+      const normalizedConfirmation = confirmationText?.trim().slice(0, 2000) ?? '';
       return record({
         event_id: eventId,
         application_id: applicationId,
@@ -367,6 +386,7 @@ export function createFreeSubmissionOutcomeSync(
         outcome,
         final_url: finalUrl,
         ...(normalizedConfirmation ? { confirmation_text: normalizedConfirmation } : {}),
+        ...(receiptProof ? { receipt_proof: receiptProof } : {}),
       });
     },
   };
