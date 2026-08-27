@@ -14,13 +14,13 @@ const HOST_SUFFIXES = [
   '.ashbyhq.com',
 ];
 
-function supportsPersistentBadge(hostname: string): boolean {
+export function supportsPersistentBadge(hostname: string): boolean {
   return EXACT_HOSTS.has(hostname) || HOST_SUFFIXES.some((suffix) => hostname.endsWith(suffix));
 }
 
 /** Mount the supported-site launcher from the single packaged content script. */
-export function installPersistentBadge(): void {
-    if (!supportsPersistentBadge(window.location.hostname)) return;
+export function installPersistentBadge(hostname = window.location.hostname): void {
+    if (!supportsPersistentBadge(hostname)) return;
     if (
       window.location.protocol === 'chrome:' ||
       window.location.protocol === 'chrome-extension:' ||
@@ -30,7 +30,7 @@ export function installPersistentBadge(): void {
     const el = document.createElement('div');
     el.id = 'litos-persistent';
     el.innerHTML = `
-      <div id="litos-persistent-btn" style="
+      <button id="litos-persistent-btn" type="button" style="
         position: fixed;
         bottom: 20px;
         right: 20px;
@@ -48,11 +48,12 @@ export function installPersistentBadge(): void {
         opacity: 0.78;
         transition: opacity 0.2s, transform 0.2s;
         user-select: none;
+        padding: 0;
       " title="Open Litos" aria-label="Open Litos">
         <svg width="24" height="24" viewBox="0 0 100 100" aria-hidden="true">
           <path fill="#12120f" d="M32.81 8 L76.01 8 L75.17 16 L31.97 16 Z M27.53 24 L77.93 24 L77.09 32 L26.69 32 Z M22.25 40 L79.85 40 L79.01 48 L21.41 48 Z M16.97 56 L81.77 56 L80.93 64 L16.13 64 Z M11.69 72 L83.69 72 L81.59 92 L9.59 92 Z" />
         </svg>
-      </div>
+      </button>
       <div id="litos-persistent-tip" style="
         display: none;
         position: fixed;
@@ -77,14 +78,34 @@ export function installPersistentBadge(): void {
     const btn = el.querySelector<HTMLElement>('#litos-persistent-btn')!;
     const tip = el.querySelector<HTMLElement>('#litos-persistent-tip')!;
 
-    btn.addEventListener('mouseenter', () => {
+    const showTip = () => {
       btn.style.opacity = '1';
       btn.style.transform = 'scale(1.1)';
       tip.style.display = 'block';
-    });
-    btn.addEventListener('mouseleave', () => {
+    };
+    const hideTip = () => {
       btn.style.opacity = '0.78';
       btn.style.transform = 'scale(1)';
       tip.style.display = 'none';
+    };
+
+    btn.addEventListener('mouseenter', showTip);
+    btn.addEventListener('mouseleave', hideTip);
+    btn.addEventListener('focus', () => {
+      showTip();
+      btn.style.outline = '2px solid #3157d5';
+      btn.style.outlineOffset = '2px';
+    });
+    btn.addEventListener('blur', () => {
+      hideTip();
+      btn.style.outline = '';
+      btn.style.outlineOffset = '';
+    });
+    btn.addEventListener('click', () => {
+      chrome.runtime.sendMessage({ type: 'OPEN_LITOS_POPUP' }, (response: { ok?: boolean } | undefined) => {
+        if (!chrome.runtime.lastError && response?.ok === true) return;
+        tip.textContent = 'Open Litos from the browser toolbar';
+        showTip();
+      });
     });
 }

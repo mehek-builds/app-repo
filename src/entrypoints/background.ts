@@ -1446,6 +1446,27 @@ export default defineBackground(() => {
         return false;
       }
 
+      case 'OPEN_LITOS_POPUP': {
+        chrome.action.openPopup()
+          .then(() => sendResponse({ ok: true }))
+          .catch(async (popupError) => {
+            try {
+              await chrome.windows.create({
+                url: chrome.runtime.getURL('popup.html'),
+                type: 'popup',
+                width: 400,
+                height: 620,
+                focused: true,
+              });
+              sendResponse({ ok: true });
+            } catch (windowError) {
+              console.warn('[Litos] Could not open the extension popup:', popupError, windowError);
+              sendResponse({ ok: false });
+            }
+          });
+        return true;
+      }
+
       case 'GET_ENTITLEMENTS': {
         getStoredToken().then(async (token) => {
           if (!token) {
