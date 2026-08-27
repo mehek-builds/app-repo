@@ -164,7 +164,13 @@ describe('driveAsyncLocationCombobox', () => {
     const w = asyncLocationPicker({
       optionsFor: (q) => ('dubai'.includes(q.trim().toLowerCase()) ? ['Dubai'] : []),
     });
-    const got = await driveAsyncLocationCombobox(w.input, locationComboQueries('city', profile), w.entry);
+    const got = await driveAsyncLocationCombobox(
+      w.input,
+      locationComboQueries('city', profile),
+      w.entry,
+      800,
+      40,
+    );
     expect(w.typed).toEqual(['Dubai, United Arab Emirates', 'Dubai']);
     expect(got).toBe('Dubai');
   });
