@@ -109,6 +109,7 @@ import {
   premiumRetryControlSelector,
   type ExtensionPremiumActionFeature,
 } from '../lib/extension-premium-action';
+import { installPersistentBadge } from '../lib/persistent-badge';
 
 export default defineContentScript({
   matches: [
@@ -188,6 +189,8 @@ export default defineContentScript({
   allFrames: true,
   runAt: 'document_idle',
   main() {
+    installPersistentBadge();
+
     async function serverCaptchaResumeEnabled(): Promise<boolean> {
       return new Promise((resolve) => {
         let settled = false;

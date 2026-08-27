@@ -1,21 +1,26 @@
-export default defineContentScript({
-  // Same job-portal list as content.ts. Was <all_urls>, which forces the
-  // "read and change all your data on all websites" install warning and the
-  // slowest Chrome Web Store review queue.
-  matches: [
-    'https://www.linkedin.com/*',
-    'https://linkedin.com/*',
-    'https://*.greenhouse.io/*',
-    'https://*.lever.co/*',
-    'https://*.myworkdayjobs.com/*',
-    'https://*.workday.com/*',
-    'https://*.ashbyhq.com/*',
-    'https://www.indeed.com/*',
-    'https://app.joinhandshake.com/*',
-    'https://joinhandshake.com/*',
-  ],
-  runAt: 'document_idle',
-  main() {
+const EXACT_HOSTS = new Set([
+  'linkedin.com',
+  'www.linkedin.com',
+  'www.indeed.com',
+  'app.joinhandshake.com',
+  'joinhandshake.com',
+]);
+
+const HOST_SUFFIXES = [
+  '.greenhouse.io',
+  '.lever.co',
+  '.myworkdayjobs.com',
+  '.workday.com',
+  '.ashbyhq.com',
+];
+
+function supportsPersistentBadge(hostname: string): boolean {
+  return EXACT_HOSTS.has(hostname) || HOST_SUFFIXES.some((suffix) => hostname.endsWith(suffix));
+}
+
+/** Mount the supported-site launcher from the single packaged content script. */
+export function installPersistentBadge(): void {
+    if (!supportsPersistentBadge(window.location.hostname)) return;
     if (
       window.location.protocol === 'chrome:' ||
       window.location.protocol === 'chrome-extension:' ||
@@ -82,5 +87,4 @@ export default defineContentScript({
       btn.style.transform = 'scale(1)';
       tip.style.display = 'none';
     });
-  },
-});
+}
