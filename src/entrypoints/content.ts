@@ -3343,7 +3343,7 @@ export default defineContentScript({
           </div>
           <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;min-width:0;">
             <canvas id="wp-account-orb" style="display:none;flex-shrink:0;"></canvas>
-            <div id="wp-account-status" style="font-size:11px;color:${COLOR.muted};display:none;line-height:1.4;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></div>
+            <div id="wp-account-status" style="font-size:11px;color:${COLOR.muted};display:none;line-height:1.4;flex:1;min-width:0;white-space:normal;overflow-wrap:anywhere;"></div>
           </div>
           <div style="display:flex;gap:8px;">
             <button id="wp-account-yes" style="
