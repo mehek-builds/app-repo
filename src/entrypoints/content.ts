@@ -1387,6 +1387,16 @@ export default defineContentScript({
         stack.style.cssText =
           `position:fixed;bottom:${OVERLAY.bottom};right:${OVERLAY.right};z-index:${OVERLAY.z};display:flex;flex-direction:column;align-items:flex-end;gap:${OVERLAY.gap};`;
         document.body.appendChild(stack);
+        const persistentBadge = document.getElementById('litos-persistent');
+        if (persistentBadge) {
+          const syncPersistentBadgeClearance = () => {
+            const stackHeight = stack?.getBoundingClientRect().height ?? 0;
+            const gap = stackHeight > 0 ? Number.parseFloat(OVERLAY.gap) : 0;
+            persistentBadge.style.setProperty('--litos-card-stack-clearance', `${stackHeight + gap}px`);
+          };
+          new ResizeObserver(syncPersistentBadgeClearance).observe(stack);
+          window.requestAnimationFrame(syncPersistentBadgeClearance);
+        }
       }
       return stack;
     }

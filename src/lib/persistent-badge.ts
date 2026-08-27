@@ -29,10 +29,11 @@ export function installPersistentBadge(hostname = window.location.hostname): voi
 
     const el = document.createElement('div');
     el.id = 'litos-persistent';
+    el.style.setProperty('--litos-card-stack-clearance', '0px');
     el.innerHTML = `
       <button id="litos-persistent-btn" type="button" style="
         position: fixed;
-        bottom: 20px;
+        bottom: calc(20px + var(--litos-card-stack-clearance));
         right: 20px;
         z-index: 2147483645;
         width: 44px;
@@ -57,7 +58,7 @@ export function installPersistentBadge(hostname = window.location.hostname): voi
       <div id="litos-persistent-tip" style="
         display: none;
         position: fixed;
-        bottom: 68px;
+        bottom: calc(68px + var(--litos-card-stack-clearance));
         right: 16px;
         z-index: 2147483645;
         background: #12120f;

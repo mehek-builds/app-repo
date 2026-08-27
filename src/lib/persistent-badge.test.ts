@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { installPersistentBadge, supportsPersistentBadge } from './persistent-badge';
 
@@ -30,6 +31,9 @@ describe('persistent launcher', () => {
     expect(launcher?.type).toBe('button');
     expect(launcher?.tabIndex).toBe(0);
     expect(launcher?.getAttribute('aria-label')).toBe('Open Litos');
+    expect(launcher?.style.bottom).toBe('calc(20px + var(--litos-card-stack-clearance))');
+    expect(document.querySelector<HTMLElement>('#litos-persistent-tip')?.style.bottom)
+      .toBe('calc(68px + var(--litos-card-stack-clearance))');
 
     launcher?.click();
     expect(sendMessage).toHaveBeenCalledWith({ type: 'OPEN_LITOS_POPUP' }, expect.any(Function));
@@ -38,5 +42,17 @@ describe('persistent launcher', () => {
   it('does not mount outside the supported host list', () => {
     installPersistentBadge('example.com');
     expect(document.querySelector('#litos-persistent')).toBeNull();
+  });
+
+  it('moves the launcher and tooltip above the live shared card stack', () => {
+    const content = readFileSync('src/entrypoints/content.ts', 'utf8');
+    const stackStart = content.indexOf('function getCardStack');
+    const stackEnd = content.indexOf('function cardShell', stackStart);
+    const stack = content.slice(stackStart, stackEnd);
+
+    expect(stack).toContain("document.getElementById('litos-persistent')");
+    expect(stack).toContain('new ResizeObserver(syncPersistentBadgeClearance).observe(stack)');
+    expect(stack).toContain("persistentBadge.style.setProperty('--litos-card-stack-clearance'");
+    expect(stack).toContain('stackHeight + gap');
   });
 });
