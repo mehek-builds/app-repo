@@ -12,6 +12,7 @@ import DraftEditor from './DraftEditor';
 import MainScreen from './MainScreen';
 import OnboardingScreen from './OnboardingScreen';
 import TrackingDashboard from './TrackingDashboard';
+import WarningBanner from './WarningBanner';
 
 vi.mock('../lib/api', () => ({
   createSession: vi.fn(),
@@ -123,6 +124,13 @@ describe('redesigned popup workflows', () => {
   afterEach(() => {
     cleanup();
     vi.unstubAllGlobals();
+  });
+
+  it('allows warning messages without breakpoints to wrap inside the popup', () => {
+    render(<WarningBanner message={'LITOSCONTENTWITHOUTBREAKPOINTS'.repeat(12)} />);
+
+    const message = screen.getByRole('status').querySelector('span');
+    expect(message?.className).toContain('[overflow-wrap:anywhere]');
   });
 
   it('preserves a manually edited job when asynchronous detection arrives', async () => {
