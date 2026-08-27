@@ -3052,7 +3052,7 @@ export default defineContentScript({
           pointer-events:auto;position:absolute;display:flex;align-items:center;gap:12px;
           background:${COLOR.surface};color:${COLOR.ink};border:1px solid ${COLOR.border};
           border-radius:${RADIUS.card};padding:10px 12px;
-          box-shadow:${SHADOW.raised};white-space:nowrap;
+          box-shadow:${SHADOW.raised};max-width:calc(100vw - 16px);box-sizing:border-box;white-space:normal;
           animation:wp-slide-in 0.2s ease-out;
         ">
           <div style="position:relative;width:46px;height:46px;flex-shrink:0;">
@@ -3064,7 +3064,7 @@ export default defineContentScript({
             </svg>
             <div id="wp-as-num" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:500;font-family:${FONT.mono};">${remaining}</div>
           </div>
-          <div style="display:flex;flex-direction:column;gap:2px;">
+          <div style="display:flex;flex-direction:column;gap:2px;min-width:0;">
             <div style="font-size:12px;font-weight:500;">${actionLabel} your application</div>
             <div id="wp-as-sub" style="font-size:11px;color:${COLOR.muted};">${fillResult.fields_filled} field${fillResult.fields_filled === 1 ? '' : 's'} filled. Auto-submits in ${remaining}s.</div>
           </div>
