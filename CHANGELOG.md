@@ -2,6 +2,35 @@
 
 All notable changes to the Litos extension are documented here.
 
+## [0.6.2] - 2026-08-26
+
+### Added
+- Supported Free application forms now reserve one exact server-side submission attempt before the
+  employer submit control can be used, then obtain a short-lived final-boundary authorization for
+  that same attempt, application, tab, frame, and activation.
+- Autofill evidence reports carry a stable client event ID across transport retries, so a lost
+  response can be retried without creating a second evidence record.
+
+### Changed
+- Retry copy and actions derive from the backend's current submission safety verdict. A stale local
+  success or failure cannot reopen an application that the server still considers uncertain.
+- The generated-resume submission lane remains held during the ledger cutover. Supported Free
+  factual-fill flows replace that hold only after their exact server reservation is acknowledged.
+
+### Safety
+- An expired lease, changed page context, account change, missing monitor, ambiguous employer
+  outcome, or mismatched callback fails closed without replaying the submit action.
+- Manual submission state survives service-worker restarts and is cleared only by an exact accepted
+  outcome or an exact pre-click cancellation acknowledged by the backend.
+- Extension updates hold every submission path until Chrome proves that each snapshotted legacy
+  document is gone. Iframe-only application tabs use the same document-bound acknowledgement.
+- Release-fence storage reads and writes retry a bounded number of times, remain closed on failure,
+  and reconstruct missing or corrupt state from Chrome's exact runtime-context inventory.
+- Chrome 116 is now the declared minimum because the permission-free update inventory depends on
+  `chrome.runtime.getContexts`.
+- The 0.6.2 release archive is identified by the package version, source commit, and SHA-256 of the
+  final verified ZIP. No release hash is recorded until that final artifact exists.
+
 ## [0.6.1] - 2026-08-23
 
 ### Changed

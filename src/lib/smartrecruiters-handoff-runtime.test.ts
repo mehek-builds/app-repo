@@ -87,7 +87,7 @@ describe('SmartRecruiters exact packet attended handoff', () => {
     const dashboardStart = background.slice(background.indexOf("if (message?.type !== 'LITOS_SUBMIT_APPLICATION')"));
     expect(dashboardStart).toMatch(/dashboardSubmissionsInFlight\.has\(applicationId\)[\s\S]*?dashboardSubmissionsInFlight\.add\(applicationId\)/);
     expect(dashboardStart).toMatch(/fetchAndBindHandoffPacket\(\{[\s\S]*?publishBinding: false[\s\S]*?PREPARE_SUBMISSION_FROM_DASHBOARD[\s\S]*?storeHandoffPacketBinding/);
-    expect(dashboardStart).toMatch(/handoff_version: exactResume\.handoff_version[\s\S]*?finally\(\(\) => dashboardSubmissionsInFlight\.delete\(applicationId\)\)/);
+    expect(dashboardStart).toMatch(/handoff_version: exactResume\.handoff_version[\s\S]*?finally\(\(\) => \{[\s\S]*?dashboardSubmissionsInFlight\.delete\(applicationId\)[\s\S]*?releaseSubmissionStart\(\)/);
     expect(dashboardStart).not.toMatch(/PREPARE_SUBMISSION_FROM_DASHBOARD[\s\S]*?handoffPacketBinding\(applicationId/);
   });
 

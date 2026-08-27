@@ -17,6 +17,9 @@ const pending: PendingFreeSubmissionMonitor = {
   authEpoch: 4,
   startUrl: 'https://jobs.jobvite.com/acme/job/CaseId/apply',
   startedAt: NOW,
+  boundaryLeaseId: '123e4567-e89b-42d3-a456-426614174000',
+  boundaryActivationId: '223e4567-e89b-42d3-a456-426614174000',
+  boundaryExpiresAt: NOW + 180_000,
 };
 
 describe('Free submission monitor recovery', () => {
@@ -32,6 +35,10 @@ describe('Free submission monitor recovery', () => {
     expect(freeSubmissionNavigationMatches(
       pending.startUrl,
       'https://evil.example/acme/job/CaseId/confirmation',
+    )).toBe(false);
+    expect(freeSubmissionNavigationMatches(
+      'https://job-boards.greenhouse.io/embed/job_app?for=acme&token=123',
+      'https://job-boards.greenhouse.io/embed/job_app?for=acme&token=456',
     )).toBe(false);
   });
 
@@ -82,9 +89,36 @@ describe('Free submission monitor recovery', () => {
     })).toEqual({
       eventId: pending.eventId,
       applicationId: pending.applicationId,
+      leaseId: pending.boundaryLeaseId,
+      activationId: pending.boundaryActivationId,
       outcome: 'unknown',
       finalUrl: pending.startUrl,
       confirmationText: '',
     });
+  });
+
+  it('keeps an exact confirmed receipt after monitor TTL while weaker timeout evidence stays unknown', () => {
+    expect(bindFreeSubmissionOutcome({
+      pending,
+      eventId: pending.eventId,
+      applicationId: pending.applicationId,
+      outcome: 'confirmed',
+      finalUrl: 'https://jobs.jobvite.com/acme/job/CaseId/confirmation',
+      confirmationText: 'Thank you for applying.',
+      disposition: 'expired',
+    })).toMatchObject({
+      outcome: 'confirmed',
+      finalUrl: 'https://jobs.jobvite.com/acme/job/CaseId/confirmation',
+      confirmationText: 'Thank you for applying.',
+    });
+    expect(bindFreeSubmissionOutcome({
+      pending,
+      eventId: pending.eventId,
+      applicationId: pending.applicationId,
+      outcome: 'unknown',
+      finalUrl: 'https://jobs.jobvite.com/acme/job/CaseId/confirmation',
+      confirmationText: '',
+      disposition: 'expired',
+    })).toMatchObject({ outcome: 'unknown', finalUrl: pending.startUrl });
   });
 });

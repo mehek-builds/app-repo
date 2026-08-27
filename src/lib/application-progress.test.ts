@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   classifySubmissionOutcome,
   escapeApplicationText,
+  measuredGreenhouseReceipt,
+  measuredWorkableReceipt,
   pageShowsSubmissionConfirmation,
   pageSubmissionFailureMessage,
   resumeGenerationProgress,
@@ -59,6 +61,135 @@ describe('application progress copy', () => {
     });
     expect(classifySubmissionOutcome('Thank you for applying.')).toEqual({ kind: 'confirmed' });
     expect(classifySubmissionOutcome('Application form')).toBeNull();
+  });
+
+  it.each([
+    'There was an error submitting your application.',
+    'We encountered a problem while submitting. Thank you for applying.',
+    'Your application did not go through.',
+    'We were unable to process this application.',
+    'Application not submitted.',
+    'The submission was unsuccessful.',
+    'We failed to submit your application.',
+    'We could not submit your application.',
+  ])('lets negative evidence dominate positive or ambiguous page text: %s', (text) => {
+    expect(classifySubmissionOutcome(text)?.kind).toBe('failure');
+  });
+
+  it('emits typed Workable proof only from the exact selector, route, and absent form', () => {
+    const startedUrl = 'https://apply.workable.com/acme/j/1234abcdef/apply/';
+    expect(measuredWorkableReceipt({
+      startedUrl,
+      finalUrl: `${startedUrl}?success`,
+      successfulSubmitText: '  Your application has been\nsubmitted successfully. ',
+      formStillPresent: false,
+    })).toEqual({
+      confirmationText: 'Your application has been submitted successfully.',
+      receiptProof: {
+        version: 1,
+        family: 'workable',
+        state: 'application_submitted',
+        evidence: 'workable_successful_submit',
+        form_still_present: false,
+      },
+    });
+    expect(measuredWorkableReceipt({
+      startedUrl,
+      finalUrl: `${startedUrl}?success`,
+      successfulSubmitText: 'There was an error submitting. Your application has been submitted successfully.',
+      formStillPresent: false,
+    })).toBeNull();
+    expect(measuredWorkableReceipt({
+      startedUrl,
+      finalUrl: `${startedUrl}?success`,
+      successfulSubmitText: 'Your application has been submitted successfully.',
+      formStillPresent: true,
+    })).toBeNull();
+  });
+
+  it('uses the validated selector excerpt even when whole-page prose exceeds 2,000 characters', () => {
+    const wholePage = `${'unrelated '.repeat(250)}Your application has been submitted successfully.`;
+    expect(wholePage.length).toBeGreaterThan(2_000);
+    const startedUrl = 'https://apply.workable.com/acme/j/1234abcdef/apply/';
+    expect(measuredWorkableReceipt({
+      startedUrl,
+      finalUrl: `${startedUrl}?success`,
+      successfulSubmitText: 'Your application has been submitted successfully.',
+      formStillPresent: false,
+    })?.confirmationText).toBe('Your application has been submitted successfully.');
+  });
+
+  it('emits typed Greenhouse proof only for the exact portal-owned confirmation route and absent form', () => {
+    const startedUrl = 'https://job-boards.greenhouse.io/acme/jobs/1234567';
+    expect(measuredGreenhouseReceipt({
+      startedUrl,
+      finalUrl: `${startedUrl}/confirmation`,
+      confirmationBodyText: ' Thank you, Acme will be in touch. ',
+      formStillPresent: false,
+    })).toEqual({
+      confirmationText: 'Thank you, Acme will be in touch.',
+      receiptProof: {
+        version: 1,
+        family: 'greenhouse',
+        state: 'application_submitted',
+        evidence: 'greenhouse_confirmation_content',
+        form_still_present: false,
+      },
+    });
+    expect(measuredGreenhouseReceipt({
+      startedUrl,
+      finalUrl: `${startedUrl}/confirmation?source=untrusted`,
+      confirmationBodyText: 'Thank you.',
+      formStillPresent: false,
+    })).toBeNull();
+    expect(measuredGreenhouseReceipt({
+      startedUrl,
+      finalUrl: `${startedUrl}/confirmation`,
+      confirmationBodyText: 'Thank you.',
+      formStillPresent: true,
+    })).toBeNull();
+    expect(measuredGreenhouseReceipt({
+      startedUrl: 'https://boards.greenhouse.io/acme/jobs/1234567',
+      finalUrl: 'https://boards.greenhouse.io/acme/jobs/1234567/confirmation',
+      confirmationBodyText: 'Thank you.',
+      formStillPresent: false,
+    })).toBeNull();
+
+    const embedStart = 'https://job-boards.greenhouse.io/embed/job_app?for=acme&token=1234567';
+    expect(measuredGreenhouseReceipt({
+      startedUrl: embedStart,
+      finalUrl: 'https://job-boards.greenhouse.io/embed/job_app/confirmation?token=1234567&for=acme',
+      confirmationBodyText: 'Application received.',
+      formStillPresent: false,
+    })?.receiptProof.family).toBe('greenhouse');
+    for (const finalUrl of [
+      'https://job-boards.greenhouse.io/embed/job_app/confirmation?token=7654321&for=acme',
+      'https://job-boards.greenhouse.io/embed/job_app/confirmation?token=1234567&for=other',
+      'https://job-boards.greenhouse.io/embed/job_app/confirmation?for=acme',
+      'https://job-boards.eu.greenhouse.io/embed/job_app/confirmation?token=1234567&for=acme',
+      'https://job-boards.greenhouse.io/embed/job_app/confirmation?token=1234567&for=acme&source=x',
+    ]) {
+      expect(measuredGreenhouseReceipt({
+        startedUrl: embedStart,
+        finalUrl,
+        confirmationBodyText: 'Application received.',
+        formStillPresent: false,
+      })).toBeNull();
+    }
+    expect(measuredGreenhouseReceipt({
+      startedUrl: embedStart,
+      finalUrl: 'https://job-boards.greenhouse.io/embed/job_app/confirmation?token=1234567&for=acme',
+      confirmationBodyText: 'Application received.',
+      formStillPresent: true,
+    })).toBeNull();
+
+    const longBody = `${'x'.repeat(1_100)} Your application has been submitted successfully.`;
+    expect(measuredGreenhouseReceipt({
+      startedUrl: embedStart,
+      finalUrl: 'https://job-boards.greenhouse.io/embed/job_app/confirmation?token=1234567&for=acme',
+      confirmationBodyText: longBody,
+      formStillPresent: false,
+    })?.confirmationText).toBe(longBody);
   });
 
   it('bounds active portal monitoring to one minute', () => {

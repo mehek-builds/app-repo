@@ -7,6 +7,7 @@ import {
   EXPECTED_EXTERNAL_MATCHES,
   EXPECTED_MANIFEST_DESCRIPTION,
   EXPECTED_MANIFEST_NAME,
+  EXPECTED_MINIMUM_CHROME_VERSION,
   EXPECTED_PERMISSIONS,
 } from './manifest-contract.mjs';
 import { verifyBuiltManifest } from './verify-built-manifest.mjs';
@@ -25,6 +26,7 @@ function fixture() {
     name: EXPECTED_MANIFEST_NAME,
     description: EXPECTED_MANIFEST_DESCRIPTION,
     version: '0.6.0',
+    minimum_chrome_version: EXPECTED_MINIMUM_CHROME_VERSION,
     permissions: [...EXPECTED_PERMISSIONS],
     host_permissions: [],
     background: { service_worker: 'background.js' },
@@ -33,7 +35,7 @@ function fixture() {
       {
         matches: contentScriptMatches(contentSource),
         all_frames: true,
-        run_at: 'document_idle',
+        run_at: 'document_start',
         js: ['content-scripts/content.js'],
       },
     ],
@@ -75,4 +77,14 @@ describe('built manifest verification', () => {
     writeFileSync(paths.manifestPath, JSON.stringify(paths.manifest));
     expect(() => verifyBuiltManifest(paths)).toThrow(/unexpected description/);
   });
+
+  it.each([undefined, '115', '117'])(
+    'rejects an unsupported Chrome floor of %s',
+    (minimumChromeVersion) => {
+      const paths = fixture();
+      paths.manifest.minimum_chrome_version = minimumChromeVersion;
+      writeFileSync(paths.manifestPath, JSON.stringify(paths.manifest));
+      expect(() => verifyBuiltManifest(paths)).toThrow(/unexpected minimum_chrome_version/);
+    },
+  );
 });

@@ -48,14 +48,18 @@ describe('Jobvite and iCIMS attended runtime wiring', () => {
     expect(manual).toMatch(/const guardError = submissionGuard\(\)[\s\S]*?EXTENSION_SUBMISSION_START/);
   });
 
-  it('carries strict receipt identity across navigation and never uses generic success text for these families', () => {
+  it('fails Jobvite and iCIMS confirmation closed until a backend-parity typed proof exists', () => {
     const start = background.slice(
       background.indexOf("case 'EXTENSION_SUBMISSION_START'"),
       background.indexOf("case 'EXTENSION_SUBMISSION_OUTCOME'"),
     );
-    expect(start).toMatch(/gatedAttendedIdentity\(currentUrl\)[\s\S]*?strictReceipt/);
-    expect(content).toMatch(/monitorExtensionSubmission\([\s\S]*?pending\.applicationId[\s\S]*?pending\.strictReceipt/);
-    expect(content).toMatch(/exactGatedAttendedReceipt\([\s\S]*?return receipt \? \{ kind: 'confirmed' \} : null/);
+    expect(start).not.toContain('strictReceipt');
+    const monitor = content.slice(
+      content.indexOf('function monitorExtensionSubmission'),
+      content.indexOf('function armManualSubmissionTracking'),
+    );
+    expect(monitor).toContain('measuredSupportedReceiptOnPage(startedUrl)');
+    expect(monitor).not.toContain('exactGatedAttendedReceipt(');
   });
 
   it('classifies the live DOM stage before reading a gate page as a job', () => {
@@ -122,6 +126,7 @@ describe('Jobvite and iCIMS attended runtime wiring', () => {
     expect(background).toMatch(/setPendingSubmission[\s\S]*?pendingSubmissionMutations\.run/);
     expect(background).toMatch(/applicationTabMutations\.run\(APPLICATION_TAB_MUTATION_KEY[\s\S]*?litos_application_tabs/);
     const cleanup = background.slice(background.indexOf('async function clearApplicationRuntimeState'));
-    expect(cleanup).toMatch(/pendingSubmissionMutations\.run[\s\S]*?applicationTabMutations\.run/);
+    expect(cleanup).not.toContain('pendingSubmissionMutations.run');
+    expect(cleanup).toMatch(/applicationTabMutations\.run[\s\S]*?litos_application_tabs/);
   });
 });

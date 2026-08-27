@@ -5,6 +5,7 @@ import {
   EXPECTED_EXTERNAL_MATCHES,
   EXPECTED_MANIFEST_DESCRIPTION,
   EXPECTED_MANIFEST_NAME,
+  EXPECTED_MINIMUM_CHROME_VERSION,
   EXPECTED_PERMISSIONS,
   sameOrderedValues,
 } from './manifest-contract.mjs';
@@ -39,13 +40,18 @@ export function verifyBuiltManifest({
       `Built manifest version ${manifest.version ?? 'missing'} does not match package ${packageMetadata.version}.`,
     );
   }
+  if (manifest.minimum_chrome_version !== EXPECTED_MINIMUM_CHROME_VERSION) {
+    throw new Error(
+      `Built manifest has unexpected minimum_chrome_version ${JSON.stringify(manifest.minimum_chrome_version)}.`,
+    );
+  }
   if (contentScripts.length !== 1) {
     throw new Error(`Built manifest has ${contentScripts.length} content scripts instead of exactly one.`);
   }
   if (!sameOrderedValues(matches, expectedMatches)) {
     throw new Error('Built manifest content-script matches differ from the exact source allowlist.');
   }
-  if (contentScript.all_frames !== true || contentScript.run_at !== 'document_idle') {
+  if (contentScript.all_frames !== true || contentScript.run_at !== 'document_start') {
     throw new Error('Built manifest has unexpected content-script execution settings.');
   }
   if (!sameOrderedValues(contentScript.js ?? [], ['content-scripts/content.js'])) {

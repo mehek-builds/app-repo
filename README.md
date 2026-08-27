@@ -144,7 +144,8 @@ CORS behavior, so this adds no Chrome permission.
 
 ## Installing and running it
 
-The published extension is on the Chrome Web Store (link at the top). To build and load it from source:
+The published extension is on the Chrome Web Store (link at the top) and requires Chrome 116 or
+newer. To build and load it from source:
 
 ```bash
 npm install                 # runs `wxt prepare` on postinstall
@@ -172,6 +173,28 @@ Before submitting a store release:
 - Run `npm run zip`, record its reported SHA-256, and review that exact hash before upload. The API
   publisher also requires the reviewed hash in `CWS_EXPECTED_ZIP_SHA256` before any network request.
 
+### Release artifact identity
+
+For 0.6.2 and later, the release record is the tuple of package version, exact source commit, and
+SHA-256 of the final Chrome ZIP. Use one clean checkout at the intended release commit and this
+sequence:
+
+1. Run `npm ci`, `npm run compile`, and `npm test`.
+2. Set the production public PostHog token, then run `npm run zip` once. This builds the extension,
+   verifies the manifest, verifies every archive entry byte-for-byte against
+   `.output/chrome-mv3`, checks the required runtime markers, and prints the archive SHA-256.
+3. Independently run
+   `shasum -a 256 .output/litos-extension-0.6.2-chrome.zip`. It must equal the verifier's printed
+   hash. Record that value beside version 0.6.2 and the output of `git rev-parse HEAD` in the release
+   record. Do not put a placeholder or a hash from an earlier build in that record.
+4. Set `CWS_EXPECTED_ZIP_SHA256` to the reviewed value only when uploading this exact file.
+   `scripts/publish-to-webstore.mjs` re-verifies the manifest, archive contents, and hash before its
+   first network request, and exits if any byte or expected hash differs.
+
+This procedure gives one unambiguous identity to the reviewed artifact. It does not claim that two
+separate WXT packaging runs are byte-for-byte reproducible, so do not rebuild after recording the
+hash. If anything changes, package again and review the new hash as a new artifact.
+
 Then load the unpacked build: open `chrome://extensions`, enable Developer mode, choose "Load unpacked," and point it at `.output/chrome-mv3` (the directory WXT writes). Sign in through the popup, complete autofill setup, and open a real posting on any supported ATS.
 
 **Visual preview without Chrome or a backend:**
@@ -195,7 +218,7 @@ The suite covers the fill decisions most likely to cause real-world harm and the
 
 ## Permissions (`wxt.config.ts`)
 
-The manifest requests only `activeTab`, `scripting`, `storage`, and `clipboardWrite`, and declares no production `host_permissions` (localhost only during `wxt serve`). The content-script `matches` list is the specific ATS allowlist rather than `<all_urls>`, and on-demand injection into company career sites goes through `activeTab` + `chrome.scripting` on the tab the student invoked. This is a conscious choice: every extra permission widens the install warning and slows Chrome Web Store review, and the whole product only needs to touch the tab the user is actively applying on.
+The manifest requests only `activeTab`, `scripting`, `storage`, and `clipboardWrite`, declares no production `host_permissions` (localhost only during `wxt serve`), and declares Chrome 116 as its minimum version because the update fence uses the permission-free `chrome.runtime.getContexts` inventory. The content-script `matches` list is the specific ATS allowlist rather than `<all_urls>`, and on-demand injection into company career sites goes through `activeTab` + `chrome.scripting` on the tab the student invoked. This is a conscious choice: every extra permission widens the install warning and slows Chrome Web Store review, and the whole product only needs to touch the tab the user is actively applying on.
 
 ## Naming and storage compatibility
 

@@ -7,10 +7,12 @@ const background = readFileSync(new URL('../entrypoints/background.ts', import.m
 const content = readFileSync(new URL('../entrypoints/content.ts', import.meta.url), 'utf8');
 
 describe('extension submission synchronization wiring', () => {
-  it('isolates pending claims by tab and reconciles closed or stale tabs', () => {
-    expect(background).toMatch(/pendingSubmissionKey\(tabId/);
+  it('isolates pending claims in the durable journal without aging them out on tab close', () => {
+    expect(background).toMatch(/pendingSubmission[\s\S]*?submissionOutcomeOutbox\.list\(\)/);
+    expect(background).toMatch(/entry\.tabId === tabId[\s\S]*?applicationFormIdentityKey\(entry\.startUrl\)/);
     expect(background).toMatch(/chrome\.tabs\.onRemoved\.addListener/);
-    expect(background).toMatch(/PENDING_SUBMISSION_MAX_AGE_MS/);
+    expect(background).not.toMatch(/PENDING_SUBMISSION_MAX_AGE_MS/);
+    expect(background).not.toMatch(/tabs\.onRemoved[\s\S]{0,500}?postExtensionOutcome/);
     expect(background).toMatch(/frameId: sender\.frameId/);
   });
 

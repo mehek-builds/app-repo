@@ -1,7 +1,5 @@
 import {
   applicationFormIdentityKey,
-  handoffKey,
-  handoffMatches,
 } from './web-handoff';
 
 export const FREE_SUBMISSION_MONITOR_TTL_MS = 2 * 60_000;
@@ -16,6 +14,9 @@ export type PendingFreeSubmissionMonitor = {
   authEpoch: number;
   startUrl: string;
   startedAt: number;
+  boundaryLeaseId: string | null;
+  boundaryActivationId: string | null;
+  boundaryExpiresAt: number | null;
 };
 
 export type FreeSubmissionMonitorDisposition = 'resume' | 'force_unknown' | 'expired';
@@ -29,14 +30,18 @@ export function bindFreeSubmissionOutcome(input: {
   confirmationText: string;
   disposition: FreeSubmissionMonitorDisposition;
 }) {
+  const exactAttempt = input.pending.eventId === input.eventId
+    && input.pending.applicationId === input.applicationId;
   if (
-    input.disposition === 'resume'
-    && input.pending.eventId === input.eventId
-    && input.pending.applicationId === input.applicationId
+    exactAttempt
+    && (input.disposition === 'resume'
+      || (input.disposition === 'expired' && input.outcome === 'confirmed'))
   ) {
     return {
       eventId: input.eventId,
       applicationId: input.applicationId,
+      leaseId: input.pending.boundaryLeaseId,
+      activationId: input.pending.boundaryActivationId,
       outcome: input.outcome,
       finalUrl: input.finalUrl,
       confirmationText: input.confirmationText,
@@ -45,6 +50,8 @@ export function bindFreeSubmissionOutcome(input: {
   return {
     eventId: input.pending.eventId,
     applicationId: input.pending.applicationId,
+    leaseId: input.pending.boundaryLeaseId,
+    activationId: input.pending.boundaryActivationId,
     outcome: 'unknown' as const,
     finalUrl: input.pending.startUrl,
     confirmationText: '',
@@ -55,10 +62,10 @@ export function freeSubmissionNavigationMatches(startUrl: string, currentUrl: st
   const startIdentity = applicationFormIdentityKey(startUrl);
   const currentIdentity = applicationFormIdentityKey(currentUrl);
   if (!startIdentity || !currentIdentity) return false;
-  if (startIdentity === currentIdentity) return true;
-  const startKey = handoffKey(startUrl);
-  const currentKey = handoffKey(currentUrl);
-  return Boolean(startKey && currentKey && handoffMatches(startKey, currentKey));
+  // applicationFormIdentityKey contains the explicit provider-specific normalizations. Once both
+  // sides produce an exact form identity, a difference is terminal and must never fall through to
+  // generic prefix or query-stripping rules.
+  return startIdentity === currentIdentity;
 }
 
 export function freeSubmissionMonitorDisposition(input: {

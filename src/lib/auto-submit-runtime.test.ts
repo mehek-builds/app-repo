@@ -4,9 +4,23 @@ import { describe, expect, it } from 'vitest';
 const content = readFileSync('src/entrypoints/content.ts', 'utf8');
 
 describe('automatic submission runtime wiring', () => {
+  it('keeps every generated submission click entry unreachable in 0.6.2', () => {
+    expect(content).toContain('const GENERATED_EXTENSION_SUBMISSION_ENABLED = false;');
+    expect(content).toMatch(/if \(GENERATED_EXTENSION_SUBMISSION_ENABLED && autoSubmitOn && !autoSubmitHeld && finalSubmitBtn\) \{\s*runAutoSubmitCountdown\(/);
+    expect(content).toMatch(/if \(finalSubmitBtn && GENERATED_EXTENSION_SUBMISSION_ENABLED\) \{\s*armManualSubmissionTracking\(/);
+    expect(content.match(/runAutoSubmitCountdown\(/g)).toHaveLength(2);
+    expect(content.match(/armManualSubmissionTracking\(/g)).toHaveLength(2);
+
+    const dashboard = content.match(/submitFromDashboard = async[\s\S]*?\/\* The attended handoff/)?.[0] ?? '';
+    const paused = dashboard.indexOf('if (!GENERATED_EXTENSION_SUBMISSION_ENABLED)');
+    const click = dashboard.indexOf('clickDashboardSubmitIfAllowed(fillResult.ats_name, finalSubmitBtn)');
+    expect(paused).toBeGreaterThanOrEqual(0);
+    expect(click).toBeGreaterThan(paused);
+  });
+
   it('refreshes server consent before starting and again after the countdown', () => {
     expect(content).toMatch(/const autoSubmitOn = await serverAutoSubmitEnabled\(\)/);
-    expect(content).toMatch(/if \(autoSubmitOn && !autoSubmitHeld && finalSubmitBtn\)/);
+    expect(content).toMatch(/if \(GENERATED_EXTENSION_SUBMISSION_ENABLED && autoSubmitOn && !autoSubmitHeld && finalSubmitBtn\)/);
     expect(content).toMatch(/runAutoSubmitCountdown\(/);
     expect(content).toMatch(/GET_AUTOMATION_SETTINGS/);
   });
@@ -16,8 +30,10 @@ describe('automatic submission runtime wiring', () => {
   });
 
   it('enforces the ATS capability gate inside dashboard submission', () => {
-    expect(content).toMatch(/submitFromDashboard = async[\s\S]{0,250}!atsCanAutoSubmit\(fillResult\.ats_name\)/);
-    expect(content).toMatch(/clickDashboardSubmitIfAllowed\(fillResult\.ats_name, finalSubmitBtn\)/);
+    const dashboard = content.match(/submitFromDashboard = async[\s\S]*?\/\* The attended handoff/)?.[0] ?? '';
+    expect(dashboard).toContain('if (!GENERATED_EXTENSION_SUBMISSION_ENABLED)');
+    expect(dashboard).toContain('!atsCanAutoSubmit(fillResult.ats_name)');
+    expect(dashboard).toContain('clickDashboardSubmitIfAllowed(fillResult.ats_name, finalSubmitBtn)');
   });
 
   it('leaves a trusted direct page click on the manual tracking path', () => {

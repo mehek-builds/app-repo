@@ -11,7 +11,10 @@ describe('dashboard Free fill runtime wiring', () => {
       background.indexOf("message?.type === 'LITOS_CREATE_CHECKOUT'"),
     );
     expect(external).toContain('prepareFreeFillHandoff(message');
-    expect(external).toContain('readFillData: ownedFreeFillHandoffData');
+    expect(external).toContain("timeoutBackendFetch('/applications?limit=100'");
+    expect(external).toContain("body?.applications?.find((item) => item.id === applicationId)");
+    expect(external).not.toContain('ownedFreeFillHandoffData');
+    expect(external).not.toContain('manual-submission-start');
     expect(external).toMatch(/authEpochIsCurrent\(result\.authEpoch\)[\s\S]*?mode: 'free_fill'/);
     expect(external).toContain('return { ok: true as const, armed: true as const }');
     expect(external.indexOf('prepareFreeFillHandoff(message')).toBeLessThan(external.indexOf('armHandoffs(existing'));
@@ -31,13 +34,18 @@ describe('dashboard Free fill runtime wiring', () => {
       background.indexOf("case 'GET_FREE_FILL_DATA'"),
       background.indexOf("case 'RECORD_FREE_FILL_RESULT'"),
     );
-    const canonicalBranch = freeData.slice(
+    const canonicalSelection = freeData.slice(
       freeData.indexOf('if (requestedApplicationId)'),
       freeData.indexOf('} else if (company && role && portalUrl)'),
     );
-    expect(canonicalBranch).toContain('ownedFreeFillHandoffData');
-    expect(canonicalBranch).toContain('freeFillPortalMatches(fillData.portal_url, portalUrl)');
-    expect(canonicalBranch).not.toContain("timeoutBackendFetch('/applications'");
+    expect(canonicalSelection).toContain('applicationId = requestedApplicationId');
+    expect(canonicalSelection).not.toContain("timeoutBackendFetch('/applications'");
+    expect(freeData).toContain('ownedFreeFillHandoffData(');
+    expect(freeData).toContain('freeFillPortalMatches(candidate.portal_url, currentUrl)');
+    expect(freeData.indexOf('await validatedFillData()'))
+      .toBeLessThan(freeData.indexOf('reserveFreeManualSubmission('));
+    expect(freeData.indexOf('submissionOutcomeOutbox.arm({'))
+      .toBeLessThan(freeData.indexOf('reserveFreeManualSubmission('));
     expect(content).toMatch(/type: 'GET_FREE_FILL_DATA'[\s\S]*?application_id: dashboardFreeFillApplicationId/);
   });
 

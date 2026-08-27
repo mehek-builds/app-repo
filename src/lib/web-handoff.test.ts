@@ -60,6 +60,8 @@ describe('applicationFormIdentityKey', () => {
   const cases = [
     ['Lever', 'https://jobs.lever.co/acme/one/apply?utm_source=a#x', 'https://jobs.lever.co/acme/one?utm_source=b', 'https://jobs.lever.co/acme/two/apply'],
     ['Greenhouse', 'https://job-boards.greenhouse.io/acme/jobs/123?gh_src=a#x', 'https://job-boards.greenhouse.io/acme/jobs/123?utm_source=b', 'https://job-boards.greenhouse.io/acme/jobs/456'],
+    ['Greenhouse confirmation', 'https://job-boards.greenhouse.io/acme/jobs/123', 'https://job-boards.greenhouse.io/acme/jobs/123/confirmation', 'https://job-boards.greenhouse.io/acme/jobs/456/confirmation'],
+    ['Workable confirmation', 'https://apply.workable.com/acme/j/1234abcdef/apply/', 'https://apply.workable.com/acme/j/1234abcdef/apply/?success', 'https://apply.workable.com/acme/j/abcdef1234/apply/?success'],
     ['Greenhouse embed', 'https://job-boards.greenhouse.io/embed/job_app?for=acme&token=123&utm_source=a#x', 'https://job-boards.greenhouse.io/embed/job_app?token=123&for=acme', 'https://job-boards.greenhouse.io/embed/job_app?for=acme&token=456'],
     ['Ashby', 'https://jobs.ashbyhq.com/acme/one/application', 'https://jobs.ashbyhq.com/acme/one/application', 'https://jobs.ashbyhq.com/acme/two/application'],
     ['Workday', 'https://acme.wd5.myworkdayjobs.com/en-US/jobs/job/one/apply', 'https://acme.wd5.myworkdayjobs.com/en-US/jobs/job/one/apply', 'https://acme.wd5.myworkdayjobs.com/en-US/jobs/job/two/apply'],

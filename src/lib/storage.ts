@@ -22,6 +22,15 @@ export function authEpochIsCurrent(expectedEpoch: number): boolean {
   return authSessionActive && Number.isSafeInteger(expectedEpoch) && expectedEpoch === authEpoch;
 }
 
+/** Fence every in-process account callback before logout starts its bounded evidence drain. */
+export function deactivateAuthSessionForClear(): number {
+  if (authSessionActive) {
+    authEpoch += 1;
+    authSessionActive = false;
+  }
+  return authEpoch;
+}
+
 /**
  * Called by the background only after every account-owned local and session value has been
  * removed. Advancing once more invalidates work that began during the asynchronous clear, while
@@ -146,8 +155,7 @@ export async function clearAll(): Promise<void> {
   // authorizations are user-scoped and must be removed so the next Litos user on this Chrome
   // profile cannot inherit another person's employer account. Rotate the anonymous analytics id
   // as well so two accounts on one Chrome profile are never linked.
-  authEpoch += 1;
-  authSessionActive = false;
+  deactivateAuthSessionForClear();
   await serializePortalAccountMutation(async () => {
     const entitlementPointer = await chromeStorageGetCompat<string>('litos:entitlements:v2:current-account', []);
     await chromeStorageRemove([
