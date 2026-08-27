@@ -18,9 +18,50 @@ export function supportsPersistentBadge(hostname: string): boolean {
   return EXACT_HOSTS.has(hostname) || HOST_SUFFIXES.some((suffix) => hostname.endsWith(suffix));
 }
 
-/** Mount the supported-site launcher from the single packaged content script. */
-export function installPersistentBadge(hostname = window.location.hostname): void {
-    if (!supportsPersistentBadge(hostname)) return;
+type PersistentBadgeFrameContext = {
+  isTopFrame: boolean;
+  ancestorHostnames: string[];
+};
+
+function currentFrameContext(): PersistentBadgeFrameContext {
+  if (window.top === window) return { isTopFrame: true, ancestorHostnames: [] };
+
+  const origins = window.location.ancestorOrigins;
+  const ancestorHostnames: string[] = [];
+  for (let index = 0; index < (origins?.length ?? 0); index += 1) {
+    const origin = origins.item(index);
+    if (!origin) continue;
+    try {
+      ancestorHostnames.push(new URL(origin).hostname);
+    } catch {
+      // Ignore a malformed browser-provided origin and preserve the only launcher.
+    }
+  }
+  if (!ancestorHostnames.length && document.referrer) {
+    try {
+      ancestorHostnames.push(new URL(document.referrer).hostname);
+    } catch {
+      // Ignore a malformed referrer and preserve the only launcher.
+    }
+  }
+  return { isTopFrame: false, ancestorHostnames };
+}
+
+export function shouldInstallPersistentBadge(
+  hostname: string,
+  frame: PersistentBadgeFrameContext,
+): boolean {
+  if (!supportsPersistentBadge(hostname)) return false;
+  if (frame.isTopFrame) return true;
+  return !frame.ancestorHostnames.some(supportsPersistentBadge);
+}
+
+/** Mount one launcher unless a supported top document already owns it. */
+export function installPersistentBadge(
+  hostname = window.location.hostname,
+  frame = currentFrameContext(),
+): void {
+    if (!shouldInstallPersistentBadge(hostname, frame)) return;
     if (
       window.location.protocol === 'chrome:' ||
       window.location.protocol === 'chrome-extension:' ||
@@ -102,7 +143,8 @@ export function installPersistentBadge(hostname = window.location.hostname): voi
       btn.style.outline = '';
       btn.style.outlineOffset = '';
     });
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', (event) => {
+      if (!event.isTrusted) return;
       chrome.runtime.sendMessage({ type: 'OPEN_LITOS_POPUP' }, (response: { ok?: boolean } | undefined) => {
         if (!chrome.runtime.lastError && response?.ok === true) return;
         tip.textContent = 'Open Litos from the browser toolbar';
