@@ -109,7 +109,7 @@ Two files keep every adapter honest:
 
 The background worker is the only component that holds the auth token, so it owns every authenticated backend call. It routes `chrome.runtime` messages: `JOB_DETECTED` / `GET_LAST_JOB` (badge + session cache), `JOB_APPROVED` (resolve contacts and draft the best two, ranked by reply likelihood so an alumni or near-peer outranks a busy exec), `GENERATE_RESUME_AND_FILL_DATA` (fetch the resume profile and the more-sensitive application profile in parallel, then generate a JD-tailored resume), `ANSWER_QUESTION` (draft one open-ended application answer), `GET_ACCOUNT_CREATION_DATA` (email only, for Workday signup), and `AUTOFILL_EVENT` (telemetry). It is careful about Manifest V3 service-worker teardown, only keeping the message channel open when a response is genuinely coming.
 
-`src/lib/api.ts` is the typed client for the Litos backend. Development defaults to `http://localhost:3001`, production defaults to `https://student-outreach-backend.vercel.app`, and `VITE_API_BASE` overrides either mode. Endpoints the extension calls:
+`src/lib/api.ts` is the typed client for the Litos backend. Development defaults to `http://localhost:3001`, production defaults to `https://api.trylitos.com`, and `VITE_API_BASE` overrides either mode. Endpoints the extension calls:
 
 | Purpose | Endpoint | What the backend does |
 |---------|----------|-----------------------|

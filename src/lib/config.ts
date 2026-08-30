@@ -1,4 +1,4 @@
-export const PRODUCTION_API_BASE = 'https://student-outreach-backend.vercel.app';
+export const PRODUCTION_API_BASE = 'https://api.trylitos.com';
 export const LOCAL_API_BASE = 'http://localhost:3001';
 
 export function resolveApiBase(configured: string | undefined, dev: boolean): string {
