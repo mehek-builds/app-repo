@@ -2,6 +2,15 @@
 
 All notable changes to the Litos extension are documented here.
 
+## [0.6.4] - 2026-08-30
+
+### Changed
+- Production API traffic now uses the stable `api.trylitos.com` origin for the Railway backend.
+
+### Safety
+- The release keeps the existing Manifest V3 permission set and relies on the backend's tested
+  extension-origin CORS policy, so the infrastructure move adds no browser permission warning.
+
 ## [0.6.3] - 2026-08-28
 
 ### Fixed
