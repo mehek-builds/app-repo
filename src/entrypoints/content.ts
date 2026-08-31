@@ -10,6 +10,14 @@ import { isLinkedInApplicationPage, extractLinkedInJdText, fillLinkedInApplicati
 import { isLikelyApplicationForm, extractGenericJdText, getGenericJobDetails, fillGenericApplication, drainR030CandidateLabels, isPerApplicationDecisionQuestion } from '../lib/adapters/generic';
 import { atsCanAutoSubmit, clickAtsSubmitIfAllowed, clickDashboardSubmitIfAllowed, isAtsApplicationPage, extractAtsJdText, fillAtsApplication, gatedPortalNotice, specForCurrentPage } from '../lib/adapters/ats-2026-07';
 import { PendingSubmissionRecoveryGate } from '../lib/submission-recovery';
+import {
+  bindExtensionSubmissionActivationToDocument,
+  runExtensionSubmissionClickAfterBackgroundValidation,
+  type DocumentBoundExtensionSubmissionActivation,
+  type ExtensionSubmissionActivation,
+  type ExtensionSubmissionActivationIdentity,
+  type ExtensionSubmissionActivationRequestClock,
+} from '../lib/submission-activation';
 import { COLOR, DISMISS_MS, FONT, OVERLAY, RADIUS, SHADOW, markSvg } from '../styles/tokens';
 
 /* Status icons drawn as SVG.
@@ -190,6 +198,39 @@ export default defineContentScript({
   runAt: 'document_idle',
   main() {
     installPersistentBadge();
+    const submissionActivationDocumentId = crypto.randomUUID();
+    const submissionActivationRuntimeId = crypto.randomUUID();
+    const beginSubmissionActivationRequest = (): ExtensionSubmissionActivationRequestClock => ({
+      runtimeId: submissionActivationRuntimeId,
+      timeOriginMs: performance.timeOrigin,
+      requestStartedAtMs: performance.now(),
+      wallRequestStartedAtMs: Date.now(),
+    });
+    const currentSubmissionActivationClock = () => ({
+      runtimeId: submissionActivationRuntimeId,
+      timeOriginMs: performance.timeOrigin,
+      nowMs: performance.now(),
+      wallNowMs: Date.now(),
+    });
+    const validateBackgroundGenerationForEmployerClick = (
+      activation: DocumentBoundExtensionSubmissionActivation,
+      applicationId: string,
+      callback: (response: { ok: boolean; error?: string }) => void,
+    ): void => {
+      chrome.runtime.sendMessage({
+        type: 'VALIDATE_SUBMISSION_ACTIVATION_FOR_CLICK',
+        payload: { applicationId, activation },
+      }, (response: { ok?: boolean; error?: string } | undefined) => {
+        const runtimeError = chrome.runtime.lastError?.message;
+        callback(response?.ok === true
+          ? { ok: true }
+          : {
+            ok: false,
+            error: response?.error ?? runtimeError
+              ?? 'Litos could not verify the current browser send permission. Nothing was sent.',
+          });
+      });
+    };
 
     async function serverCaptchaResumeEnabled(): Promise<boolean> {
       return new Promise((resolve) => {
@@ -244,12 +285,13 @@ export default defineContentScript({
     }
 
     function monitorExtensionSubmission(
-      applicationId: string,
+      activation: ExtensionSubmissionActivationIdentity,
       baselineTexts: ReadonlySet<string> = new Set(),
       strictReceipt?: { family: GatedAttendedFamily; startedUrl: string },
     ) {
-      if (monitoredSubmissionIds.has(applicationId)) return;
-      monitoredSubmissionIds.add(applicationId);
+      const applicationId = activation.applicationId;
+      if (monitoredSubmissionIds.has(activation.activationId)) return;
+      monitoredSubmissionIds.add(activation.activationId);
       const readText = () => visibleSubmissionOutcomeTexts()
         .filter((text) => !baselineTexts.has(text))
         .join(' ');
@@ -268,7 +310,13 @@ export default defineContentScript({
         }
         chrome.runtime.sendMessage({
           type: 'EXTENSION_SUBMISSION_OUTCOME',
-          payload: { applicationId, outcome, finalUrl: window.location.href, confirmationText },
+          payload: {
+            applicationId,
+            activation,
+            outcome,
+            finalUrl: window.location.href,
+            confirmationText,
+          },
         }, (response: { ok?: boolean } | undefined) => {
           if (!response?.ok && attempt < 4) window.setTimeout(() => report(outcome, confirmationText, attempt + 1), 1000 * (attempt + 1));
         });
@@ -331,63 +379,143 @@ export default defineContentScript({
         pendingRecoveryGate.beginLocal(applicationId);
         const baselineTexts = new Set(visibleSubmissionOutcomeTexts());
         const submissionStartedUrl = window.location.href;
+        const activationRequestClock = beginSubmissionActivationRequest();
         chrome.runtime.sendMessage({
           type: 'EXTENSION_SUBMISSION_START',
-          payload: { applicationId, authorization: 'user_initiated', attendedHandoff },
-        }, (response: { ok?: boolean; error?: string } | undefined) => {
-          reserving = false;
+          payload: {
+            applicationId,
+            authorization: 'user_initiated',
+            attendedHandoff,
+            documentId: submissionActivationDocumentId,
+            activationRequestClock,
+          },
+        }, (response: ({ ok?: boolean; error?: string } & Partial<ExtensionSubmissionActivation>) | undefined) => {
           if (!response?.ok) {
+            reserving = false;
             pendingRecoveryGate.endLocal(applicationId);
             if (statusEl) statusEl.textContent = response?.error ?? 'Litos could not safely track this submission. Try again.';
             return;
           }
-          const challengeNow = captchaWaiting || detectChallenge().waiting;
-          const replayGuardError = submissionGuard();
-          const replaySafe = submitButton.isConnected
-            && isElementVisible(submitButton)
-            && !document.hidden
-            && document.hasFocus()
-            && !challengeNow
-            && !replayGuardError
-            && !hasEmptyRequiredFields()
-            && findProgrammaticFinalSubmitButton(atsName) === submitButton;
-          const clicked = replaySafe && atsName === 'workday'
-            ? replayWorkdayFinalSubmitIfAllowed({
-              expectedControl: submitButton,
-              tabVisible: !document.hidden,
-              tabFocused: document.hasFocus(),
-              requiredFieldsClear: !hasEmptyRequiredFields(),
-            })
-            : replaySafe && (() => { submitButton.click(); return true; })();
-          if (!clicked) {
-            const cancelReservation = (attempt = 0) => chrome.runtime.sendMessage({
-                type: 'EXTENSION_SUBMISSION_OUTCOME',
-                payload: {
-                  applicationId,
-                  outcome: 'cancelled',
-                  finalUrl: window.location.href,
-                  confirmationText: 'The application changed after the reservation. Nothing was sent.',
-                },
-              }, (cancelResponse: { ok?: boolean } | undefined) => {
-                if (!cancelResponse?.ok && attempt < 4) {
-                  window.setTimeout(() => cancelReservation(attempt + 1), 1000 * (attempt + 1));
-                  return;
-                }
-                pendingRecoveryGate.endLocal(applicationId);
-              });
-            cancelReservation();
-            if (statusEl) statusEl.textContent = replayGuardError ?? 'The application changed before submission. Review the final page and click Submit again.';
+          const boundActivation = bindExtensionSubmissionActivationToDocument(
+            response,
+            applicationId,
+            activationRequestClock,
+            currentSubmissionActivationClock(),
+          );
+          let finished = false;
+          const cancelReservation = (
+            activation: unknown,
+            error: string,
+            attempt = 0,
+          ): void => {
+            if (attempt === 0) {
+              if (finished) return;
+              finished = true;
+              reserving = false;
+              if (statusEl) statusEl.textContent = error;
+            }
+            chrome.runtime.sendMessage({
+              type: 'EXTENSION_SUBMISSION_OUTCOME',
+              payload: {
+                applicationId,
+                activation,
+                outcome: 'cancelled',
+                finalUrl: window.location.href,
+                confirmationText: 'The application changed after the reservation. Nothing was sent.',
+              },
+            }, (cancelResponse: { ok?: boolean } | undefined) => {
+              if (!cancelResponse?.ok && attempt < 4) {
+                window.setTimeout(() => cancelReservation(activation, error, attempt + 1), 1000 * (attempt + 1));
+                return;
+              }
+              pendingRecoveryGate.endLocal(applicationId);
+            });
+          };
+          if (!boundActivation.ok) {
+            cancelReservation(response, boundActivation.error);
             return;
           }
-          submitButton.removeEventListener('click', onClick, true);
-          monitorExtensionSubmission(
+          const replayGuardError = submissionGuard();
+          if (
+            !submitButton.isConnected
+            || !isElementVisible(submitButton)
+            || document.hidden
+            || !document.hasFocus()
+            || captchaWaiting
+            || detectChallenge().waiting
+            || replayGuardError
+            || hasEmptyRequiredFields()
+            || findProgrammaticFinalSubmitButton(atsName) !== submitButton
+          ) {
+            cancelReservation(
+              boundActivation.activation,
+              replayGuardError ?? 'The application changed before submission. Review the final page and click Submit again.',
+            );
+            return;
+          }
+          validateBackgroundGenerationForEmployerClick(
+            boundActivation.activation,
             applicationId,
-            baselineTexts,
-            atsName === 'jobvite' || atsName === 'icims'
-              ? { family: atsName, startedUrl: submissionStartedUrl }
-              : undefined,
+            (backgroundValidation) => {
+              if (!backgroundValidation.ok) {
+                cancelReservation(boundActivation.activation, backgroundValidation.error
+                  ?? 'Litos could not verify the current browser send permission. Nothing was sent.');
+                return;
+              }
+              const finalReplayGuardError = submissionGuard();
+              const replaySafe = submitButton.isConnected
+                && isElementVisible(submitButton)
+                && !document.hidden
+                && document.hasFocus()
+                && !captchaWaiting
+                && !detectChallenge().waiting
+                && !finalReplayGuardError
+                && !hasEmptyRequiredFields()
+                && findProgrammaticFinalSubmitButton(atsName) === submitButton;
+              if (!replaySafe) {
+                cancelReservation(
+                  boundActivation.activation,
+                  finalReplayGuardError ?? 'The application changed before submission. Review the final page and click Submit again.',
+                );
+                return;
+              }
+              // This document proof is checked inside the current background generation's response
+              // callback. No await or queued task may occur between this check and the employer click.
+              const clickResult = runExtensionSubmissionClickAfterBackgroundValidation({
+                backgroundValidation,
+                activation: boundActivation.activation,
+                expectedApplicationId: applicationId,
+                currentClock: currentSubmissionActivationClock(),
+                click: () => atsName === 'workday'
+                  ? replayWorkdayFinalSubmitIfAllowed({
+                    expectedControl: submitButton,
+                    tabVisible: !document.hidden,
+                    tabFocused: document.hasFocus(),
+                    requiredFieldsClear: !hasEmptyRequiredFields(),
+                  })
+                  : (() => { submitButton.click(); return true; })(),
+                clickRejectedError: 'The application changed before submission. Review the final page and click Submit again.',
+              });
+              if (!clickResult.ok) {
+                cancelReservation(
+                  boundActivation.activation,
+                  clickResult.error,
+                );
+                return;
+              }
+              finished = true;
+              reserving = false;
+              submitButton.removeEventListener('click', onClick, true);
+              monitorExtensionSubmission(
+                clickResult.activation,
+                baselineTexts,
+                atsName === 'jobvite' || atsName === 'icims'
+                  ? { family: atsName, startedUrl: submissionStartedUrl }
+                  : undefined,
+              );
+              pendingRecoveryGate.endLocal(applicationId);
+            },
           );
-          pendingRecoveryGate.endLocal(applicationId);
         });
       };
       submitButton.addEventListener('click', onClick, true);
@@ -581,12 +709,23 @@ export default defineContentScript({
 
     const checkPendingSubmission = (attempt = 0) => {
       chrome.runtime.sendMessage(
-        { type: 'GET_PENDING_EXTENSION_SUBMISSION' },
-        (response: { pending?: { applicationId?: string; startedAt?: number; strictReceipt?: { family: GatedAttendedFamily; startedUrl: string } } | null } | undefined) => {
+        {
+          type: 'GET_PENDING_EXTENSION_SUBMISSION',
+          payload: {
+            documentId: submissionActivationDocumentId,
+            documentRuntimeId: submissionActivationRuntimeId,
+          },
+        },
+        (response: {
+          pending?: (ExtensionSubmissionActivationIdentity & {
+            startedAt?: number;
+            strictReceipt?: { family: GatedAttendedFamily; startedUrl: string };
+          }) | null;
+        } | undefined) => {
           const pending = response?.pending;
           if (pending?.applicationId && pendingRecoveryGate.shouldRecover(pending)) {
             monitorExtensionSubmission(
-              pending.applicationId,
+              pending,
               new Set(),
               pending.strictReceipt,
             );
@@ -652,7 +791,10 @@ export default defineContentScript({
 
     let cardInjected = false;
     let approved = false; // true once user taps "Yes" on either card
-    let submitFromDashboard: ((questions: Array<{ id: string; question: string; answer: string }>) => Promise<{ ok: boolean; clicked?: boolean; error?: string; finalUrl?: string; confirmationText?: string }>) | null = null;
+    let submitFromDashboard: ((
+      questions: Array<{ id: string; question: string; answer: string }>,
+      activation: DocumentBoundExtensionSubmissionActivation,
+    ) => Promise<{ ok: boolean; clicked?: boolean; error?: string; finalUrl?: string; confirmationText?: string }>) | null = null;
     let prepareSubmissionFromDashboard: ((resume: GeneratedResume, expectedUrl: string) => Promise<string | null>) | null = null;
 
     function openLitosPlansFromPage(
@@ -727,6 +869,13 @@ export default defineContentScript({
         sendResponse({ url: window.location.href });
         return false;
       }
+      if (message?.type === 'GET_SUBMISSION_ACTIVATION_REQUEST_CLOCK') {
+        sendResponse({
+          documentId: submissionActivationDocumentId,
+          activationRequestClock: beginSubmissionActivationRequest(),
+        });
+        return false;
+      }
       if (message?.type === 'PREPARE_SUBMISSION_FROM_DASHBOARD') {
         if (!prepareSubmissionFromDashboard || !message.payload?.resume) {
           sendResponse({ ok: false, error: 'This page is not ready to verify the saved application packet.' });
@@ -743,8 +892,18 @@ export default defineContentScript({
         return false;
       }
       const applicationId = String(message.payload?.applicationId ?? '');
+      const verifiedActivation = bindExtensionSubmissionActivationToDocument(
+        message.payload?.activation,
+        applicationId,
+        message.payload?.activationRequestClock as ExtensionSubmissionActivationRequestClock,
+        currentSubmissionActivationClock(),
+      );
+      if (!verifiedActivation.ok) {
+        sendResponse({ ok: false, error: verifiedActivation.error });
+        return false;
+      }
       pendingRecoveryGate.beginLocal(applicationId);
-      submitFromDashboard(message.payload?.questions ?? [])
+      submitFromDashboard(message.payload?.questions ?? [], verifiedActivation.activation)
         .then(sendResponse)
         .finally(() => pendingRecoveryGate.endLocal(applicationId));
       return true;
@@ -2912,41 +3071,78 @@ export default defineContentScript({
 
         if (finalSubmitBtn) armManualSubmissionTracking(finalSubmitBtn, resume.resume_id, statusEl, fillResult.ats_name, handoffSubmissionGuard, Boolean(handoffApplicationId));
 
-        submitFromDashboard = async (_approvedQuestions) => {
-          const handoffGuardError = handoffSubmissionGuard();
-          if (handoffGuardError) return { ok: false, error: handoffGuardError };
-          if (!atsCanAutoSubmit(fillResult.ats_name)) {
-            return { ok: false, error: 'This application needs your direct confirmation on the company page. Nothing was sent.' };
-          }
-          if (!finalSubmitBtn || !finalSubmitBtn.isConnected) {
-            return { ok: false, error: 'This page no longer has a Submit button. Finish it yourself.' };
-          }
-          if (hasEmptyRequiredFields()) return { ok: false, error: 'Some required boxes are still empty. Fill them in, then send it.' };
-          if (hasApplicationDecisionControls()) {
-            return { ok: false, error: 'This application includes a decision only you can confirm on the company page. Nothing was sent.' };
-          }
-          // The dashboard path clicks Submit directly and never enters runAutoSubmitCountdown, so
-          // none of that function's guards apply here. Adding captchaWaiting to the auto-submit hold
-          // made this URGENT rather than theoretical: a challenge now deterministically routes the
-          // application AWAY from the guarded countdown and into this click.
-          if (captchaWaiting || detectChallenge().waiting) {
-            return { ok: false, error: 'This company asks you to prove you are human. Solve that check on the page, then send it yourself.' };
-          }
-          if (findProgrammaticFinalSubmitButton(fillResult.ats_name) !== finalSubmitBtn) {
-            return { ok: false, error: 'The company page no longer shows the exact reviewed final submit control. Nothing was sent.' };
-          }
-          const finalHandoffGuardError = handoffSubmissionGuard();
-          if (finalHandoffGuardError) return { ok: false, error: finalHandoffGuardError };
-          if (!clickDashboardSubmitIfAllowed(fillResult.ats_name, finalSubmitBtn)) {
-            return { ok: false, error: 'This application needs your direct confirmation on the company page. Nothing was sent.' };
-          }
+        submitFromDashboard = async (_approvedQuestions, activation) => {
+          const dashboardClickGuardError = (): string | null => {
+            const handoffGuardError = handoffSubmissionGuard();
+            if (handoffGuardError) return handoffGuardError;
+            if (!atsCanAutoSubmit(fillResult.ats_name)) {
+              return 'This application needs your direct confirmation on the company page. Nothing was sent.';
+            }
+            if (!finalSubmitBtn || !finalSubmitBtn.isConnected) {
+              return 'This page no longer has a Submit button. Finish it yourself.';
+            }
+            if (hasEmptyRequiredFields()) return 'Some required boxes are still empty. Fill them in, then send it.';
+            if (hasApplicationDecisionControls()) {
+              return 'This application includes a decision only you can confirm on the company page. Nothing was sent.';
+            }
+            // The dashboard path clicks Submit directly and never enters runAutoSubmitCountdown, so
+            // none of that function's guards apply here. A challenge always holds this path.
+            if (captchaWaiting || detectChallenge().waiting) {
+              return 'This company asks you to prove you are human. Solve that check on the page, then send it yourself.';
+            }
+            if (findProgrammaticFinalSubmitButton(fillResult.ats_name) !== finalSubmitBtn) {
+              return 'The company page no longer shows the exact reviewed final submit control. Nothing was sent.';
+            }
+            return handoffSubmissionGuard();
+          };
+          const initialGuardError = dashboardClickGuardError();
+          if (initialGuardError) return { ok: false, error: initialGuardError };
+          const clickResult = await new Promise<{ ok: true } | { ok: false; error: string }>((resolve) => {
+            validateBackgroundGenerationForEmployerClick(
+              activation,
+              resume.resume_id,
+              (backgroundValidation) => {
+                if (!backgroundValidation.ok) {
+                  resolve({
+                    ok: false,
+                    error: backgroundValidation.error
+                      ?? 'Litos could not verify the current browser send permission. Nothing was sent.',
+                  });
+                  return;
+                }
+                const finalGuardError = dashboardClickGuardError();
+                if (finalGuardError) {
+                  resolve({ ok: false, error: finalGuardError });
+                  return;
+                }
+                // Recheck the document deadline in the current worker's validation callback. There
+                // is no await between this check and the exact employer control click.
+                const finalClick = runExtensionSubmissionClickAfterBackgroundValidation({
+                  backgroundValidation,
+                  activation,
+                  expectedApplicationId: resume.resume_id,
+                  currentClock: currentSubmissionActivationClock(),
+                  click: () => finalSubmitBtn
+                    ? clickDashboardSubmitIfAllowed(fillResult.ats_name, finalSubmitBtn)
+                    : false,
+                  clickRejectedError: 'This application needs your direct confirmation on the company page. Nothing was sent.',
+                });
+                if (!finalClick.ok) {
+                  resolve({ ok: false, error: finalClick.error });
+                  return;
+                }
+                resolve({ ok: true });
+              },
+            );
+          });
+          if (!clickResult.ok) return { ok: false, error: clickResult.error };
           const started = Date.now();
           while (Date.now() - started < 45_000) {
             const text = document.body.innerText;
             const failure = pageSubmissionFailureMessage(text);
             if (failure) return { ok: false, clicked: true, error: failure, finalUrl: window.location.href };
             if (pageShowsSubmissionConfirmation(text)) return { ok: true, clicked: true, finalUrl: window.location.href, confirmationText: text.slice(0, 2000) };
-            await new Promise((resolve) => setTimeout(resolve, 500));
+            await new Promise((done) => setTimeout(done, 500));
           }
           return { ok: false, clicked: true, error: 'The company never confirmed it. Open the tab and check whether it went through.' };
         };
@@ -3258,45 +3454,117 @@ export default defineContentScript({
               if (statusEl) statusEl.textContent = 'Reserving this application safely...';
               pendingRecoveryGate.beginLocal(applicationId);
               try {
-                const started = await new Promise<{ ok?: boolean; error?: string }>((resolve) => {
+                const activationRequestClock = beginSubmissionActivationRequest();
+                const started = await new Promise<({ ok?: boolean; error?: string } & Partial<ExtensionSubmissionActivation>)>((resolve) => {
                   chrome.runtime.sendMessage({
                     type: 'EXTENSION_SUBMISSION_START',
-                    payload: { applicationId, authorization: 'standing_consent', attendedHandoff },
+                    payload: {
+                      applicationId,
+                      authorization: 'standing_consent',
+                      attendedHandoff,
+                      documentId: submissionActivationDocumentId,
+                      activationRequestClock,
+                    },
                   }, (response) => resolve(response ?? { ok: false, error: 'Litos did not respond.' }));
                 });
-                const safeAfterReservation = target.isConnected && isElementVisible(target) && !document.hidden && document.hasFocus()
+                const safeAfterReservation = () => target.isConnected && isElementVisible(target) && !document.hidden && document.hasFocus()
                   && !captchaWaiting && !detectChallenge().waiting && !hasEmptyRequiredFields()
                   && !hasApplicationDecisionControls()
                   && !submissionGuard()
                   && findProgrammaticFinalSubmitButton(fillResult.ats_name) === target
                   && (fillResult.ats_name !== 'workday' || workdayProgrammaticFinalSubmitAllowed(target));
-                if (started.ok && safeAfterReservation) {
+                const boundActivation = started.ok
+                  ? bindExtensionSubmissionActivationToDocument(
+                    started,
+                    applicationId,
+                    activationRequestClock,
+                    currentSubmissionActivationClock(),
+                  )
+                  : null;
+                const cancelAutomaticReservation = (
+                  activation: unknown,
+                  error: string,
+                  confirmationText: string,
+                ): void => {
+                  if (statusEl) statusEl.textContent = error;
+                  chrome.runtime.sendMessage({
+                    type: 'EXTENSION_SUBMISSION_OUTCOME',
+                    payload: {
+                      applicationId,
+                      activation,
+                      outcome: 'cancelled',
+                      finalUrl: window.location.href,
+                      confirmationText,
+                    },
+                  }).catch(() => {});
+                  reportEvent(false);
+                };
+                if (started.ok && safeAfterReservation() && boundActivation?.ok) {
                   if (statusEl) statusEl.textContent = `${actionLabel}...`;
                   const baselineTexts = new Set(visibleSubmissionOutcomeTexts());
-                  if (!clickAtsSubmitIfAllowed(
-                    fillResult.ats_name,
-                    target,
-                    () => monitorExtensionSubmission(applicationId, baselineTexts),
-                  )) {
-                    if (statusEl) statusEl.textContent = 'This application needs your direct confirmation. Nothing was sent.';
-                    reportEvent(false);
-                    return;
-                  }
-                  reportEvent(true);
-                } else {
-                  if (statusEl) statusEl.textContent = started.error ?? 'The page changed before Litos could submit. Check it yourself.';
-                  if (started.ok) {
-                    chrome.runtime.sendMessage({
-                      type: 'EXTENSION_SUBMISSION_OUTCOME',
-                      payload: {
-                        applicationId,
-                        outcome: 'cancelled',
-                        finalUrl: window.location.href,
-                        confirmationText: 'The final safety check failed after reservation. Nothing was clicked.',
+                  await new Promise<void>((validationFinished) => {
+                    validateBackgroundGenerationForEmployerClick(
+                      boundActivation.activation,
+                      applicationId,
+                      (backgroundValidation) => {
+                        if (!backgroundValidation.ok) {
+                          cancelAutomaticReservation(
+                            boundActivation.activation,
+                            backgroundValidation.error
+                              ?? 'Litos could not verify the current browser send permission. Nothing was sent.',
+                            'The background activation generation changed before the final click. Nothing was clicked.',
+                          );
+                          validationFinished();
+                          return;
+                        }
+                        if (!safeAfterReservation()) {
+                          cancelAutomaticReservation(
+                            boundActivation.activation,
+                            'The page changed before Litos could submit. Check it yourself.',
+                            'The final page safety check failed after background validation. Nothing was clicked.',
+                          );
+                          validationFinished();
+                          return;
+                        }
+                        // Recheck the document deadline in the current worker's validation callback.
+                        // No await or queued task may occur before clickAtsSubmitIfAllowed.
+                        const clickResult = runExtensionSubmissionClickAfterBackgroundValidation({
+                          backgroundValidation,
+                          activation: boundActivation.activation,
+                          expectedApplicationId: applicationId,
+                          currentClock: currentSubmissionActivationClock(),
+                          click: () => clickAtsSubmitIfAllowed(fillResult.ats_name, target),
+                          clickRejectedError: 'This application needs your direct confirmation. Nothing was sent.',
+                        });
+                        if (clickResult.ok) {
+                          monitorExtensionSubmission(clickResult.activation, baselineTexts);
+                          reportEvent(true);
+                        } else {
+                          cancelAutomaticReservation(
+                            boundActivation.activation,
+                            clickResult.error,
+                            'The final employer control was not eligible for an automatic click. Nothing was clicked.',
+                          );
+                        }
+                        validationFinished();
                       },
-                    }).catch(() => {});
+                    );
+                  });
+                } else {
+                  if (statusEl) statusEl.textContent = boundActivation && !boundActivation.ok
+                    ? boundActivation.error
+                    : started.error ?? 'The page changed before Litos could submit. Check it yourself.';
+                  if (started.ok) {
+                    cancelAutomaticReservation(
+                      boundActivation?.ok ? boundActivation.activation : started,
+                      boundActivation && !boundActivation.ok
+                        ? boundActivation.error
+                        : 'The page changed before Litos could submit. Check it yourself.',
+                      'The final safety check failed after reservation. Nothing was clicked.',
+                    );
+                  } else {
+                    reportEvent(false);
                   }
-                  reportEvent(false);
                 }
               } finally {
                 pendingRecoveryGate.endLocal(applicationId);

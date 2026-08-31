@@ -164,7 +164,7 @@ describe('attended handoff packet audit', () => {
     expect(fetchBinding).toMatch(/packetVersion: audit\.packet_version[\s\S]*?auditDigest: audit\.audit_digest[\s\S]*?pdfSha256: audit\.bindings\.pdf\.sha256/);
     const dashboard = background.slice(background.indexOf("message?.type !== 'LITOS_SUBMIT_APPLICATION'"));
     expect(dashboard).toMatch(/verifiedResume\.packet_audit\?\.packet_version !== exactResume\.packet_audit\?\.packet_version/);
-    expect(dashboard).toMatch(/packetVersion: exactResume\.packet_audit!\.packet_version[\s\S]*?setPendingSubmission/);
+    expect(dashboard).toMatch(/reservePendingSubmission\([\s\S]*?packetVersion: exactResume\.packet_audit!\.packet_version/);
     const initialFill = content.slice(content.indexOf('const initialPacketAudit'), content.indexOf('const FILL_INACTIVITY_TIMEOUT_MS'));
     expect(initialFill).toMatch(/if \(!handoffApplicationId\)[\s\S]*?APPLICATION_PACKET_REVIEW_REQUIRED[\s\S]*?return;/);
     expect(content.indexOf('APPLICATION_PACKET_REVIEW_REQUIRED'))
