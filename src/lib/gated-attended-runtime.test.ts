@@ -54,7 +54,7 @@ describe('Jobvite and iCIMS attended runtime wiring', () => {
       background.indexOf("case 'EXTENSION_SUBMISSION_OUTCOME'"),
     );
     expect(start).toMatch(/gatedAttendedIdentity\(currentUrl\)[\s\S]*?strictReceipt/);
-    expect(content).toMatch(/monitorExtensionSubmission\([\s\S]*?pending\.applicationId[\s\S]*?pending\.strictReceipt/);
+    expect(content).toMatch(/monitorExtensionSubmission\([\s\S]*?pending,[\s\S]*?pending\.strictReceipt/);
     expect(content).toMatch(/exactGatedAttendedReceipt\([\s\S]*?return receipt \? \{ kind: 'confirmed' \} : null/);
   });
 
@@ -117,7 +117,7 @@ describe('Jobvite and iCIMS attended runtime wiring', () => {
     const packet = background.slice(background.indexOf("case 'GET_APPLICATION_HANDOFF_PACKET'"));
     expect(packet).toMatch(/packetAuthEpoch[\s\S]*?authEpoch: packetAuthEpoch[\s\S]*?storeHandoffPacketBinding[\s\S]*?packetAuthEpoch/);
     const dashboard = background.slice(background.indexOf("if (message?.type !== 'LITOS_SUBMIT_APPLICATION')"));
-    expect(dashboard).toMatch(/dashboardAuthEpoch[\s\S]*?fetchAndBindHandoffPacket[\s\S]*?PREPARE_SUBMISSION_FROM_DASHBOARD[\s\S]*?extension-start[\s\S]*?SUBMIT_FROM_DASHBOARD[\s\S]*?postExtensionOutcome/);
+    expect(dashboard).toMatch(/dashboardAuthEpoch[\s\S]*?fetchAndBindHandoffPacket[\s\S]*?PREPARE_SUBMISSION_FROM_DASHBOARD[\s\S]*?extension-start[\s\S]*?SUBMIT_FROM_DASHBOARD[\s\S]*?settlePendingSubmissionOutcome/);
     expect(dashboard.match(/assertCurrentAuthEpoch\(dashboardAuthEpoch\)/g)?.length ?? 0).toBeGreaterThanOrEqual(10);
     expect(background).toMatch(/setPendingSubmission[\s\S]*?pendingSubmissionMutations\.run/);
     expect(background).toMatch(/applicationTabMutations\.run\(APPLICATION_TAB_MUTATION_KEY[\s\S]*?litos_application_tabs/);

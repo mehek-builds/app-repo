@@ -3,70 +3,98 @@ import { describe, expect, it } from 'vitest';
 import {
   EXPIRED_SUBMISSION_ACTIVATION_MESSAGE,
   EXTENSION_SUBMISSION_ACTIVATION_CONTRACT,
+  EXTENSION_SUBMISSION_ACTIVATION_SAFETY_MARGIN_MS,
   INVALID_SUBMISSION_ACTIVATION_MESSAGE,
+  bindExtensionSubmissionActivation,
+  sameExtensionSubmissionActivationIdentity,
   verifyExtensionSubmissionActivation,
   verifyExtensionSubmissionStartResponse,
-  type ExtensionSubmissionActivation,
+  type ExtensionSubmissionActivationIdentity,
+  type ExtensionSubmissionActivationRequestClock,
 } from './submission-activation';
 
 const applicationId = '123e4567-e89b-42d3-a456-426614174000';
-const activation: ExtensionSubmissionActivation = {
+const runtimeId = '623e4567-e89b-42d3-a456-426614174000';
+const identity: ExtensionSubmissionActivationIdentity = {
   applicationId,
   claimId: '223e4567-e89b-42d3-a456-426614174000',
   activationId: '323e4567-e89b-52d3-a456-426614174000',
   activationLeaseId: '423e4567-e89b-52d3-a456-426614174000',
   activationExpiresAt: '2026-08-31T10:03:00.000Z',
+  activationServerNow: '2026-08-31T10:00:00.000Z',
 };
+const requestClock: ExtensionSubmissionActivationRequestClock = {
+  runtimeId,
+  timeOriginMs: 1_000_000,
+  requestStartedAtMs: 1_000,
+};
+const currentClock = (nowMs: number, overrides: Partial<{
+  runtimeId: string;
+  timeOriginMs: number;
+}> = {}) => ({
+  runtimeId: overrides.runtimeId ?? runtimeId,
+  timeOriginMs: overrides.timeOriginMs ?? requestClock.timeOriginMs,
+  nowMs,
+});
+const startResponse = (overrides: Record<string, unknown> = {}) => ({
+  activation_contract: EXTENSION_SUBMISSION_ACTIVATION_CONTRACT,
+  application_id: identity.applicationId,
+  claim_id: identity.claimId,
+  activation_id: identity.activationId,
+  activation_lease_id: identity.activationLeaseId,
+  activation_expires_at: identity.activationExpiresAt,
+  activation_server_now: identity.activationServerNow,
+  ...overrides,
+});
 
 describe('extension submission activation', () => {
   it('pins the client request to the server lease contract', () => {
     expect(EXTENSION_SUBMISSION_ACTIVATION_CONTRACT).toBe('server-lease-v1');
   });
 
-  it('accepts and preserves every exact backend identifier', () => {
-    const result = verifyExtensionSubmissionStartResponse({
-      activation_contract: EXTENSION_SUBMISSION_ACTIVATION_CONTRACT,
-      application_id: activation.applicationId,
-      claim_id: activation.claimId,
-      activation_id: activation.activationId,
-      activation_lease_id: activation.activationLeaseId,
-      activation_expires_at: activation.activationExpiresAt,
-    }, applicationId, Date.parse('2026-08-31T10:00:00.000Z'));
+  it('subtracts the complete request time and the documented safety margin', () => {
+    const result = verifyExtensionSubmissionStartResponse(
+      startResponse(),
+      applicationId,
+      requestClock,
+      currentClock(5_000),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
 
-    expect(result).toEqual({
-      ok: true,
-      activation,
-      expiresAtMs: Date.parse(activation.activationExpiresAt),
+    const serverLeaseMs = 3 * 60_000;
+    expect(result.activation).toEqual({
+      ...identity,
+      monotonicProof: {
+        runtimeId,
+        timeOriginMs: requestClock.timeOriginMs,
+        requestStartedAtMs: requestClock.requestStartedAtMs,
+        usableUntilMs: requestClock.requestStartedAtMs
+          + serverLeaseMs
+          - EXTENSION_SUBMISSION_ACTIVATION_SAFETY_MARGIN_MS,
+      },
     });
-  });
-
-  it.each([undefined, 'legacy-local-window-v1'])('rejects an unrecognized server contract: %s', (contract) => {
-    expect(verifyExtensionSubmissionStartResponse({
-      activation_contract: contract,
-      application_id: activation.applicationId,
-      claim_id: activation.claimId,
-      activation_id: activation.activationId,
-      activation_lease_id: activation.activationLeaseId,
-      activation_expires_at: activation.activationExpiresAt,
-    }, applicationId, Date.parse('2026-08-31T10:00:00.000Z'))).toEqual({
-      ok: false,
-      code: 'submission_activation_invalid',
-      error: INVALID_SUBMISSION_ACTIVATION_MESSAGE,
-    });
+    expect(result.remainingBudgetMs).toBe(
+      serverLeaseMs
+      - (5_000 - requestClock.requestStartedAtMs)
+      - EXTENSION_SUBMISSION_ACTIVATION_SAFETY_MARGIN_MS,
+    );
   });
 
   it.each([
-    ['missing activation id', { ...activation, activationId: undefined }],
-    ['missing lease id', { ...activation, activationLeaseId: undefined }],
-    ['wrong activation id', { ...activation, activationId: 'not-an-activation-id' }],
-    ['upper-case activation id', { ...activation, activationId: activation.activationId.toUpperCase() }],
-    ['mismatched application', { ...activation, applicationId: '523e4567-e89b-42d3-a456-426614174000' }],
-    ['non-canonical expiry', { ...activation, activationExpiresAt: '2026-08-31T10:03:00Z' }],
-  ])('rejects %s before click', (_label, candidate) => {
-    expect(verifyExtensionSubmissionActivation(
-      candidate,
+    ['missing server time', { activation_server_now: undefined }],
+    ['non-canonical server time', { activation_server_now: '2026-08-31T10:00:00Z' }],
+    ['server time after expiry', { activation_server_now: identity.activationExpiresAt }],
+    ['missing activation id', { activation_id: undefined }],
+    ['wrong activation id', { activation_id: 'not-an-activation-id' }],
+    ['upper-case activation id', { activation_id: identity.activationId.toUpperCase() }],
+    ['mismatched application', { application_id: '523e4567-e89b-42d3-a456-426614174000' }],
+  ])('rejects %s before creating a click budget', (_label, overrides) => {
+    expect(verifyExtensionSubmissionStartResponse(
+      startResponse(overrides),
       applicationId,
-      Date.parse('2026-08-31T10:00:00.000Z'),
+      requestClock,
+      currentClock(5_000),
     )).toEqual({
       ok: false,
       code: 'submission_activation_invalid',
@@ -74,28 +102,95 @@ describe('extension submission activation', () => {
     });
   });
 
-  it('rejects at the server expiry and never extends it to the local five-minute window', () => {
-    const justBefore = verifyExtensionSubmissionActivation(
-      activation,
+  it.each([undefined, 'legacy-local-window-v1'])('rejects an unrecognized server contract: %s', (contract) => {
+    expect(verifyExtensionSubmissionStartResponse(
+      startResponse({ activation_contract: contract }),
       applicationId,
-      Date.parse('2026-08-31T10:02:59.999Z'),
-    );
-    expect(justBefore.ok).toBe(true);
+      requestClock,
+      currentClock(5_000),
+    )).toEqual({
+      ok: false,
+      code: 'submission_activation_invalid',
+      error: INVALID_SUBMISSION_ACTIVATION_MESSAGE,
+    });
+  });
 
-    for (const now of [
-      '2026-08-31T10:03:00.000Z',
-      '2026-08-31T10:04:59.999Z',
+  it('fails closed when the request consumes the conservative lease budget', () => {
+    expect(bindExtensionSubmissionActivation(
+      identity,
+      applicationId,
+      requestClock,
+      currentClock(180_000),
+    )).toEqual({
+      ok: false,
+      code: 'submission_activation_expired',
+      error: EXPIRED_SUBMISSION_ACTIVATION_MESSAGE,
+    });
+  });
+
+  it('checks performance time immediately against the bound deadline', () => {
+    const bound = bindExtensionSubmissionActivation(
+      identity,
+      applicationId,
+      requestClock,
+      currentClock(5_000),
+    );
+    expect(bound.ok).toBe(true);
+    if (!bound.ok) return;
+    const deadline = bound.activation.monotonicProof.usableUntilMs;
+
+    expect(verifyExtensionSubmissionActivation(
+      bound.activation,
+      applicationId,
+      currentClock(deadline - 0.001),
+    ).ok).toBe(true);
+    expect(verifyExtensionSubmissionActivation(
+      bound.activation,
+      applicationId,
+      currentClock(deadline),
+    )).toEqual({
+      ok: false,
+      code: 'submission_activation_expired',
+      error: EXPIRED_SUBMISSION_ACTIVATION_MESSAGE,
+    });
+  });
+
+  it('fails closed after a reload, navigation, or loss of monotonic runtime state', () => {
+    const bound = bindExtensionSubmissionActivation(
+      identity,
+      applicationId,
+      requestClock,
+      currentClock(5_000),
+    );
+    expect(bound.ok).toBe(true);
+    if (!bound.ok) return;
+
+    for (const clock of [
+      currentClock(6_000, { runtimeId: '723e4567-e89b-42d3-a456-426614174000' }),
+      currentClock(6_000, { timeOriginMs: requestClock.timeOriginMs + 1 }),
     ]) {
       expect(verifyExtensionSubmissionActivation(
-        activation,
+        bound.activation,
         applicationId,
-        Date.parse(now),
+        clock,
       )).toEqual({
         ok: false,
-        code: 'submission_activation_expired',
-        error: EXPIRED_SUBMISSION_ACTIVATION_MESSAGE,
+        code: 'submission_activation_invalid',
+        error: INVALID_SUBMISSION_ACTIVATION_MESSAGE,
       });
     }
+  });
+
+  it('compares complete activation identity, including same-app retries', () => {
+    expect(sameExtensionSubmissionActivationIdentity(identity, { ...identity })).toBe(true);
+    expect(sameExtensionSubmissionActivationIdentity(identity, {
+      ...identity,
+      activationId: '523e4567-e89b-52d3-a456-426614174000',
+    })).toBe(false);
+    expect(sameExtensionSubmissionActivationIdentity(identity, {
+      ...identity,
+      activationServerNow: '2026-08-31T10:00:01.000Z',
+    })).toBe(false);
   });
 });
 
@@ -103,34 +198,19 @@ describe('extension activation runtime wiring', () => {
   const background = readFileSync(new URL('../entrypoints/background.ts', import.meta.url), 'utf8');
   const content = readFileSync(new URL('../entrypoints/content.ts', import.meta.url), 'utf8');
 
-  it('requires the full server activation before persisting either start path', () => {
+  it('starts a monotonic budget before both backend requests', () => {
     const directStart = background.slice(
       background.indexOf("case 'EXTENSION_SUBMISSION_START'"),
       background.indexOf("case 'EXTENSION_SUBMISSION_OUTCOME'"),
     );
     const dashboardStart = background.slice(background.indexOf("if (message?.type !== 'LITOS_SUBMIT_APPLICATION')"));
 
-    expect(directStart).toMatch(/verifyExtensionSubmissionStartResponse\(body, applicationId\)[\s\S]*?\.\.\.activation[\s\S]*?setPendingSubmission/);
-    expect(directStart).toMatch(/activation_contract: EXTENSION_SUBMISSION_ACTIVATION_CONTRACT[\s\S]*?authorization/);
-    expect(directStart).toMatch(/sendResponse\(\{ ok: true, \.\.\.activation \}\)/);
-    expect(dashboardStart).toMatch(/verifyExtensionSubmissionStartResponse\(started, applicationId\)[\s\S]*?payload: \{ applicationId, questions: \[\], activation \}/);
-    expect(dashboardStart).toMatch(/activation_contract: EXTENSION_SUBMISSION_ACTIVATION_CONTRACT[\s\S]*?authorization: 'user_initiated'/);
+    expect(directStart).toMatch(/activationRequestClock = backgroundActivationRequestClock\(\)[\s\S]*?timeoutBackendFetch[\s\S]*?verifyExtensionSubmissionStartResponse/);
+    expect(dashboardStart).toMatch(/GET_SUBMISSION_ACTIVATION_REQUEST_CLOCK[\s\S]*?activationRequestClock = backgroundActivationRequestClock\(\)[\s\S]*?timeoutBackendFetch/);
+    expect(dashboardStart).toMatch(/activationRequestClock: contentActivationRequestClock/);
   });
 
-  it('binds every outcome to the same exact activation contract', () => {
-    const outcome = background.slice(
-      background.indexOf('async function postExtensionOutcome'),
-      background.indexOf('async function closePendingSubmission'),
-    );
-
-    expect(outcome).toMatch(/activation_contract: EXTENSION_SUBMISSION_ACTIVATION_CONTRACT/);
-    expect(outcome).toMatch(/claim_id: pending\.claimId/);
-    expect(outcome).toMatch(/activation_id: pending\.activationId/);
-    expect(outcome).toMatch(/activation_lease_id: pending\.activationLeaseId/);
-    expect(outcome).toMatch(/activation_expires_at: pending\.activationExpiresAt/);
-  });
-
-  it('checks the exact server activation immediately before every employer click path', () => {
+  it('checks a document-local performance clock immediately before every employer click path', () => {
     const manual = content.slice(
       content.indexOf('function armManualSubmissionTracking'),
       content.indexOf('const freeSubmissionOutcomeButtons'),
@@ -144,9 +224,20 @@ describe('extension activation runtime wiring', () => {
       content.indexOf('Workday account-creation speed-up'),
     );
 
-    expect(manual).toMatch(/verifyExtensionSubmissionActivation\(response, applicationId\)[\s\S]*?submitButton\.click\(\)/);
-    expect(dashboard).toMatch(/verifyExtensionSubmissionActivation\(activation, resume\.resume_id\)[\s\S]*?clickDashboardSubmitIfAllowed/);
-    expect(automatic).toMatch(/verifyExtensionSubmissionActivation\(started, applicationId\)[\s\S]*?clickAtsSubmitIfAllowed/);
+    expect(manual).toMatch(/verifyExtensionSubmissionActivation\([\s\S]*?currentSubmissionActivationClock\(\)[\s\S]*?submitButton\.click\(\)/);
+    expect(dashboard).toMatch(/verifyExtensionSubmissionActivation\([\s\S]*?currentSubmissionActivationClock\(\)[\s\S]*?clickDashboardSubmitIfAllowed/);
+    expect(automatic).toMatch(/verifyExtensionSubmissionActivation\([\s\S]*?currentSubmissionActivationClock\(\)[\s\S]*?clickAtsSubmitIfAllowed/);
+  });
+
+  it('sends complete activation identity on every outcome path', () => {
+    const outcomeMessages = [...content.matchAll(/type: 'EXTENSION_SUBMISSION_OUTCOME'/g)];
+    expect(outcomeMessages.length).toBeGreaterThanOrEqual(4);
+    for (const match of outcomeMessages) {
+      const message = content.slice(match.index, match.index + 900);
+      expect(message).toMatch(/\bactivation(?:\s*:|,)/);
+    }
+    expect(background).toMatch(/extensionSubmissionActivationIdentity\(message\.payload\?\.activation\)/);
+    expect(background).toMatch(/settlePendingSubmissionOutcome/);
   });
 
   it('uses the five-minute age only for post-click confirmation monitoring', () => {

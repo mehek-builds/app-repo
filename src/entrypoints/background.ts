@@ -105,9 +105,13 @@ import {
 } from '../lib/free-submission-monitor';
 import {
   EXTENSION_SUBMISSION_ACTIVATION_CONTRACT,
+  extensionSubmissionActivationIdentity,
   verifyExtensionSubmissionStartResponse,
   type ExtensionSubmissionActivation,
+  type ExtensionSubmissionActivationIdentity,
+  type ExtensionSubmissionActivationRequestClock,
 } from '../lib/submission-activation';
+import { settlePendingExtensionSubmission } from '../lib/pending-extension-submission';
 
 // Latched off once the backend reports onboarding complete. Service-worker memory is fine for
 // this: the worst case on a restart is one wasted 403, which re-latches it immediately.
@@ -146,6 +150,23 @@ const FREE_SUBMISSION_MONITOR_PREFIX = 'litos_pending_free_submission';
 const PENDING_PREMIUM_ACTION_KEY = 'litos_pending_premium_action';
 const PENDING_PREMIUM_RETRY_FOCUS_KEY = 'litos_pending_premium_retry_focus';
 const PREMIUM_RETRY_FOCUS_TTL_MS = 5 * 60_000;
+const backgroundActivationRuntimeId = crypto.randomUUID();
+
+function backgroundActivationRequestClock(): ExtensionSubmissionActivationRequestClock {
+  return {
+    runtimeId: backgroundActivationRuntimeId,
+    timeOriginMs: performance.timeOrigin,
+    requestStartedAtMs: performance.now(),
+  };
+}
+
+function backgroundActivationCurrentClock() {
+  return {
+    runtimeId: backgroundActivationRuntimeId,
+    timeOriginMs: performance.timeOrigin,
+    nowMs: performance.now(),
+  };
+}
 
 type PendingPremiumRetryFocus = {
   actionNonce: string;
@@ -707,12 +728,40 @@ async function postExtensionOutcome(pending: PendingExtensionSubmission, outcome
   if (outcome === 'confirmed') void trackExtensionEvent('application_submission_completed');
 }
 
+async function settlePendingSubmissionOutcome(
+  tabId: number,
+  expected: ExtensionSubmissionActivationIdentity,
+  outcome: 'confirmed' | 'failed' | 'unknown' | 'cancelled',
+  finalUrl: string,
+  confirmationText?: string,
+  forceUnknownIfConfirmationExpired = false,
+) {
+  let confirmationExpired = false;
+  const settlement = await settlePendingExtensionSubmission({
+    queue: pendingSubmissionMutations,
+    mutationKey: PENDING_SUBMISSION_MUTATION_KEY,
+    expected,
+    read: () => pendingSubmission(tabId),
+    clear: () => chrome.storage.session.remove(pendingSubmissionKey(tabId)),
+    post: (pending) => {
+      confirmationExpired = forceUnknownIfConfirmationExpired
+        && Date.now() - pending.startedAt > SUBMISSION_CONFIRMATION_MAX_AGE_MS;
+      return postExtensionOutcome(
+        pending,
+        confirmationExpired ? 'unknown' : outcome,
+        finalUrl,
+        confirmationText,
+      );
+    },
+  });
+  return { settlement, confirmationExpired };
+}
+
 async function closePendingSubmission(tabId: number, finalUrl = 'https://trylitos.com') {
   const pending = await pendingSubmission(tabId);
   if (!pending) return;
   try {
-    await postExtensionOutcome(pending, 'unknown', finalUrl);
-    await setPendingSubmission(tabId, null);
+    await settlePendingSubmissionOutcome(tabId, pending, 'unknown', finalUrl);
   } catch {
     // Keep the claim in session storage. A later page wake can retry the safe unknown outcome.
   }
@@ -2254,6 +2303,7 @@ export default defineBackground(() => {
             const currentUrl = sender.url ?? '';
             if (!currentUrl) throw new Error('Litos could not verify the current application page.');
             assertCurrentAuthEpoch(submissionAuthEpoch);
+            const activationRequestClock = backgroundActivationRequestClock();
             const response = await timeoutBackendFetch(`/applications/${applicationId}/submission/extension-start`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -2269,7 +2319,12 @@ export default defineBackground(() => {
             if (!response.ok) {
               throw new Error(typeof body?.error === 'string' ? body.error : 'Litos could not reserve this application.');
             }
-            const verifiedStart = verifyExtensionSubmissionStartResponse(body, applicationId);
+            const verifiedStart = verifyExtensionSubmissionStartResponse(
+              body,
+              applicationId,
+              activationRequestClock,
+              backgroundActivationCurrentClock(),
+            );
             if (!verifiedStart.ok) throw new Error(verifiedStart.error);
             const activation = verifiedStart.activation;
             const gatedIdentity = gatedAttendedIdentity(currentUrl);
@@ -2301,19 +2356,19 @@ export default defineBackground(() => {
           sendResponse({ ok: false, error: 'Litos could not identify this application tab.' });
           return false;
         }
-        pendingSubmission(tabId).then(async (pending) => {
-          if (!pending || pending.applicationId !== String(message.payload?.applicationId ?? '')) {
-            throw new Error('This application is no longer waiting for a confirmation.');
+        Promise.resolve().then(async () => {
+          const applicationId = String(message.payload?.applicationId ?? '');
+          const expected = extensionSubmissionActivationIdentity(message.payload?.activation);
+          if (!expected || expected.applicationId !== applicationId) {
+            throw new Error('This confirmation has no complete submission activation.');
           }
-          if (pending.frameId !== (sender.frameId ?? 0)) throw new Error('This confirmation came from a different page frame.');
-          if (Date.now() - pending.startedAt > SUBMISSION_CONFIRMATION_MAX_AGE_MS) {
-            await postExtensionOutcome(pending, 'unknown', String(sender.tab?.url ?? 'https://trylitos.com'));
-            await setPendingSubmission(tabId, null);
-            sendResponse({ ok: false, error: 'The confirmation window expired. Check the employer portal.' });
-            return;
+          const pending = await pendingSubmission(tabId);
+          if (!pending || pending.frameId !== (sender.frameId ?? 0)) {
+            throw new Error('This confirmation came from a different page frame.');
           }
-          await postExtensionOutcome(
-            pending,
+          const result = await settlePendingSubmissionOutcome(
+            tabId,
+            expected,
             message.payload?.outcome === 'confirmed'
               ? 'confirmed'
               : message.payload?.outcome === 'failed'
@@ -2323,8 +2378,15 @@ export default defineBackground(() => {
                   : 'unknown',
             String(message.payload?.finalUrl ?? sender.tab?.url ?? 'https://trylitos.com'),
             typeof message.payload?.confirmationText === 'string' ? message.payload.confirmationText : undefined,
+            true,
           );
-          await setPendingSubmission(tabId, null);
+          if (result.settlement === 'stale') {
+            throw new Error('This application is no longer waiting for that confirmation.');
+          }
+          if (result.confirmationExpired) {
+            sendResponse({ ok: false, error: 'The confirmation window expired. Check the employer portal.' });
+            return;
+          }
           sendResponse({ ok: true });
         }).catch((error) => sendResponse({ ok: false, error: error instanceof Error ? error.message : 'Could not record the outcome.' }));
         return true;
@@ -3786,6 +3848,14 @@ export default defineBackground(() => {
           pdfSizeBytes: exactResume.packet_audit!.bindings.pdf.sizeBytes,
         }, dashboardAuthEpoch);
         assertCurrentAuthEpoch(dashboardAuthEpoch);
+        const contentActivationRequestClock = await chrome.tabs.sendMessage(tabId, {
+          type: 'GET_SUBMISSION_ACTIVATION_REQUEST_CLOCK',
+        }, { frameId }) as ExtensionSubmissionActivationRequestClock | null;
+        assertCurrentAuthEpoch(dashboardAuthEpoch);
+        if (!contentActivationRequestClock) {
+          throw new Error('The application page could not start a safe send timer. Nothing was sent.');
+        }
+        const activationRequestClock = backgroundActivationRequestClock();
         const startResponse = await timeoutBackendFetch(`/applications/${applicationId}/submission/extension-start`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -3801,7 +3871,12 @@ export default defineBackground(() => {
         if (!startResponse.ok) {
           throw new Error(typeof started?.error === 'string' ? started.error : 'Could not reserve this application.');
         }
-        const verifiedStart = verifyExtensionSubmissionStartResponse(started, applicationId);
+        const verifiedStart = verifyExtensionSubmissionStartResponse(
+          started,
+          applicationId,
+          activationRequestClock,
+          backgroundActivationCurrentClock(),
+        );
         if (!verifiedStart.ok) throw new Error(verifiedStart.error);
         const activation = verifiedStart.activation;
         const pending: PendingExtensionSubmission = {
@@ -3817,17 +3892,22 @@ export default defineBackground(() => {
           assertCurrentAuthEpoch(dashboardAuthEpoch);
           const result = await chrome.tabs.sendMessage(tabId, {
             type: 'SUBMIT_FROM_DASHBOARD',
-            payload: { applicationId, questions: [], activation },
+            payload: {
+              applicationId,
+              questions: [],
+              activation,
+              activationRequestClock: contentActivationRequestClock,
+            },
           }, { frameId }) as { ok?: boolean; clicked?: boolean; error?: string; finalUrl?: string; confirmationText?: string };
           assertCurrentAuthEpoch(dashboardAuthEpoch);
-          await postExtensionOutcome(
+          await settlePendingSubmissionOutcome(
+            tabId,
             pending,
             result?.ok ? 'confirmed' : result?.clicked ? 'unknown' : 'cancelled',
             result?.finalUrl ?? sender.url ?? 'https://trylitos.com',
             result?.confirmationText ?? result?.error,
           );
           assertCurrentAuthEpoch(dashboardAuthEpoch);
-          await setPendingSubmission(tabId, null);
           if (!result?.ok) {
             sendResponse({ error: result?.error ?? 'The company never confirmed it arrived.' });
             return;
@@ -3835,8 +3915,12 @@ export default defineBackground(() => {
           sendResponse({ ok: true });
         } catch (error) {
           try {
-            await postExtensionOutcome(pending, 'unknown', sender.url ?? 'https://trylitos.com');
-            await setPendingSubmission(tabId, null);
+            await settlePendingSubmissionOutcome(
+              tabId,
+              pending,
+              'unknown',
+              sender.url ?? 'https://trylitos.com',
+            );
           } catch {
             // Retain the pending claim so a later tab wake can safely reconcile it.
           }

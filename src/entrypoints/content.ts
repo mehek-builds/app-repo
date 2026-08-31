@@ -11,8 +11,11 @@ import { isLikelyApplicationForm, extractGenericJdText, getGenericJobDetails, fi
 import { atsCanAutoSubmit, clickAtsSubmitIfAllowed, clickDashboardSubmitIfAllowed, isAtsApplicationPage, extractAtsJdText, fillAtsApplication, gatedPortalNotice, specForCurrentPage } from '../lib/adapters/ats-2026-07';
 import { PendingSubmissionRecoveryGate } from '../lib/submission-recovery';
 import {
+  bindExtensionSubmissionActivation,
   verifyExtensionSubmissionActivation,
   type ExtensionSubmissionActivation,
+  type ExtensionSubmissionActivationIdentity,
+  type ExtensionSubmissionActivationRequestClock,
 } from '../lib/submission-activation';
 import { COLOR, DISMISS_MS, FONT, OVERLAY, RADIUS, SHADOW, markSvg } from '../styles/tokens';
 
@@ -194,6 +197,17 @@ export default defineContentScript({
   runAt: 'document_idle',
   main() {
     installPersistentBadge();
+    const submissionActivationRuntimeId = crypto.randomUUID();
+    const beginSubmissionActivationRequest = (): ExtensionSubmissionActivationRequestClock => ({
+      runtimeId: submissionActivationRuntimeId,
+      timeOriginMs: performance.timeOrigin,
+      requestStartedAtMs: performance.now(),
+    });
+    const currentSubmissionActivationClock = () => ({
+      runtimeId: submissionActivationRuntimeId,
+      timeOriginMs: performance.timeOrigin,
+      nowMs: performance.now(),
+    });
 
     async function serverCaptchaResumeEnabled(): Promise<boolean> {
       return new Promise((resolve) => {
@@ -248,12 +262,13 @@ export default defineContentScript({
     }
 
     function monitorExtensionSubmission(
-      applicationId: string,
+      activation: ExtensionSubmissionActivationIdentity,
       baselineTexts: ReadonlySet<string> = new Set(),
       strictReceipt?: { family: GatedAttendedFamily; startedUrl: string },
     ) {
-      if (monitoredSubmissionIds.has(applicationId)) return;
-      monitoredSubmissionIds.add(applicationId);
+      const applicationId = activation.applicationId;
+      if (monitoredSubmissionIds.has(activation.activationId)) return;
+      monitoredSubmissionIds.add(activation.activationId);
       const readText = () => visibleSubmissionOutcomeTexts()
         .filter((text) => !baselineTexts.has(text))
         .join(' ');
@@ -272,7 +287,13 @@ export default defineContentScript({
         }
         chrome.runtime.sendMessage({
           type: 'EXTENSION_SUBMISSION_OUTCOME',
-          payload: { applicationId, outcome, finalUrl: window.location.href, confirmationText },
+          payload: {
+            applicationId,
+            activation,
+            outcome,
+            finalUrl: window.location.href,
+            confirmationText,
+          },
         }, (response: { ok?: boolean } | undefined) => {
           if (!response?.ok && attempt < 4) window.setTimeout(() => report(outcome, confirmationText, attempt + 1), 1000 * (attempt + 1));
         });
@@ -335,6 +356,7 @@ export default defineContentScript({
         pendingRecoveryGate.beginLocal(applicationId);
         const baselineTexts = new Set(visibleSubmissionOutcomeTexts());
         const submissionStartedUrl = window.location.href;
+        const activationRequestClock = beginSubmissionActivationRequest();
         chrome.runtime.sendMessage({
           type: 'EXTENSION_SUBMISSION_START',
           payload: { applicationId, authorization: 'user_initiated', attendedHandoff },
@@ -345,6 +367,12 @@ export default defineContentScript({
             if (statusEl) statusEl.textContent = response?.error ?? 'Litos could not safely track this submission. Try again.';
             return;
           }
+          const boundActivation = bindExtensionSubmissionActivation(
+            response,
+            applicationId,
+            activationRequestClock,
+            currentSubmissionActivationClock(),
+          );
           const challengeNow = captchaWaiting || detectChallenge().waiting;
           const replayGuardError = submissionGuard();
           const replaySafe = submitButton.isConnected
@@ -355,12 +383,17 @@ export default defineContentScript({
             && !replayGuardError
             && !hasEmptyRequiredFields()
             && findProgrammaticFinalSubmitButton(atsName) === submitButton;
-          let activationError: string | null = null;
+          let activationError: string | null = boundActivation.ok ? null : boundActivation.error;
           let clicked = false;
-          if (replaySafe) {
+          let clickedActivation: ExtensionSubmissionActivation | null = null;
+          if (replaySafe && boundActivation.ok) {
             // Keep this check synchronous with the employer click. The server lease, not the
             // five-minute confirmation monitor, is the only authority to press Submit.
-            const verifiedActivation = verifyExtensionSubmissionActivation(response, applicationId);
+            const verifiedActivation = verifyExtensionSubmissionActivation(
+              boundActivation.activation,
+              applicationId,
+              currentSubmissionActivationClock(),
+            );
             if (!verifiedActivation.ok) {
               activationError = verifiedActivation.error;
             } else {
@@ -372,13 +405,15 @@ export default defineContentScript({
                   requiredFieldsClear: !hasEmptyRequiredFields(),
                 })
                 : (() => { submitButton.click(); return true; })();
+              if (clicked) clickedActivation = verifiedActivation.activation;
             }
           }
-          if (!clicked) {
+          if (!clicked || !clickedActivation) {
             const cancelReservation = (attempt = 0) => chrome.runtime.sendMessage({
                 type: 'EXTENSION_SUBMISSION_OUTCOME',
                 payload: {
                   applicationId,
+                  activation: boundActivation.ok ? boundActivation.activation : response,
                   outcome: 'cancelled',
                   finalUrl: window.location.href,
                   confirmationText: 'The application changed after the reservation. Nothing was sent.',
@@ -398,7 +433,7 @@ export default defineContentScript({
           }
           submitButton.removeEventListener('click', onClick, true);
           monitorExtensionSubmission(
-            applicationId,
+            clickedActivation,
             baselineTexts,
             atsName === 'jobvite' || atsName === 'icims'
               ? { family: atsName, startedUrl: submissionStartedUrl }
@@ -599,11 +634,16 @@ export default defineContentScript({
     const checkPendingSubmission = (attempt = 0) => {
       chrome.runtime.sendMessage(
         { type: 'GET_PENDING_EXTENSION_SUBMISSION' },
-        (response: { pending?: { applicationId?: string; startedAt?: number; strictReceipt?: { family: GatedAttendedFamily; startedUrl: string } } | null } | undefined) => {
+        (response: {
+          pending?: (ExtensionSubmissionActivationIdentity & {
+            startedAt?: number;
+            strictReceipt?: { family: GatedAttendedFamily; startedUrl: string };
+          }) | null;
+        } | undefined) => {
           const pending = response?.pending;
           if (pending?.applicationId && pendingRecoveryGate.shouldRecover(pending)) {
             monitorExtensionSubmission(
-              pending.applicationId,
+              pending,
               new Set(),
               pending.strictReceipt,
             );
@@ -747,6 +787,10 @@ export default defineContentScript({
         sendResponse({ url: window.location.href });
         return false;
       }
+      if (message?.type === 'GET_SUBMISSION_ACTIVATION_REQUEST_CLOCK') {
+        sendResponse(beginSubmissionActivationRequest());
+        return false;
+      }
       if (message?.type === 'PREPARE_SUBMISSION_FROM_DASHBOARD') {
         if (!prepareSubmissionFromDashboard || !message.payload?.resume) {
           sendResponse({ ok: false, error: 'This page is not ready to verify the saved application packet.' });
@@ -763,9 +807,11 @@ export default defineContentScript({
         return false;
       }
       const applicationId = String(message.payload?.applicationId ?? '');
-      const verifiedActivation = verifyExtensionSubmissionActivation(
+      const verifiedActivation = bindExtensionSubmissionActivation(
         message.payload?.activation,
         applicationId,
+        message.payload?.activationRequestClock as ExtensionSubmissionActivationRequestClock,
+        currentSubmissionActivationClock(),
       );
       if (!verifiedActivation.ok) {
         sendResponse({ ok: false, error: verifiedActivation.error });
@@ -2967,7 +3013,11 @@ export default defineContentScript({
           if (finalHandoffGuardError) return { ok: false, error: finalHandoffGuardError };
           // Re-evaluate the exact server activation at the final synchronous click boundary. A
           // capability that expired while the dashboard replayed answers never reaches the portal.
-          const verifiedActivation = verifyExtensionSubmissionActivation(activation, resume.resume_id);
+          const verifiedActivation = verifyExtensionSubmissionActivation(
+            activation,
+            resume.resume_id,
+            currentSubmissionActivationClock(),
+          );
           if (!verifiedActivation.ok) return { ok: false, error: verifiedActivation.error };
           if (!clickDashboardSubmitIfAllowed(fillResult.ats_name, finalSubmitBtn)) {
             return { ok: false, error: 'This application needs your direct confirmation on the company page. Nothing was sent.' };
@@ -3290,6 +3340,7 @@ export default defineContentScript({
               if (statusEl) statusEl.textContent = 'Reserving this application safely...';
               pendingRecoveryGate.beginLocal(applicationId);
               try {
+                const activationRequestClock = beginSubmissionActivationRequest();
                 const started = await new Promise<({ ok?: boolean; error?: string } & Partial<ExtensionSubmissionActivation>)>((resolve) => {
                   chrome.runtime.sendMessage({
                     type: 'EXTENSION_SUBMISSION_START',
@@ -3302,16 +3353,31 @@ export default defineContentScript({
                   && !submissionGuard()
                   && findProgrammaticFinalSubmitButton(fillResult.ats_name) === target
                   && (fillResult.ats_name !== 'workday' || workdayProgrammaticFinalSubmitAllowed(target));
-                if (started.ok && safeAfterReservation) {
+                const boundActivation = started.ok
+                  ? bindExtensionSubmissionActivation(
+                    started,
+                    applicationId,
+                    activationRequestClock,
+                    currentSubmissionActivationClock(),
+                  )
+                  : null;
+                if (started.ok && safeAfterReservation && boundActivation?.ok) {
                   // The network reservation may have consumed most of the lease. Check the exact
-                  // identifiers and server expiry synchronously at the employer click boundary.
-                  const verifiedActivation = verifyExtensionSubmissionActivation(started, applicationId);
+                  // identifiers and monotonic deadline at the final synchronous click boundary.
+                  if (statusEl) statusEl.textContent = `${actionLabel}...`;
+                  const baselineTexts = new Set(visibleSubmissionOutcomeTexts());
+                  const verifiedActivation = verifyExtensionSubmissionActivation(
+                    boundActivation.activation,
+                    applicationId,
+                    currentSubmissionActivationClock(),
+                  );
                   if (!verifiedActivation.ok) {
                     if (statusEl) statusEl.textContent = verifiedActivation.error;
                     chrome.runtime.sendMessage({
                       type: 'EXTENSION_SUBMISSION_OUTCOME',
                       payload: {
                         applicationId,
+                        activation: boundActivation.activation,
                         outcome: 'cancelled',
                         finalUrl: window.location.href,
                         confirmationText: 'The server activation was not current at the final click boundary. Nothing was clicked.',
@@ -3320,25 +3386,36 @@ export default defineContentScript({
                     reportEvent(false);
                     return;
                   }
-                  if (statusEl) statusEl.textContent = `${actionLabel}...`;
-                  const baselineTexts = new Set(visibleSubmissionOutcomeTexts());
                   if (clickAtsSubmitIfAllowed(
                     fillResult.ats_name,
                     target,
-                    () => monitorExtensionSubmission(applicationId, baselineTexts),
+                    () => monitorExtensionSubmission(verifiedActivation.activation, baselineTexts),
                   )) {
                     reportEvent(true);
                   } else {
                     if (statusEl) statusEl.textContent = 'This application needs your direct confirmation. Nothing was sent.';
+                    chrome.runtime.sendMessage({
+                      type: 'EXTENSION_SUBMISSION_OUTCOME',
+                      payload: {
+                        applicationId,
+                        activation: verifiedActivation.activation,
+                        outcome: 'cancelled',
+                        finalUrl: window.location.href,
+                        confirmationText: 'The final employer control was not eligible for an automatic click. Nothing was clicked.',
+                      },
+                    }).catch(() => {});
                     reportEvent(false);
                   }
                 } else {
-                  if (statusEl) statusEl.textContent = started.error ?? 'The page changed before Litos could submit. Check it yourself.';
+                  if (statusEl) statusEl.textContent = boundActivation && !boundActivation.ok
+                    ? boundActivation.error
+                    : started.error ?? 'The page changed before Litos could submit. Check it yourself.';
                   if (started.ok) {
                     chrome.runtime.sendMessage({
                       type: 'EXTENSION_SUBMISSION_OUTCOME',
                       payload: {
                         applicationId,
+                        activation: boundActivation?.ok ? boundActivation.activation : started,
                         outcome: 'cancelled',
                         finalUrl: window.location.href,
                         confirmationText: 'The final safety check failed after reservation. Nothing was clicked.',

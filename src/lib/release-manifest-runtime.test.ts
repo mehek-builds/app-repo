@@ -4,7 +4,7 @@ import packageMetadata from '../../package.json';
 
 describe('published extension release contract', () => {
   it('uses a new installable version for the current release', () => {
-    expect(packageMetadata.version).toBe('0.6.4');
+    expect(packageMetadata.version).toBe('0.6.5');
   });
 
   it('reports the runtime manifest version to the website pairing gate', () => {
