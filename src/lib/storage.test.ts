@@ -68,6 +68,26 @@ describe('extension auth storage', () => {
     await expect(storage.getToken()).resolves.toBe('token-123');
   });
 
+  it('persists the monotonic auth epoch and inactive clear barrier across worker generations', async () => {
+    await storage.setToken('token-123');
+    const signedInEpoch = storage.currentAuthEpoch();
+    expect(values.litos_auth_epoch_state).toEqual({ epoch: signedInEpoch, active: true });
+
+    const clearEpoch = storage.beginAuthSessionClear();
+    await storage.synchronizeAuthEpochState();
+    expect(clearEpoch).toBeGreaterThan(signedInEpoch);
+    expect(values.litos_auth_epoch_state).toEqual({ epoch: clearEpoch, active: false });
+    expect(storage.authEpochIsCurrent(clearEpoch)).toBe(false);
+
+    storage.completeAuthSessionClear(clearEpoch);
+    await storage.synchronizeAuthEpochState();
+    expect(storage.currentAuthEpoch()).toBeGreaterThan(clearEpoch);
+    expect(values.litos_auth_epoch_state).toEqual({
+      epoch: storage.currentAuthEpoch(),
+      active: true,
+    });
+  });
+
   it('does not report onboarding success when Chrome rejects the write', async () => {
     storageError = 'Storage is unavailable';
     await expect(storage.setToken('token-123')).rejects.toThrow('Could not access extension storage');

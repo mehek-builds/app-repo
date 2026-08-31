@@ -198,6 +198,7 @@ export default defineContentScript({
   runAt: 'document_idle',
   main() {
     installPersistentBadge();
+    const submissionActivationDocumentId = crypto.randomUUID();
     const submissionActivationRuntimeId = crypto.randomUUID();
     const beginSubmissionActivationRequest = (): ExtensionSubmissionActivationRequestClock => ({
       runtimeId: submissionActivationRuntimeId,
@@ -381,7 +382,13 @@ export default defineContentScript({
         const activationRequestClock = beginSubmissionActivationRequest();
         chrome.runtime.sendMessage({
           type: 'EXTENSION_SUBMISSION_START',
-          payload: { applicationId, authorization: 'user_initiated', attendedHandoff },
+          payload: {
+            applicationId,
+            authorization: 'user_initiated',
+            attendedHandoff,
+            documentId: submissionActivationDocumentId,
+            activationRequestClock,
+          },
         }, (response: ({ ok?: boolean; error?: string } & Partial<ExtensionSubmissionActivation>) | undefined) => {
           if (!response?.ok) {
             reserving = false;
@@ -702,7 +709,13 @@ export default defineContentScript({
 
     const checkPendingSubmission = (attempt = 0) => {
       chrome.runtime.sendMessage(
-        { type: 'GET_PENDING_EXTENSION_SUBMISSION' },
+        {
+          type: 'GET_PENDING_EXTENSION_SUBMISSION',
+          payload: {
+            documentId: submissionActivationDocumentId,
+            documentRuntimeId: submissionActivationRuntimeId,
+          },
+        },
         (response: {
           pending?: (ExtensionSubmissionActivationIdentity & {
             startedAt?: number;
@@ -857,7 +870,10 @@ export default defineContentScript({
         return false;
       }
       if (message?.type === 'GET_SUBMISSION_ACTIVATION_REQUEST_CLOCK') {
-        sendResponse(beginSubmissionActivationRequest());
+        sendResponse({
+          documentId: submissionActivationDocumentId,
+          activationRequestClock: beginSubmissionActivationRequest(),
+        });
         return false;
       }
       if (message?.type === 'PREPARE_SUBMISSION_FROM_DASHBOARD') {
@@ -3442,7 +3458,13 @@ export default defineContentScript({
                 const started = await new Promise<({ ok?: boolean; error?: string } & Partial<ExtensionSubmissionActivation>)>((resolve) => {
                   chrome.runtime.sendMessage({
                     type: 'EXTENSION_SUBMISSION_START',
-                    payload: { applicationId, authorization: 'standing_consent', attendedHandoff },
+                    payload: {
+                      applicationId,
+                      authorization: 'standing_consent',
+                      attendedHandoff,
+                      documentId: submissionActivationDocumentId,
+                      activationRequestClock,
+                    },
                   }, (response) => resolve(response ?? { ok: false, error: 'Litos did not respond.' }));
                 });
                 const safeAfterReservation = () => target.isConnected && isElementVisible(target) && !document.hidden && document.hasFocus()

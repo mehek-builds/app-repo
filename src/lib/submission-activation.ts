@@ -22,7 +22,20 @@ export type ExtensionSubmissionActivation = ExtensionSubmissionActivationIdentit
   monotonicProof: ExtensionSubmissionActivationMonotonicProof;
 };
 
-export type DocumentBoundExtensionSubmissionActivation = ExtensionSubmissionActivation & {
+export type ExtensionSubmissionPendingAuthority = {
+  authEpoch: number;
+  tabId: number;
+  frameId: number;
+  documentId: string;
+  documentRuntimeId: string;
+  pendingGeneration: string;
+};
+
+export type OwnedExtensionSubmissionActivation = ExtensionSubmissionActivation & {
+  pendingAuthority: ExtensionSubmissionPendingAuthority;
+};
+
+export type DocumentBoundExtensionSubmissionActivation = OwnedExtensionSubmissionActivation & {
   documentMonotonicProof: ExtensionSubmissionActivationMonotonicProof;
 };
 
@@ -100,6 +113,55 @@ function exactIsoInstant(value: unknown): number | null {
 
 function finiteNonNegative(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
+function safeNonNegativeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+export function parseExtensionSubmissionActivationRequestClock(
+  value: unknown,
+): ExtensionSubmissionActivationRequestClock | null {
+  if (!value || typeof value !== 'object') return null;
+  const clock = value as Record<string, unknown>;
+  if (
+    !exactUuid(clock.runtimeId)
+    || !finiteNonNegative(clock.timeOriginMs)
+    || !finiteNonNegative(clock.requestStartedAtMs)
+    || !finiteNonNegative(clock.wallRequestStartedAtMs)
+  ) return null;
+  return {
+    runtimeId: clock.runtimeId,
+    timeOriginMs: clock.timeOriginMs,
+    requestStartedAtMs: clock.requestStartedAtMs,
+    wallRequestStartedAtMs: clock.wallRequestStartedAtMs,
+  };
+}
+
+export function extensionSubmissionPendingAuthority(
+  value: unknown,
+): ExtensionSubmissionPendingAuthority | null {
+  if (!value || typeof value !== 'object') return null;
+  const candidate = value as Record<string, unknown>;
+  const authority = candidate.pendingAuthority;
+  if (!authority || typeof authority !== 'object') return null;
+  const pending = authority as Record<string, unknown>;
+  if (
+    !safeNonNegativeInteger(pending.authEpoch)
+    || !safeNonNegativeInteger(pending.tabId)
+    || !safeNonNegativeInteger(pending.frameId)
+    || !exactUuid(pending.documentId)
+    || !exactUuid(pending.documentRuntimeId)
+    || !exactUuid(pending.pendingGeneration)
+  ) return null;
+  return {
+    authEpoch: pending.authEpoch,
+    tabId: pending.tabId,
+    frameId: pending.frameId,
+    documentId: pending.documentId,
+    documentRuntimeId: pending.documentRuntimeId,
+    pendingGeneration: pending.pendingGeneration,
+  };
 }
 
 function exactIdentity(value: unknown, expectedApplicationId: string): {
@@ -359,11 +421,14 @@ export function bindExtensionSubmissionActivationToDocument(
   currentClock: ExtensionSubmissionActivationCurrentClock,
 ): DocumentExtensionSubmissionActivationVerification {
   const parsed = exactIdentity(value, expectedApplicationId);
+  const pendingAuthority = extensionSubmissionPendingAuthority(value);
   const backgroundProof = value && typeof value === 'object'
     ? exactMonotonicProof((value as Record<string, unknown>).monotonicProof)
     : null;
   if (
     !parsed
+    || !pendingAuthority
+    || pendingAuthority.documentRuntimeId !== requestClock?.runtimeId
     || !backgroundProof
     || !clockProofMatchesLease(backgroundProof, parsed.expiresAtMs, parsed.serverNowMs)
   ) return invalid();
@@ -379,6 +444,7 @@ export function bindExtensionSubmissionActivationToDocument(
     activation: {
       ...parsed.identity,
       monotonicProof: backgroundProof,
+      pendingAuthority,
       documentMonotonicProof: documentBinding.activation.monotonicProof,
     },
   };
@@ -393,6 +459,8 @@ export function verifyDocumentExtensionSubmissionActivation(
   const parsed = exactIdentity(value, expectedApplicationId);
   if (!parsed || !value || typeof value !== 'object' || !validCurrentClock(currentClock)) return invalid();
   const candidate = value as Record<string, unknown>;
+  const pendingAuthority = extensionSubmissionPendingAuthority(candidate);
+  if (!pendingAuthority || pendingAuthority.documentRuntimeId !== currentClock.runtimeId) return invalid();
   const backgroundProof = exactMonotonicProof(candidate.monotonicProof);
   if (
     !backgroundProof
@@ -410,6 +478,7 @@ export function verifyDocumentExtensionSubmissionActivation(
     activation: {
       ...parsed.identity,
       monotonicProof: backgroundProof,
+      pendingAuthority,
       documentMonotonicProof: documentProof,
     },
     expiresAtMs: parsed.expiresAtMs,
@@ -528,4 +597,27 @@ export function sameExtensionSubmissionActivation(
     (left as Record<string, unknown>).monotonicProof,
     (right as Record<string, unknown>).monotonicProof,
   );
+}
+
+export function sameExtensionSubmissionPendingAuthority(
+  left: unknown,
+  right: unknown,
+): boolean {
+  const a = extensionSubmissionPendingAuthority(left);
+  const b = extensionSubmissionPendingAuthority(right);
+  return Boolean(a && b
+    && a.authEpoch === b.authEpoch
+    && a.tabId === b.tabId
+    && a.frameId === b.frameId
+    && a.documentId === b.documentId
+    && a.documentRuntimeId === b.documentRuntimeId
+    && a.pendingGeneration === b.pendingGeneration);
+}
+
+export function sameOwnedExtensionSubmissionActivation(
+  left: unknown,
+  right: unknown,
+): boolean {
+  return sameExtensionSubmissionActivation(left, right)
+    && sameExtensionSubmissionPendingAuthority(left, right);
 }

@@ -9,10 +9,58 @@ const AUTO_SUBMIT_KEY = 'litos_auto_submit_enabled';
 const PORTAL_SALT_KEY = 'litos_portal_salt';
 const PORTAL_ACCOUNTS_KEY = 'litos_portal_accounts';
 const PENDING_PORTAL_ACCOUNTS_KEY = 'litos_pending_portal_accounts';
+const AUTH_EPOCH_STATE_KEY = 'litos_auth_epoch_state';
 
 let authEpoch = 0;
 let authSessionActive = true;
+let authEpochMutation: Promise<void> = Promise.resolve();
 let portalAccountMutation: Promise<void> = Promise.resolve();
+
+type PersistedAuthEpochState = { epoch: number; active: boolean };
+
+function validPersistedAuthEpochState(value: unknown): value is PersistedAuthEpochState {
+  if (!value || typeof value !== 'object') return false;
+  const state = value as Record<string, unknown>;
+  return Number.isSafeInteger(state.epoch) && (state.epoch as number) >= 0
+    && typeof state.active === 'boolean';
+}
+
+function nextAuthEpoch(): number {
+  // Wall time makes a fresh extension context advance beyond ordinary prior counters, while the
+  // max preserves monotonicity if the clock moves backward.
+  return Math.max(authEpoch + 1, Date.now() * 1_000);
+}
+
+function serializeAuthEpochMutation<T>(operation: () => Promise<T>): Promise<T> {
+  const result = authEpochMutation.then(operation, operation);
+  authEpochMutation = result.then(() => undefined, () => undefined);
+  return result;
+}
+
+function persistAuthEpochState(): Promise<void> {
+  const snapshot: PersistedAuthEpochState = { epoch: authEpoch, active: authSessionActive };
+  return serializeAuthEpochMutation(() => chromeStorageSet(AUTH_EPOCH_STATE_KEY, snapshot));
+}
+
+/** Reconcile the in-memory service-worker epoch with the persisted browser-session authority. */
+export function synchronizeAuthEpochState(): Promise<void> {
+  return serializeAuthEpochMutation(async () => {
+    const persisted = await chromeStorageGetCompat<PersistedAuthEpochState>(AUTH_EPOCH_STATE_KEY, []);
+    if (!persisted || !validPersistedAuthEpochState(persisted)) {
+      await chromeStorageSet(AUTH_EPOCH_STATE_KEY, { epoch: authEpoch, active: authSessionActive });
+      return;
+    }
+    if (!authSessionActive) {
+      if (persisted.epoch > authEpoch) authEpoch = persisted.epoch + 1;
+      if (persisted.epoch !== authEpoch || persisted.active) {
+        await chromeStorageSet(AUTH_EPOCH_STATE_KEY, { epoch: authEpoch, active: false });
+      }
+      return;
+    }
+    authEpoch = persisted.epoch;
+    authSessionActive = persisted.active;
+  });
+}
 
 export function currentAuthEpoch(): number {
   return authEpoch;
@@ -22,15 +70,28 @@ export function authEpochIsCurrent(expectedEpoch: number): boolean {
   return authSessionActive && Number.isSafeInteger(expectedEpoch) && expectedEpoch === authEpoch;
 }
 
+/** Invalidate account-owned work synchronously before asynchronous logout cleanup begins. */
+export function beginAuthSessionClear(): number {
+  authEpoch = nextAuthEpoch();
+  authSessionActive = false;
+  void persistAuthEpochState();
+  return authEpoch;
+}
+
 /**
  * Called by the background only after every account-owned local and session value has been
  * removed. Advancing once more invalidates work that began during the asynchronous clear, while
  * reactivation lets a later popup sign-in use the now-empty background context without waiting
  * for the MV3 worker to restart.
  */
-export function completeAuthSessionClear(): void {
-  authEpoch += 1;
+export function completeAuthSessionClear(expectedClearEpoch?: number): void {
+  if (
+    expectedClearEpoch !== undefined
+    && (!Number.isSafeInteger(expectedClearEpoch) || expectedClearEpoch !== authEpoch)
+  ) return;
+  authEpoch = nextAuthEpoch();
   authSessionActive = true;
+  void persistAuthEpochState();
 }
 
 function serializePortalAccountMutation<T>(operation: () => Promise<T>): Promise<T> {
@@ -120,10 +181,12 @@ export async function getToken(): Promise<string | null> {
 }
 
 export async function setToken(token: string): Promise<void> {
+  await synchronizeAuthEpochState();
   await chromeStorageSet(TOKEN_KEY, token);
   if ((await getToken()) !== token) throw new Error('Your sign-in could not be saved. Please try again.');
-  authEpoch += 1;
+  authEpoch = nextAuthEpoch();
   authSessionActive = true;
+  await persistAuthEpochState();
 }
 
 export async function clearToken(): Promise<void> {
@@ -140,14 +203,14 @@ export async function setProfile(profile: Profile): Promise<void> {
   if (!(await getProfile())) throw new Error('Your profile could not be saved. Please try again.');
 }
 
-export async function clearAll(): Promise<void> {
+export async function clearAll(options: { authAlreadyInvalidated?: boolean } = {}): Promise<void> {
   // Logout clears the token and profile (both new and legacy names). The auto-submit
   // preference and device salt stay in place, matching the original logout behavior. Account
   // authorizations are user-scoped and must be removed so the next Litos user on this Chrome
   // profile cannot inherit another person's employer account. Rotate the anonymous analytics id
   // as well so two accounts on one Chrome profile are never linked.
-  authEpoch += 1;
-  authSessionActive = false;
+  if (options.authAlreadyInvalidated !== true) beginAuthSessionClear();
+  await synchronizeAuthEpochState();
   await serializePortalAccountMutation(async () => {
     const entitlementPointer = await chromeStorageGetCompat<string>('litos:entitlements:v2:current-account', []);
     await chromeStorageRemove([

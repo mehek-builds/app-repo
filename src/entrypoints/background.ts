@@ -12,6 +12,8 @@ import {
   setToken,
   setAutoSubmitEnabled,
   recordPendingPortalAccount,
+  beginAuthSessionClear,
+  synchronizeAuthEpochState,
   currentAuthEpoch,
   authEpochIsCurrent,
   completeAuthSessionClear,
@@ -105,14 +107,19 @@ import {
 } from '../lib/free-submission-monitor';
 import {
   EXTENSION_SUBMISSION_ACTIVATION_CONTRACT,
+  extensionSubmissionPendingAuthority,
   extensionSubmissionActivationIdentity,
+  parseExtensionSubmissionActivationRequestClock,
+  sameOwnedExtensionSubmissionActivation,
   verifyExtensionSubmissionStartResponse,
   verifyExtensionSubmissionActivation,
   type ExtensionSubmissionActivation,
   type ExtensionSubmissionActivationRequestClock,
+  type OwnedExtensionSubmissionActivation,
 } from '../lib/submission-activation';
 import {
   commitPendingExtensionSubmissionForClick,
+  recoverPendingExtensionSubmission,
   reservePendingExtensionSubmission,
   settlePendingExtensionSubmission,
   type PhasedPendingExtensionSubmission,
@@ -122,13 +129,15 @@ import {
 // this: the worst case on a restart is one wasted 403, which re-latches it immediately.
 let harvestStopped = false;
 
-type PendingExtensionSubmissionPayload = ExtensionSubmissionActivation & {
+type PendingExtensionSubmissionUnownedPayload = ExtensionSubmissionActivation & {
   startedAt: number;
-  frameId: number;
   packetVersion: string;
   auditDigest: string;
   strictReceipt?: { family: 'jobvite' | 'icims'; startedUrl: string };
 };
+
+type PendingExtensionSubmissionPayload = PendingExtensionSubmissionUnownedPayload
+  & OwnedExtensionSubmissionActivation;
 
 type PendingExtensionSubmission =
   PhasedPendingExtensionSubmission<PendingExtensionSubmissionPayload>;
@@ -155,9 +164,46 @@ const HANDOFF_PACKET_BINDING_MUTATION_KEY = 'handoff-packet-bindings';
 const APPLICATION_TAB_MUTATION_KEY = 'application-tabs';
 const FREE_SUBMISSION_MONITOR_PREFIX = 'litos_pending_free_submission';
 const PENDING_PREMIUM_ACTION_KEY = 'litos_pending_premium_action';
+const PENDING_SUBMISSION_AUTHORITY_MUTATION_KEY = 'pending-submission-authority';
 const PENDING_PREMIUM_RETRY_FOCUS_KEY = 'litos_pending_premium_retry_focus';
 const PREMIUM_RETRY_FOCUS_TTL_MS = 5 * 60_000;
 const backgroundActivationRuntimeId = crypto.randomUUID();
+const EXTENSION_DOCUMENT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+function submissionDocumentRequest(value: unknown): {
+  documentId: string;
+  activationRequestClock: ExtensionSubmissionActivationRequestClock;
+} | null {
+  if (!value || typeof value !== 'object') return null;
+  const candidate = value as Record<string, unknown>;
+  const activationRequestClock = parseExtensionSubmissionActivationRequestClock(
+    candidate.activationRequestClock,
+  );
+  if (
+    typeof candidate.documentId !== 'string'
+    || !EXTENSION_DOCUMENT_ID_PATTERN.test(candidate.documentId)
+    || !activationRequestClock
+  ) return null;
+  return { documentId: candidate.documentId, activationRequestClock };
+}
+
+function submissionRecoveryOwner(value: unknown): {
+  documentId: string;
+  documentRuntimeId: string;
+} | null {
+  if (!value || typeof value !== 'object') return null;
+  const candidate = value as Record<string, unknown>;
+  if (
+    typeof candidate.documentId !== 'string'
+    || !EXTENSION_DOCUMENT_ID_PATTERN.test(candidate.documentId)
+    || typeof candidate.documentRuntimeId !== 'string'
+    || !EXTENSION_DOCUMENT_ID_PATTERN.test(candidate.documentRuntimeId)
+  ) return null;
+  return {
+    documentId: candidate.documentId,
+    documentRuntimeId: candidate.documentRuntimeId,
+  };
+}
 
 function backgroundActivationRequestClock(): ExtensionSubmissionActivationRequestClock {
   return {
@@ -422,18 +468,21 @@ function pendingSubmissionKey(tabId: number): string {
   return `${PENDING_SUBMISSIONS_KEY}:${tabId}`;
 }
 
-function pendingSubmissionMutationKey(tabId: number): string {
-  // One lane for the whole tab is stricter than one lane per frame. The stored frameId still owns
-  // validation and outcomes, while no sibling frame can replace its authority before settlement.
-  return `pending-submission:${tabId}`;
+function pendingSubmissionMutationKey(_tabId: number): string {
+  // Account clear and every tab use one authority lane. The persisted tab and frame still own the
+  // capability, while the global lane gives auth invalidation a total order with every mutation.
+  return PENDING_SUBMISSION_AUTHORITY_MUTATION_KEY;
 }
 
 async function pendingSubmission(tabId: number): Promise<PendingExtensionSubmission | null> {
   const key = pendingSubmissionKey(tabId);
   const stored = await chrome.storage.session.get(key);
   const pending = stored[key] as PendingExtensionSubmission | undefined;
+  const authority = extensionSubmissionPendingAuthority(pending);
   if (
     !pending
+    || !authority
+    || authority.tabId !== tabId
     || (pending.submissionAuthorityPhase !== 'reserved'
       && pending.submissionAuthorityPhase !== 'click_committed')
   ) return null;
@@ -443,38 +492,62 @@ async function pendingSubmission(tabId: number): Promise<PendingExtensionSubmiss
 async function writePendingSubmission(
   tabId: number,
   pending: PendingExtensionSubmission,
-  authEpoch?: number,
 ): Promise<void> {
-  if (authEpoch !== undefined) assertCurrentAuthEpoch(authEpoch);
+  const authEpoch = pending.pendingAuthority.authEpoch;
+  if (pending.pendingAuthority.tabId !== tabId) {
+    throw new Error('This send permission belongs to a different application tab.');
+  }
+  assertCurrentAuthEpoch(authEpoch);
   const key = pendingSubmissionKey(tabId);
   await chrome.storage.session.set({ [key]: pending });
-  if (authEpoch !== undefined && !authEpochIsCurrent(authEpoch)) {
-    await chrome.storage.session.remove(key);
+  if (!authEpochIsCurrent(authEpoch)) {
+    const current = await pendingSubmission(tabId);
+    if (current && sameOwnedExtensionSubmissionActivation(current, pending)) {
+      await chrome.storage.session.remove(key);
+    }
     assertCurrentAuthEpoch(authEpoch);
   }
+}
+
+function pendingSubmissionAuthorized(pending: OwnedExtensionSubmissionActivation): boolean {
+  return authEpochIsCurrent(pending.pendingAuthority.authEpoch);
 }
 
 async function reservePendingSubmission(
   tabId: number,
   authEpoch: number,
-  create: () => Promise<PendingExtensionSubmissionPayload>,
+  owner: { frameId: number; documentId: string; documentRuntimeId: string },
+  create: () => Promise<PendingExtensionSubmissionUnownedPayload>,
 ): Promise<PendingExtensionSubmission> {
-  const reservation = await reservePendingExtensionSubmission({
+  const reservation = await reservePendingExtensionSubmission<PendingExtensionSubmissionPayload>({
     queue: pendingSubmissionMutations,
     mutationKey: pendingSubmissionMutationKey(tabId),
     read: () => pendingSubmission(tabId),
-    write: (pending) => writePendingSubmission(tabId, pending, authEpoch),
-    create,
+    write: (pending) => writePendingSubmission(tabId, pending),
+    clear: () => chrome.storage.session.remove(pendingSubmissionKey(tabId)),
+    create: async () => ({
+      ...await create(),
+      pendingAuthority: {
+        authEpoch,
+        tabId,
+        frameId: owner.frameId,
+        documentId: owner.documentId,
+        documentRuntimeId: owner.documentRuntimeId,
+        pendingGeneration: crypto.randomUUID(),
+      },
+    }),
+    authorize: pendingSubmissionAuthorized,
   });
   if (reservation.kind === 'occupied') {
     throw new Error('Another application in this tab already has an active send permission.');
   }
+  if (reservation.kind === 'revoked') assertCurrentAuthEpoch(authEpoch);
   return reservation.pending;
 }
 
 function pendingSubmissionActivation(
   pending: PendingExtensionSubmission,
-): ExtensionSubmissionActivation {
+): OwnedExtensionSubmissionActivation {
   return {
     applicationId: pending.applicationId,
     claimId: pending.claimId,
@@ -483,6 +556,7 @@ function pendingSubmissionActivation(
     activationExpiresAt: pending.activationExpiresAt,
     activationServerNow: pending.activationServerNow,
     monotonicProof: pending.monotonicProof,
+    pendingAuthority: pending.pendingAuthority,
   };
 }
 
@@ -755,10 +829,13 @@ async function clearPendingFreeSubmissionMonitorForTabEvent(
 }
 
 async function postExtensionOutcome(pending: PendingExtensionSubmission, outcome: 'confirmed' | 'failed' | 'unknown' | 'cancelled', finalUrl: string, confirmationText?: string) {
+  const outcomeAuthEpoch = pending.pendingAuthority.authEpoch;
+  assertCurrentAuthEpoch(outcomeAuthEpoch);
   if (!validHandoffVersion(pending.packetVersion) || !validHandoffVersion(pending.auditDigest)) {
     throw new Error('The audited application packet is no longer available. Nothing was recorded.');
   }
   const token = await getStoredToken();
+  assertCurrentAuthEpoch(outcomeAuthEpoch);
   if (!token) throw new Error('Sign in to Litos again before updating this application.');
   const response = await timeoutBackendFetch(`/applications/${pending.applicationId}/submission/extension-outcome`, {
     method: 'POST',
@@ -774,6 +851,7 @@ async function postExtensionOutcome(pending: PendingExtensionSubmission, outcome
       ...(confirmationText ? { confirmation_text: confirmationText.slice(0, 2000) } : {}),
     }),
   }, token);
+  assertCurrentAuthEpoch(outcomeAuthEpoch);
   if (!response.ok) {
     const body = await response.json().catch(() => null) as { error?: string } | null;
     throw new Error(body?.error ?? `Could not update application (${response.status})`);
@@ -784,7 +862,7 @@ async function postExtensionOutcome(pending: PendingExtensionSubmission, outcome
 
 async function settlePendingSubmissionOutcome(
   tabId: number,
-  expected: ExtensionSubmissionActivation,
+  expected: OwnedExtensionSubmissionActivation,
   outcome: 'confirmed' | 'failed' | 'unknown' | 'cancelled',
   finalUrl: string,
   confirmationText?: string,
@@ -797,6 +875,7 @@ async function settlePendingSubmissionOutcome(
     expected,
     read: () => pendingSubmission(tabId),
     clear: () => chrome.storage.session.remove(pendingSubmissionKey(tabId)),
+    authorize: pendingSubmissionAuthorized,
     post: (pending) => {
       if (
         outcome !== 'cancelled'
@@ -818,16 +897,22 @@ async function settlePendingSubmissionOutcome(
 }
 
 async function closePendingSubmission(tabId: number, finalUrl = 'https://trylitos.com') {
+  await synchronizeAuthEpochState();
   await pendingSubmissionMutations.run(pendingSubmissionMutationKey(tabId), async () => {
     const pending = await pendingSubmission(tabId);
-    if (!pending) return;
+    if (!pending || !pendingSubmissionAuthorized(pending)) return;
     try {
       await postExtensionOutcome(
         pending,
         pending.submissionAuthorityPhase === 'reserved' ? 'cancelled' : 'unknown',
         finalUrl,
       );
-      await chrome.storage.session.remove(pendingSubmissionKey(tabId));
+      if (pendingSubmissionAuthorized(pending)) {
+        const current = await pendingSubmission(tabId);
+        if (current && sameOwnedExtensionSubmissionActivation(current, pending)) {
+          await chrome.storage.session.remove(pendingSubmissionKey(tabId));
+        }
+      }
     } catch {
       // Keep the claim in session storage. A later page wake can retry the safe outcome.
     }
@@ -1113,16 +1198,7 @@ async function clearApplicationRuntimeState(): Promise<void> {
   const pendingPrefix = `${PENDING_SUBMISSIONS_KEY}:`;
   const pendingKeys = Object.keys(await chrome.storage.session.get(null))
     .filter((key) => key.startsWith(pendingPrefix));
-  await Promise.all(pendingKeys.map((key) => {
-    const tabId = Number(key.slice(pendingPrefix.length));
-    if (!Number.isSafeInteger(tabId) || tabId < 0) {
-      return chrome.storage.session.remove(key);
-    }
-    return pendingSubmissionMutations.run(
-      pendingSubmissionMutationKey(tabId),
-      () => chrome.storage.session.remove(key),
-    );
-  }));
+  if (pendingKeys.length) await chrome.storage.session.remove(pendingKeys);
   await applicationTabMutations.run(
     APPLICATION_TAB_MUTATION_KEY,
     () => chrome.storage.session.remove('litos_application_tabs'),
@@ -1132,16 +1208,21 @@ async function clearApplicationRuntimeState(): Promise<void> {
 }
 
 async function clearExtensionAccountSession(): Promise<void> {
-  await Promise.all([
-    clearStoredSession(),
-    clearApplicationRuntimeState(),
-    chrome.storage.session.remove([
-      'litos_pending_checkout',
-      PENDING_PREMIUM_ACTION_KEY,
-      PENDING_PREMIUM_RETRY_FOCUS_KEY,
-    ]),
-  ]);
-  completeAuthSessionClear();
+  const clearAuthEpoch = beginAuthSessionClear();
+  await synchronizeAuthEpochState();
+  await pendingSubmissionMutations.run(PENDING_SUBMISSION_AUTHORITY_MUTATION_KEY, async () => {
+    await Promise.all([
+      clearStoredSession({ authAlreadyInvalidated: true }),
+      clearApplicationRuntimeState(),
+      chrome.storage.session.remove([
+        'litos_pending_checkout',
+        PENDING_PREMIUM_ACTION_KEY,
+        PENDING_PREMIUM_RETRY_FOCUS_KEY,
+      ]),
+    ]);
+  });
+  completeAuthSessionClear(clearAuthEpoch);
+  await synchronizeAuthEpochState();
 }
 
 const respondToClearSessionMessage = createSessionClearMessageHandler(clearExtensionAccountSession);
@@ -2358,9 +2439,10 @@ export default defineBackground(() => {
       }
 
       case 'EXTENSION_SUBMISSION_START': {
-        const submissionAuthEpoch = currentAuthEpoch();
         Promise.all([getStoredToken(), Promise.resolve(sender.tab?.id)])
           .then(async ([token, tabId]) => {
+            await synchronizeAuthEpochState();
+            const submissionAuthEpoch = currentAuthEpoch();
             if (!token || tabId === undefined) throw new Error('Litos could not identify this application tab.');
             assertCurrentAuthEpoch(submissionAuthEpoch);
             const authorization = message.payload?.authorization === 'user_initiated'
@@ -2372,6 +2454,10 @@ export default defineBackground(() => {
             }
             const applicationId = String(message.payload?.applicationId ?? '');
             const frameId = sender.frameId ?? 0;
+            const documentRequest = submissionDocumentRequest(message.payload);
+            if (!documentRequest) {
+              throw new Error('The application page could not prove its current document runtime.');
+            }
             const binding = await handoffPacketBinding(applicationId, tabId, frameId);
             assertCurrentAuthEpoch(submissionAuthEpoch);
             if (!binding) throw new Error('Reload this saved application before submitting from Chrome.');
@@ -2381,6 +2467,11 @@ export default defineBackground(() => {
             const pending = await reservePendingSubmission(
               tabId,
               submissionAuthEpoch,
+              {
+                frameId,
+                documentId: documentRequest.documentId,
+                documentRuntimeId: documentRequest.activationRequestClock.runtimeId,
+              },
               async () => {
                 assertCurrentAuthEpoch(submissionAuthEpoch);
                 const activationRequestClock = backgroundActivationRequestClock();
@@ -2410,7 +2501,6 @@ export default defineBackground(() => {
                 return {
                   ...verifiedStart.activation,
                   startedAt: Date.now(),
-                  frameId,
                   packetVersion: binding.packetVersion,
                   auditDigest: binding.auditDigest,
                   ...(gatedIdentity ? { strictReceipt: { family: gatedIdentity.family, startedUrl: currentUrl } } : {}),
@@ -2437,21 +2527,35 @@ export default defineBackground(() => {
           return false;
         }
         Promise.resolve().then(async () => {
+          await synchronizeAuthEpochState();
+          const validationAuthEpoch = currentAuthEpoch();
+          assertCurrentAuthEpoch(validationAuthEpoch);
           const applicationId = String(message.payload?.applicationId ?? '');
           const callerActivation = message.payload?.activation;
           const expectedIdentity = extensionSubmissionActivationIdentity(callerActivation);
-          if (!expectedIdentity || expectedIdentity.applicationId !== applicationId) {
+          const callerAuthority = extensionSubmissionPendingAuthority(callerActivation);
+          if (
+            !expectedIdentity
+            || expectedIdentity.applicationId !== applicationId
+            || !callerAuthority
+            || callerAuthority.authEpoch !== validationAuthEpoch
+            || callerAuthority.tabId !== tabId
+            || callerAuthority.frameId !== (sender.frameId ?? 0)
+          ) {
             throw new Error('This send permission has no complete activation identity.');
           }
           const clickCommit = await commitPendingExtensionSubmissionForClick({
             queue: pendingSubmissionMutations,
             mutationKey: pendingSubmissionMutationKey(tabId),
-            expected: callerActivation as ExtensionSubmissionActivation,
+            expected: callerActivation as OwnedExtensionSubmissionActivation,
             read: () => pendingSubmission(tabId),
             write: (pending) => writePendingSubmission(tabId, pending),
+            authorize: (storedPending) => storedPending.pendingAuthority.authEpoch === validationAuthEpoch
+              && pendingSubmissionAuthorized(storedPending),
             validate: (storedPending) => {
               if (
-                storedPending.frameId !== (sender.frameId ?? 0)
+                storedPending.pendingAuthority.tabId !== tabId
+                || storedPending.pendingAuthority.frameId !== (sender.frameId ?? 0)
                 || storedPending.applicationId !== applicationId
               ) {
                 return {
@@ -2475,6 +2579,7 @@ export default defineBackground(() => {
           if (clickCommit.kind !== 'committed') {
             throw new Error('This send permission is no longer the active reservation.');
           }
+          assertCurrentAuthEpoch(validationAuthEpoch);
           sendResponse({ ok: true });
         }).catch((error) => sendResponse({
           ok: false,
@@ -2490,19 +2595,24 @@ export default defineBackground(() => {
           return false;
         }
         Promise.resolve().then(async () => {
+          await synchronizeAuthEpochState();
           const applicationId = String(message.payload?.applicationId ?? '');
           const callerActivation = message.payload?.activation;
           const expectedIdentity = extensionSubmissionActivationIdentity(callerActivation);
-          if (!expectedIdentity || expectedIdentity.applicationId !== applicationId) {
+          const callerAuthority = extensionSubmissionPendingAuthority(callerActivation);
+          if (
+            !expectedIdentity
+            || expectedIdentity.applicationId !== applicationId
+            || !callerAuthority
+            || callerAuthority.tabId !== tabId
+            || callerAuthority.frameId !== (sender.frameId ?? 0)
+            || !authEpochIsCurrent(callerAuthority.authEpoch)
+          ) {
             throw new Error('This confirmation has no complete submission activation.');
-          }
-          const pending = await pendingSubmission(tabId);
-          if (!pending || pending.frameId !== (sender.frameId ?? 0)) {
-            throw new Error('This confirmation came from a different page frame.');
           }
           const result = await settlePendingSubmissionOutcome(
             tabId,
-            callerActivation as ExtensionSubmissionActivation,
+            callerActivation as OwnedExtensionSubmissionActivation,
             message.payload?.outcome === 'confirmed'
               ? 'confirmed'
               : message.payload?.outcome === 'failed'
@@ -2517,6 +2627,9 @@ export default defineBackground(() => {
           if (result.settlement === 'stale') {
             throw new Error('This application is no longer waiting for that confirmation.');
           }
+          if (result.settlement === 'revoked') {
+            throw new Error('The Litos account changed before this confirmation could be recorded.');
+          }
           if (result.confirmationExpired) {
             sendResponse({ ok: false, error: 'The confirmation window expired. Check the employer portal.' });
             return;
@@ -2528,27 +2641,44 @@ export default defineBackground(() => {
 
       case 'GET_PENDING_EXTENSION_SUBMISSION': {
         const tabId = sender.tab?.id;
-        if (tabId === undefined) {
+        const frameId = sender.frameId ?? 0;
+        const recoveryOwner = submissionRecoveryOwner(message.payload);
+        if (tabId === undefined || !recoveryOwner) {
           sendResponse({ pending: null });
           return false;
         }
-        pendingSubmission(tabId).then((pending) => {
-          if (pending?.submissionAuthorityPhase === 'reserved') {
-            settlePendingSubmissionOutcome(
-              tabId,
+        Promise.resolve().then(async () => {
+          await synchronizeAuthEpochState();
+          const recovery = await recoverPendingExtensionSubmission({
+            queue: pendingSubmissionMutations,
+            mutationKey: pendingSubmissionMutationKey(tabId),
+            read: () => pendingSubmission(tabId),
+            write: (pending) => writePendingSubmission(tabId, pending),
+            clear: () => chrome.storage.session.remove(pendingSubmissionKey(tabId)),
+            cancel: (pending) => postExtensionOutcome(
               pending,
               'cancelled',
               String(sender.tab?.url ?? 'https://trylitos.com'),
-            ).finally(() => sendResponse({ pending: null }));
+            ),
+            authorize: pendingSubmissionAuthorized,
+            owner: { tabId, frameId, ...recoveryOwner },
+            currentWorkerRuntimeId: backgroundActivationRuntimeId,
+            nextPendingGeneration: () => crypto.randomUUID(),
+          });
+          if (
+            recovery.kind !== 'recoverable'
+            && recovery.kind !== 'rebound'
+          ) {
+            sendResponse({ pending: null });
             return;
           }
-          if (pending && Date.now() - pending.startedAt > SUBMISSION_CONFIRMATION_MAX_AGE_MS) {
+          if (Date.now() - recovery.pending.startedAt > SUBMISSION_CONFIRMATION_MAX_AGE_MS) {
             closePendingSubmission(tabId, String(sender.tab?.url ?? 'https://trylitos.com'))
               .finally(() => sendResponse({ pending: null }));
             return;
           }
-          sendResponse({ pending: pending?.frameId === (sender.frameId ?? 0) ? pending : null });
-        });
+          sendResponse({ pending: recovery.pending });
+        }).catch(() => sendResponse({ pending: null }));
         return true;
       }
 
@@ -3904,7 +4034,6 @@ export default defineBackground(() => {
 
     if (message?.type !== 'LITOS_SUBMIT_APPLICATION') return false;
 
-    const dashboardAuthEpoch = currentAuthEpoch();
     const applicationId = String(message.applicationId ?? '');
     if (dashboardSubmissionsInFlight.has(applicationId)) {
       sendResponse({ error: 'This application is already being prepared for submission.' });
@@ -3913,6 +4042,8 @@ export default defineBackground(() => {
     dashboardSubmissionsInFlight.add(applicationId);
     Promise.all([getStoredToken(), chrome.storage.session.get('litos_application_tabs')])
       .then(async ([token, stored]) => {
+        await synchronizeAuthEpochState();
+        const dashboardAuthEpoch = currentAuthEpoch();
         assertCurrentAuthEpoch(dashboardAuthEpoch);
         const storedTarget = ((stored.litos_application_tabs ?? {}) as Record<string, number | {
           tabId: number;
@@ -3991,16 +4122,21 @@ export default defineBackground(() => {
           pdfSizeBytes: exactResume.packet_audit!.bindings.pdf.sizeBytes,
         }, dashboardAuthEpoch);
         assertCurrentAuthEpoch(dashboardAuthEpoch);
-        const contentActivationRequestClock = await chrome.tabs.sendMessage(tabId, {
+        const contentDocumentRequest = submissionDocumentRequest(await chrome.tabs.sendMessage(tabId, {
           type: 'GET_SUBMISSION_ACTIVATION_REQUEST_CLOCK',
-        }, { frameId }) as ExtensionSubmissionActivationRequestClock | null;
+        }, { frameId }));
         assertCurrentAuthEpoch(dashboardAuthEpoch);
-        if (!contentActivationRequestClock) {
+        if (!contentDocumentRequest) {
           throw new Error('The application page could not start a safe send timer. Nothing was sent.');
         }
         const pending = await reservePendingSubmission(
           tabId,
           dashboardAuthEpoch,
+          {
+            frameId,
+            documentId: contentDocumentRequest.documentId,
+            documentRuntimeId: contentDocumentRequest.activationRequestClock.runtimeId,
+          },
           async () => {
             assertCurrentAuthEpoch(dashboardAuthEpoch);
             const activationRequestClock = backgroundActivationRequestClock();
@@ -4029,7 +4165,6 @@ export default defineBackground(() => {
             return {
               ...verifiedStart.activation,
               startedAt: Date.now(),
-              frameId,
               packetVersion: exactResume.packet_audit!.packet_version,
               auditDigest: exactResume.packet_audit!.audit_digest,
             };
@@ -4045,7 +4180,7 @@ export default defineBackground(() => {
               applicationId,
               questions: [],
               activation,
-              activationRequestClock: contentActivationRequestClock,
+              activationRequestClock: contentDocumentRequest.activationRequestClock,
             },
           }, { frameId }) as { ok?: boolean; clicked?: boolean; error?: string; finalUrl?: string; confirmationText?: string };
           assertCurrentAuthEpoch(dashboardAuthEpoch);

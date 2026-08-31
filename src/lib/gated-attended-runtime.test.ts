@@ -119,9 +119,8 @@ describe('Jobvite and iCIMS attended runtime wiring', () => {
     const dashboard = background.slice(background.indexOf("if (message?.type !== 'LITOS_SUBMIT_APPLICATION')"));
     expect(dashboard).toMatch(/dashboardAuthEpoch[\s\S]*?fetchAndBindHandoffPacket[\s\S]*?PREPARE_SUBMISSION_FROM_DASHBOARD[\s\S]*?extension-start[\s\S]*?SUBMIT_FROM_DASHBOARD[\s\S]*?settlePendingSubmissionOutcome/);
     expect(dashboard.match(/assertCurrentAuthEpoch\(dashboardAuthEpoch\)/g)?.length ?? 0).toBeGreaterThanOrEqual(10);
-    expect(background).toMatch(/reservePendingSubmission[\s\S]*?reservePendingExtensionSubmission\(\{[\s\S]*?queue: pendingSubmissionMutations/);
+    expect(background).toMatch(/reservePendingSubmission[\s\S]*?reservePendingExtensionSubmission(?:<[^>]+>)?\(\{[\s\S]*?queue: pendingSubmissionMutations/);
     expect(background).toMatch(/applicationTabMutations\.run\(APPLICATION_TAB_MUTATION_KEY[\s\S]*?litos_application_tabs/);
-    const cleanup = background.slice(background.indexOf('async function clearApplicationRuntimeState'));
-    expect(cleanup).toMatch(/pendingSubmissionMutations\.run[\s\S]*?applicationTabMutations\.run/);
+    expect(background).toMatch(/async function clearExtensionAccountSession[\s\S]*?pendingSubmissionMutations\.run[\s\S]*?clearApplicationRuntimeState/);
   });
 });

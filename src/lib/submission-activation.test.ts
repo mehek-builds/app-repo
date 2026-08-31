@@ -12,12 +12,14 @@ import {
   runExtensionSubmissionClickAfterBackgroundValidation,
   sameExtensionSubmissionActivation,
   sameExtensionSubmissionActivationIdentity,
+  sameOwnedExtensionSubmissionActivation,
   verifyDocumentExtensionSubmissionActivation,
   verifyExtensionSubmissionActivation,
   verifyExtensionSubmissionStartResponse,
   type ExtensionSubmissionActivationIdentity,
   type ExtensionSubmissionActivationMonotonicProof,
   type ExtensionSubmissionActivationRequestClock,
+  type ExtensionSubmissionActivation,
 } from './submission-activation';
 
 const applicationId = '123e4567-e89b-42d3-a456-426614174000';
@@ -43,6 +45,18 @@ const documentRequestClock: ExtensionSubmissionActivationRequestClock = {
   requestStartedAtMs: 500,
   wallRequestStartedAtMs: 1_800_000_000_500,
 };
+const pendingAuthority = {
+  authEpoch: 7,
+  tabId: 4,
+  frameId: 2,
+  documentId: '823e4567-e89b-42d3-a456-426614174010',
+  documentRuntimeId,
+  pendingGeneration: '923e4567-e89b-42d3-a456-426614174011',
+};
+const ownForDocument = (activation: ExtensionSubmissionActivation) => ({
+  ...activation,
+  pendingAuthority,
+});
 const currentClock = (nowMs: number, overrides: Partial<{
   runtimeId: string;
   timeOriginMs: number;
@@ -85,13 +99,13 @@ function documentBoundActivation() {
   );
   if (!background.ok) throw new Error(background.error);
   const document = bindExtensionSubmissionActivationToDocument(
-    background.activation,
+    ownForDocument(background.activation),
     applicationId,
     documentRequestClock,
     documentCurrentClock(4_000),
   );
   if (!document.ok) throw new Error(document.error);
-  return { background: background.activation, document: document.activation };
+  return { background: ownForDocument(background.activation), document: document.activation };
 }
 
 const employerClickPaths = ['manual', 'dashboard', 'automatic'] as const;
@@ -233,7 +247,7 @@ describe('extension submission activation', () => {
     expect(validBackground.ok).toBe(true);
     if (!validBackground.ok) return;
     const document = bindExtensionSubmissionActivationToDocument(
-      validBackground.activation,
+      ownForDocument(validBackground.activation),
       applicationId,
       documentRequestClock,
       documentCurrentClock(documentRequestClock.requestStartedAtMs, {
@@ -265,6 +279,7 @@ describe('extension submission activation', () => {
   it('preserves the background proof while binding a separate document proof', () => {
     const bound = documentBoundActivation();
     expect(bound.document.monotonicProof).toEqual(bound.background.monotonicProof);
+    expect(bound.document.pendingAuthority).toEqual(pendingAuthority);
     expect(bound.document.documentMonotonicProof).toMatchObject({
       runtimeId: documentRuntimeId,
       timeOriginMs: documentRequestClock.timeOriginMs,
@@ -274,6 +289,30 @@ describe('extension submission activation', () => {
       wallBoundAtMs: documentRequestClock.wallRequestStartedAtMs
         + (4_000 - documentRequestClock.requestStartedAtMs),
     });
+  });
+
+  it('binds only the document runtime named by the persisted pending authority', () => {
+    const background = verifyExtensionSubmissionStartResponse(
+      startResponse(),
+      applicationId,
+      requestClock,
+      currentClock(5_000),
+    );
+    expect(background.ok).toBe(true);
+    if (!background.ok) return;
+
+    expect(bindExtensionSubmissionActivationToDocument(
+      {
+        ...background.activation,
+        pendingAuthority: {
+          ...pendingAuthority,
+          documentRuntimeId: 'a23e4567-e89b-42d3-a456-426614174000',
+        },
+      },
+      applicationId,
+      documentRequestClock,
+      documentCurrentClock(4_000),
+    )).toMatchObject({ ok: false, code: 'submission_activation_invalid' });
   });
 
   it('rejects legacy background and document proofs that lack the wall-time authority fields', () => {
@@ -518,6 +557,24 @@ describe('extension submission activation', () => {
       })).toBe(false);
     }
   });
+
+  it('compares every persisted auth, owner, and generation field', () => {
+    const bound = documentBoundActivation().background;
+    expect(sameOwnedExtensionSubmissionActivation(bound, { ...bound })).toBe(true);
+
+    for (const authorityField of Object.keys(bound.pendingAuthority) as Array<keyof typeof bound.pendingAuthority>) {
+      const value = bound.pendingAuthority[authorityField];
+      expect(sameOwnedExtensionSubmissionActivation(bound, {
+        ...bound,
+        pendingAuthority: {
+          ...bound.pendingAuthority,
+          [authorityField]: typeof value === 'number'
+            ? value + 1
+            : value.replace(/^[0-9a-f]/, 'a'),
+        },
+      })).toBe(false);
+    }
+  });
 });
 
 describe('extension activation runtime wiring', () => {
@@ -535,7 +592,8 @@ describe('extension activation runtime wiring', () => {
 
     expect(directStart).toMatch(/activationRequestClock = backgroundActivationRequestClock\(\)[\s\S]*?timeoutBackendFetch[\s\S]*?verifyExtensionSubmissionStartResponse/);
     expect(dashboardStart).toMatch(/GET_SUBMISSION_ACTIVATION_REQUEST_CLOCK[\s\S]*?activationRequestClock = backgroundActivationRequestClock\(\)[\s\S]*?timeoutBackendFetch/);
-    expect(dashboardStart).toMatch(/activationRequestClock: contentActivationRequestClock/);
+    expect(dashboardStart).toMatch(/activationRequestClock: contentDocumentRequest\.activationRequestClock/);
+    expect(content.match(/type: 'EXTENSION_SUBMISSION_START'[\s\S]{0,500}?documentId: submissionActivationDocumentId[\s\S]{0,200}?activationRequestClock/g)?.length).toBe(2);
   });
 
   it('samples independent wall time with every background and document clock read', () => {
@@ -577,6 +635,8 @@ describe('extension activation runtime wiring', () => {
     expect(validation).toMatch(/commitPendingExtensionSubmissionForClick\(\{[\s\S]*?expected: callerActivation/);
     expect(validation).toMatch(/validate: \(storedPending\)[\s\S]*?verifyExtensionSubmissionActivation\(\s*storedPending/);
     expect(validation).not.toMatch(/verifyExtensionSubmissionActivation\(\s*callerActivation/);
+    expect(validation).toMatch(/callerAuthority\.authEpoch !== validationAuthEpoch/);
+    expect(validation).toMatch(/authorize:[\s\S]*?pendingSubmissionAuthorized/);
     expect(pendingSource).toMatch(/submissionAuthorityPhase: 'reserved'[\s\S]*?submissionAuthorityPhase: 'click_committed'/);
   });
 
@@ -592,9 +652,11 @@ describe('extension activation runtime wiring', () => {
   it('keeps one phased authority lane through click monitoring and exact settlement', () => {
     expect(background.match(/await reservePendingSubmission\(/g)?.length).toBe(2);
     expect(background).toMatch(/outcome !== 'cancelled'[\s\S]*?submissionAuthorityPhase !== 'click_committed'/);
-    expect(background).toMatch(/pending\?\.submissionAuthorityPhase === 'reserved'[\s\S]*?'cancelled'/);
     expect(background).toMatch(/pending\.submissionAuthorityPhase === 'reserved' \? 'cancelled' : 'unknown'/);
     expect(background).toMatch(/mutationKey: pendingSubmissionMutationKey\(tabId\)[\s\S]*?expected: callerActivation/);
+    expect(background).toMatch(/PENDING_SUBMISSION_AUTHORITY_MUTATION_KEY[\s\S]*?beginAuthSessionClear\(\)[\s\S]*?pendingSubmissionMutations\.run/);
+    expect(pendingSource).toMatch(/recoverPendingExtensionSubmission[\s\S]*?kind: 'live_reserved'[\s\S]*?kind: 'rebound'/);
+    expect(content).toMatch(/GET_PENDING_EXTENSION_SUBMISSION[\s\S]{0,300}?documentId: submissionActivationDocumentId[\s\S]{0,200}?documentRuntimeId: submissionActivationRuntimeId/);
   });
 
   it('sends complete activation identity on every outcome path', () => {
@@ -612,5 +674,16 @@ describe('extension activation runtime wiring', () => {
     expect(background).toContain('SUBMISSION_CONFIRMATION_MAX_AGE_MS');
     expect(background).not.toContain('PENDING_SUBMISSION_MAX_AGE_MS');
     expect(background).toMatch(/bounds post-click confirmation monitoring only/);
+  });
+
+  it('reconciles persisted auth before MV3 recovery and tab-close settlement', () => {
+    const recovery = background.slice(
+      background.indexOf("case 'GET_PENDING_EXTENSION_SUBMISSION'"),
+      background.indexOf("case 'CLEAR_JOB_BADGE'"),
+    );
+    expect(recovery).toMatch(/synchronizeAuthEpochState\(\)[\s\S]*?recoverPendingExtensionSubmission/);
+    expect(recovery).toMatch(/currentWorkerRuntimeId: backgroundActivationRuntimeId/);
+    expect(background).toMatch(/async function closePendingSubmission[\s\S]*?synchronizeAuthEpochState\(\)[\s\S]*?pendingSubmissionMutations\.run/);
+    expect(background).toMatch(/chrome\.tabs\.onRemoved\.addListener[\s\S]*?closePendingSubmission\(tabId\)/);
   });
 });

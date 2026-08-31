@@ -61,8 +61,8 @@ describe('SmartRecruiters exact packet attended handoff', () => {
     );
     expect(manualStart).toMatch(/if \(!binding\) throw new Error/);
     expect(manualStart).toMatch(/const currentUrl = sender\.url \?\? ''/);
-    expect(content).toMatch(/authorization: 'user_initiated', attendedHandoff/);
-    expect(content).toMatch(/authorization: 'standing_consent', attendedHandoff/);
+    expect(content).toMatch(/authorization: 'user_initiated',[\s\S]{0,80}?attendedHandoff/);
+    expect(content).toMatch(/authorization: 'standing_consent',[\s\S]{0,80}?attendedHandoff/);
 
     const dashboardStart = background.slice(background.indexOf("if (message?.type !== 'LITOS_SUBMIT_APPLICATION')"));
     expect(dashboardStart).toMatch(/GET_CURRENT_APPLICATION_URL[\s\S]*?fetchAndBindHandoffPacket/);
