@@ -159,6 +159,7 @@ function backgroundActivationRequestClock(): ExtensionSubmissionActivationReques
     runtimeId: backgroundActivationRuntimeId,
     timeOriginMs: performance.timeOrigin,
     requestStartedAtMs: performance.now(),
+    wallRequestStartedAtMs: Date.now(),
   };
 }
 
@@ -167,6 +168,7 @@ function backgroundActivationCurrentClock() {
     runtimeId: backgroundActivationRuntimeId,
     timeOriginMs: performance.timeOrigin,
     nowMs: performance.now(),
+    wallNowMs: Date.now(),
   };
 }
 

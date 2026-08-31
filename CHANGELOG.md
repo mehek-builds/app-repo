@@ -7,9 +7,9 @@ All notable changes to the Litos extension are documented here.
 ### Fixed
 - Production API traffic now falls back to the live Vercel backend when no build-time override is
   supplied.
-- Employer submit clicks now use the server's response time and a document-local monotonic budget
-  anchored before the reservation request, with the full request duration and a safety margin
-  removed before any click.
+- Employer submit clicks now use the server's response time plus paired monotonic and wall-clock
+  budgets anchored before the reservation request. The full request duration and a safety margin
+  are removed, and sleep or clock disagreement fails closed before any click.
 - Submission outcomes carry the complete activation identity. Serialized compare-and-clear
   preserves a newer reservation when an older outcome arrives late or finishes in the background.
 

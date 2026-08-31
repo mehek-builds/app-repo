@@ -11,7 +11,11 @@ export type ExtensionSubmissionActivationMonotonicProof = {
   runtimeId: string;
   timeOriginMs: number;
   requestStartedAtMs: number;
+  boundAtMs: number;
   usableUntilMs: number;
+  wallRequestStartedAtMs: number;
+  wallBoundAtMs: number;
+  wallUsableUntilMs: number;
 };
 
 export type ExtensionSubmissionActivation = ExtensionSubmissionActivationIdentity & {
@@ -26,12 +30,14 @@ export type ExtensionSubmissionActivationRequestClock = {
   runtimeId: string;
   timeOriginMs: number;
   requestStartedAtMs: number;
+  wallRequestStartedAtMs: number;
 };
 
 export type ExtensionSubmissionActivationCurrentClock = {
   runtimeId: string;
   timeOriginMs: number;
   nowMs: number;
+  wallNowMs: number;
 };
 
 export const EXTENSION_SUBMISSION_ACTIVATION_CONTRACT = 'server-lease-v1' as const;
@@ -39,6 +45,10 @@ export const EXTENSION_SUBMISSION_ACTIVATION_CONTRACT = 'server-lease-v1' as con
 // Budget one extra second for response parsing, Chrome messaging, and the final synchronous
 // safety checks. The request-start anchor already subtracts the complete backend round trip.
 export const EXTENSION_SUBMISSION_ACTIVATION_SAFETY_MARGIN_MS = 1_000;
+// Date.now() and performance.now() are sampled sequentially and can differ slightly. Permit only
+// a small sampling and clock-slew difference. Both deadlines are enforced independently, so this
+// tolerance can reject disagreement but can never extend the canonical server-derived budget.
+export const EXTENSION_SUBMISSION_ACTIVATION_CLOCK_DIVERGENCE_TOLERANCE_MS = 250;
 // The backend authority primitive refuses every boundary TTL above five minutes. Keep the browser
 // ceiling aligned with that invariant so a malformed response cannot create a longer capability.
 export const EXTENSION_SUBMISSION_ACTIVATION_MAX_LEASE_MS = 5 * 60_000;
@@ -130,7 +140,8 @@ function exactIdentity(value: unknown, expectedApplicationId: string): {
 function validCurrentClock(value: ExtensionSubmissionActivationCurrentClock): boolean {
   return exactUuid(value.runtimeId)
     && finiteNonNegative(value.timeOriginMs)
-    && finiteNonNegative(value.nowMs);
+    && finiteNonNegative(value.nowMs)
+    && finiteNonNegative(value.wallNowMs);
 }
 
 function exactMonotonicProof(value: unknown): ExtensionSubmissionActivationMonotonicProof | null {
@@ -140,26 +151,48 @@ function exactMonotonicProof(value: unknown): ExtensionSubmissionActivationMonot
     !exactUuid(proof.runtimeId)
     || !finiteNonNegative(proof.timeOriginMs)
     || !finiteNonNegative(proof.requestStartedAtMs)
+    || !finiteNonNegative(proof.boundAtMs)
     || !finiteNonNegative(proof.usableUntilMs)
+    || !finiteNonNegative(proof.wallRequestStartedAtMs)
+    || !finiteNonNegative(proof.wallBoundAtMs)
+    || !finiteNonNegative(proof.wallUsableUntilMs)
+    || proof.boundAtMs < proof.requestStartedAtMs
+    || proof.boundAtMs >= proof.usableUntilMs
     || proof.usableUntilMs <= proof.requestStartedAtMs
+    || proof.wallBoundAtMs < proof.wallRequestStartedAtMs
+    || proof.wallBoundAtMs >= proof.wallUsableUntilMs
+    || proof.wallUsableUntilMs <= proof.wallRequestStartedAtMs
+    || Math.abs(
+      (proof.boundAtMs - proof.requestStartedAtMs)
+        - (proof.wallBoundAtMs - proof.wallRequestStartedAtMs),
+    ) > EXTENSION_SUBMISSION_ACTIVATION_CLOCK_DIVERGENCE_TOLERANCE_MS
   ) return null;
   return {
     runtimeId: proof.runtimeId,
     timeOriginMs: proof.timeOriginMs,
     requestStartedAtMs: proof.requestStartedAtMs,
+    boundAtMs: proof.boundAtMs,
     usableUntilMs: proof.usableUntilMs,
+    wallRequestStartedAtMs: proof.wallRequestStartedAtMs,
+    wallBoundAtMs: proof.wallBoundAtMs,
+    wallUsableUntilMs: proof.wallUsableUntilMs,
   };
 }
 
-function monotonicProofMatchesLease(
+function clockProofMatchesLease(
   proof: ExtensionSubmissionActivationMonotonicProof,
   expiresAtMs: number,
   serverNowMs: number,
 ): boolean {
-  const expectedUsableUntilMs = proof.requestStartedAtMs
-    + (expiresAtMs - serverNowMs)
+  const usableBudgetMs = expiresAtMs
+    - serverNowMs
     - EXTENSION_SUBMISSION_ACTIVATION_SAFETY_MARGIN_MS;
-  return Number.isFinite(expectedUsableUntilMs) && proof.usableUntilMs === expectedUsableUntilMs;
+  const expectedUsableUntilMs = proof.requestStartedAtMs + usableBudgetMs;
+  const expectedWallUsableUntilMs = proof.wallRequestStartedAtMs + usableBudgetMs;
+  return Number.isFinite(expectedUsableUntilMs)
+    && Number.isFinite(expectedWallUsableUntilMs)
+    && proof.usableUntilMs === expectedUsableUntilMs
+    && proof.wallUsableUntilMs === expectedWallUsableUntilMs;
 }
 
 function expired(): ExtensionSubmissionActivationFailure {
@@ -178,13 +211,52 @@ function invalid(): ExtensionSubmissionActivationFailure {
   };
 }
 
+function verifyLocalClockBudget(
+  proof: ExtensionSubmissionActivationMonotonicProof,
+  currentClock: ExtensionSubmissionActivationCurrentClock,
+): { ok: true; remainingBudgetMs: number } | ExtensionSubmissionActivationFailure {
+  if (
+    !validCurrentClock(currentClock)
+    || proof.runtimeId !== currentClock.runtimeId
+    || proof.timeOriginMs !== currentClock.timeOriginMs
+  ) return invalid();
+
+  const monotonicElapsedMs = currentClock.nowMs - proof.requestStartedAtMs;
+  const wallElapsedMs = currentClock.wallNowMs - proof.wallRequestStartedAtMs;
+  const monotonicSinceBindingMs = currentClock.nowMs - proof.boundAtMs;
+  const wallSinceBindingMs = currentClock.wallNowMs - proof.wallBoundAtMs;
+  if (
+    monotonicElapsedMs < 0
+    || wallElapsedMs < 0
+    || monotonicSinceBindingMs < 0
+    || wallSinceBindingMs < 0
+  ) return invalid();
+
+  const monotonicRemainingMs = proof.usableUntilMs - currentClock.nowMs;
+  const wallRemainingMs = proof.wallUsableUntilMs - currentClock.wallNowMs;
+  if (monotonicRemainingMs <= 0 || wallRemainingMs <= 0) return expired();
+
+  if (
+    Math.abs(monotonicElapsedMs - wallElapsedMs)
+      > EXTENSION_SUBMISSION_ACTIVATION_CLOCK_DIVERGENCE_TOLERANCE_MS
+    || Math.abs(monotonicSinceBindingMs - wallSinceBindingMs)
+      > EXTENSION_SUBMISSION_ACTIVATION_CLOCK_DIVERGENCE_TOLERANCE_MS
+  ) return invalid();
+
+  return {
+    ok: true,
+    remainingBudgetMs: Math.min(monotonicRemainingMs, wallRemainingMs),
+  };
+}
+
 /**
  * Bind a server activation to the runtime that initiated the request.
  *
- * The usable monotonic deadline is requestStart + serverLease - margin. Anchoring at request start
- * subtracts the complete request and response latency. It also avoids trusting the device wall
- * clock. The runtime id and performance time origin make a serialized proof unusable after a
- * content-script reload, navigation, or service-worker restart.
+ * Both usable deadlines are requestStart + serverLease - margin. Anchoring them at request start
+ * subtracts the complete request and response latency. The monotonic and wall clocks are both
+ * mandatory: either expiry denies the click, and disagreement beyond the bounded sampling
+ * tolerance fails closed. The runtime id and performance time origin make a serialized proof
+ * unusable after a content-script reload, navigation, or service-worker restart.
  */
 export function bindExtensionSubmissionActivation(
   value: unknown,
@@ -201,31 +273,40 @@ export function bindExtensionSubmissionActivation(
     || !finiteNonNegative(requestClock.timeOriginMs)
     || requestClock.timeOriginMs !== currentClock.timeOriginMs
     || !finiteNonNegative(requestClock.requestStartedAtMs)
+    || !finiteNonNegative(requestClock.wallRequestStartedAtMs)
     || !validCurrentClock(currentClock)
-    || currentClock.nowMs < requestClock.requestStartedAtMs
   ) return invalid();
 
   const leaseDurationMs = parsed.expiresAtMs - parsed.serverNowMs;
   const usableUntilMs = requestClock.requestStartedAtMs
     + leaseDurationMs
     - EXTENSION_SUBMISSION_ACTIVATION_SAFETY_MARGIN_MS;
-  const remainingBudgetMs = usableUntilMs - currentClock.nowMs;
-  if (!Number.isFinite(usableUntilMs) || remainingBudgetMs <= 0) return expired();
+  const wallUsableUntilMs = requestClock.wallRequestStartedAtMs
+    + leaseDurationMs
+    - EXTENSION_SUBMISSION_ACTIVATION_SAFETY_MARGIN_MS;
+  if (!Number.isFinite(usableUntilMs) || !Number.isFinite(wallUsableUntilMs)) return invalid();
+  const proof: ExtensionSubmissionActivationMonotonicProof = {
+    runtimeId: requestClock.runtimeId,
+    timeOriginMs: requestClock.timeOriginMs,
+    requestStartedAtMs: requestClock.requestStartedAtMs,
+    boundAtMs: currentClock.nowMs,
+    usableUntilMs,
+    wallRequestStartedAtMs: requestClock.wallRequestStartedAtMs,
+    wallBoundAtMs: currentClock.wallNowMs,
+    wallUsableUntilMs,
+  };
+  const budget = verifyLocalClockBudget(proof, currentClock);
+  if (!budget.ok) return budget;
 
   return {
     ok: true,
     activation: {
       ...parsed.identity,
-      monotonicProof: {
-        runtimeId: requestClock.runtimeId,
-        timeOriginMs: requestClock.timeOriginMs,
-        requestStartedAtMs: requestClock.requestStartedAtMs,
-        usableUntilMs,
-      },
+      monotonicProof: proof,
     },
     expiresAtMs: parsed.expiresAtMs,
     serverNowMs: parsed.serverNowMs,
-    remainingBudgetMs,
+    remainingBudgetMs: budget.remainingBudgetMs,
   };
 }
 
@@ -241,12 +322,10 @@ export function verifyExtensionSubmissionActivation(
   const monotonic = exactMonotonicProof(candidate.monotonicProof);
   if (
     !monotonic
-    || !monotonicProofMatchesLease(monotonic, parsed.expiresAtMs, parsed.serverNowMs)
-    || monotonic.runtimeId !== currentClock.runtimeId
-    || monotonic.timeOriginMs !== currentClock.timeOriginMs
+    || !clockProofMatchesLease(monotonic, parsed.expiresAtMs, parsed.serverNowMs)
   ) return invalid();
-  const remainingBudgetMs = monotonic.usableUntilMs - currentClock.nowMs;
-  if (remainingBudgetMs <= 0) return expired();
+  const budget = verifyLocalClockBudget(monotonic, currentClock);
+  if (!budget.ok) return budget;
   return {
     ok: true,
     activation: {
@@ -255,12 +334,16 @@ export function verifyExtensionSubmissionActivation(
         runtimeId: monotonic.runtimeId,
         timeOriginMs: monotonic.timeOriginMs,
         requestStartedAtMs: monotonic.requestStartedAtMs,
+        boundAtMs: monotonic.boundAtMs,
         usableUntilMs: monotonic.usableUntilMs,
+        wallRequestStartedAtMs: monotonic.wallRequestStartedAtMs,
+        wallBoundAtMs: monotonic.wallBoundAtMs,
+        wallUsableUntilMs: monotonic.wallUsableUntilMs,
       },
     },
     expiresAtMs: parsed.expiresAtMs,
     serverNowMs: parsed.serverNowMs,
-    remainingBudgetMs,
+    remainingBudgetMs: budget.remainingBudgetMs,
   };
 }
 
@@ -282,7 +365,7 @@ export function bindExtensionSubmissionActivationToDocument(
   if (
     !parsed
     || !backgroundProof
-    || !monotonicProofMatchesLease(backgroundProof, parsed.expiresAtMs, parsed.serverNowMs)
+    || !clockProofMatchesLease(backgroundProof, parsed.expiresAtMs, parsed.serverNowMs)
   ) return invalid();
   const documentBinding = bindExtensionSubmissionActivation(
     parsed.identity,
@@ -313,17 +396,15 @@ export function verifyDocumentExtensionSubmissionActivation(
   const backgroundProof = exactMonotonicProof(candidate.monotonicProof);
   if (
     !backgroundProof
-    || !monotonicProofMatchesLease(backgroundProof, parsed.expiresAtMs, parsed.serverNowMs)
+    || !clockProofMatchesLease(backgroundProof, parsed.expiresAtMs, parsed.serverNowMs)
   ) return invalid();
   const documentProof = exactMonotonicProof(candidate.documentMonotonicProof);
   if (
     !documentProof
-    || !monotonicProofMatchesLease(documentProof, parsed.expiresAtMs, parsed.serverNowMs)
-    || documentProof.runtimeId !== currentClock.runtimeId
-    || documentProof.timeOriginMs !== currentClock.timeOriginMs
+    || !clockProofMatchesLease(documentProof, parsed.expiresAtMs, parsed.serverNowMs)
   ) return invalid();
-  const remainingBudgetMs = documentProof.usableUntilMs - currentClock.nowMs;
-  if (remainingBudgetMs <= 0) return expired();
+  const budget = verifyLocalClockBudget(documentProof, currentClock);
+  if (!budget.ok) return budget;
   return {
     ok: true,
     activation: {
@@ -333,7 +414,7 @@ export function verifyDocumentExtensionSubmissionActivation(
     },
     expiresAtMs: parsed.expiresAtMs,
     serverNowMs: parsed.serverNowMs,
-    remainingBudgetMs,
+    remainingBudgetMs: budget.remainingBudgetMs,
   };
 }
 

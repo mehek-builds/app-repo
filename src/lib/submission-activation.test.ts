@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import {
   EXPIRED_SUBMISSION_ACTIVATION_MESSAGE,
+  EXTENSION_SUBMISSION_ACTIVATION_CLOCK_DIVERGENCE_TOLERANCE_MS,
   EXTENSION_SUBMISSION_ACTIVATION_CONTRACT,
   EXTENSION_SUBMISSION_ACTIVATION_MAX_LEASE_MS,
   EXTENSION_SUBMISSION_ACTIVATION_SAFETY_MARGIN_MS,
@@ -10,9 +11,11 @@ import {
   bindExtensionSubmissionActivationToDocument,
   runExtensionSubmissionClickAfterBackgroundValidation,
   sameExtensionSubmissionActivationIdentity,
+  verifyDocumentExtensionSubmissionActivation,
   verifyExtensionSubmissionActivation,
   verifyExtensionSubmissionStartResponse,
   type ExtensionSubmissionActivationIdentity,
+  type ExtensionSubmissionActivationMonotonicProof,
   type ExtensionSubmissionActivationRequestClock,
 } from './submission-activation';
 
@@ -30,28 +33,36 @@ const requestClock: ExtensionSubmissionActivationRequestClock = {
   runtimeId,
   timeOriginMs: 1_000_000,
   requestStartedAtMs: 1_000,
+  wallRequestStartedAtMs: 1_800_000_000_000,
 };
 const documentRuntimeId = '723e4567-e89b-42d3-a456-426614174000';
 const documentRequestClock: ExtensionSubmissionActivationRequestClock = {
   runtimeId: documentRuntimeId,
   timeOriginMs: 2_000_000,
   requestStartedAtMs: 500,
+  wallRequestStartedAtMs: 1_800_000_000_500,
 };
 const currentClock = (nowMs: number, overrides: Partial<{
   runtimeId: string;
   timeOriginMs: number;
+  wallNowMs: number;
 }> = {}) => ({
   runtimeId: overrides.runtimeId ?? runtimeId,
   timeOriginMs: overrides.timeOriginMs ?? requestClock.timeOriginMs,
   nowMs,
+  wallNowMs: overrides.wallNowMs
+    ?? requestClock.wallRequestStartedAtMs + (nowMs - requestClock.requestStartedAtMs),
 });
 const documentCurrentClock = (nowMs: number, overrides: Partial<{
   runtimeId: string;
   timeOriginMs: number;
+  wallNowMs: number;
 }> = {}) => ({
   runtimeId: overrides.runtimeId ?? documentRuntimeId,
   timeOriginMs: overrides.timeOriginMs ?? documentRequestClock.timeOriginMs,
   nowMs,
+  wallNowMs: overrides.wallNowMs
+    ?? documentRequestClock.wallRequestStartedAtMs + (nowMs - documentRequestClock.requestStartedAtMs),
 });
 const startResponse = (overrides: Record<string, unknown> = {}) => ({
   activation_contract: EXTENSION_SUBMISSION_ACTIVATION_CONTRACT,
@@ -82,6 +93,34 @@ function documentBoundActivation() {
   return { background: background.activation, document: document.activation };
 }
 
+const employerClickPaths = ['manual', 'dashboard', 'automatic'] as const;
+const wallClockFailureModes = [
+  {
+    label: 'wall time passes expiry while performance time stays fixed',
+    monotonicNowMs: (proof: ExtensionSubmissionActivationMonotonicProof) => proof.boundAtMs,
+    wallNowMs: (proof: ExtensionSubmissionActivationMonotonicProof, _monotonicNowMs: number) =>
+      proof.wallUsableUntilMs,
+  },
+  {
+    label: 'wall time moves backward',
+    monotonicNowMs: (proof: ExtensionSubmissionActivationMonotonicProof) => proof.boundAtMs + 1_000,
+    wallNowMs: (proof: ExtensionSubmissionActivationMonotonicProof, _monotonicNowMs: number) =>
+      proof.wallBoundAtMs - 1,
+  },
+  {
+    label: 'wall and performance elapsed time diverge beyond tolerance',
+    monotonicNowMs: (proof: ExtensionSubmissionActivationMonotonicProof) => proof.boundAtMs + 1_000,
+    wallNowMs: (proof: ExtensionSubmissionActivationMonotonicProof, monotonicNowMs: number) =>
+      proof.wallRequestStartedAtMs
+      + (monotonicNowMs - proof.requestStartedAtMs)
+      + EXTENSION_SUBMISSION_ACTIVATION_CLOCK_DIVERGENCE_TOLERANCE_MS
+      + 1,
+  },
+] as const;
+const clickBoundaryClockFailureCases = employerClickPaths.flatMap((clickPath) =>
+  (['background', 'document'] as const).flatMap((proofKind) =>
+    wallClockFailureModes.map((failure) => [clickPath, proofKind, failure.label, failure] as const)));
+
 describe('extension submission activation', () => {
   it('pins the client request to the server lease contract', () => {
     expect(EXTENSION_SUBMISSION_ACTIVATION_CONTRACT).toBe('server-lease-v1');
@@ -104,7 +143,14 @@ describe('extension submission activation', () => {
         runtimeId,
         timeOriginMs: requestClock.timeOriginMs,
         requestStartedAtMs: requestClock.requestStartedAtMs,
+        boundAtMs: 5_000,
         usableUntilMs: requestClock.requestStartedAtMs
+          + serverLeaseMs
+          - EXTENSION_SUBMISSION_ACTIVATION_SAFETY_MARGIN_MS,
+        wallRequestStartedAtMs: requestClock.wallRequestStartedAtMs,
+        wallBoundAtMs: requestClock.wallRequestStartedAtMs
+          + (5_000 - requestClock.requestStartedAtMs),
+        wallUsableUntilMs: requestClock.wallRequestStartedAtMs
           + serverLeaseMs
           - EXTENSION_SUBMISSION_ACTIVATION_SAFETY_MARGIN_MS,
       },
@@ -163,6 +209,42 @@ describe('extension submission activation', () => {
     });
   });
 
+  it('fails closed before creating either proof when a response resumes after wall expiry', () => {
+    const background = bindExtensionSubmissionActivation(
+      identity,
+      applicationId,
+      requestClock,
+      currentClock(requestClock.requestStartedAtMs, {
+        wallNowMs: requestClock.wallRequestStartedAtMs + 3 * 60_000,
+      }),
+    );
+    expect(background).toMatchObject({
+      ok: false,
+      code: 'submission_activation_expired',
+    });
+
+    const validBackground = verifyExtensionSubmissionStartResponse(
+      startResponse(),
+      applicationId,
+      requestClock,
+      currentClock(5_000),
+    );
+    expect(validBackground.ok).toBe(true);
+    if (!validBackground.ok) return;
+    const document = bindExtensionSubmissionActivationToDocument(
+      validBackground.activation,
+      applicationId,
+      documentRequestClock,
+      documentCurrentClock(documentRequestClock.requestStartedAtMs, {
+        wallNowMs: documentRequestClock.wallRequestStartedAtMs + 3 * 60_000,
+      }),
+    );
+    expect(document).toMatchObject({
+      ok: false,
+      code: 'submission_activation_expired',
+    });
+  });
+
   it('rejects a server lease above the backend maximum', () => {
     const tooLong = new Date(
       Date.parse(identity.activationServerNow) + EXTENSION_SUBMISSION_ACTIVATION_MAX_LEASE_MS + 1,
@@ -186,6 +268,41 @@ describe('extension submission activation', () => {
       runtimeId: documentRuntimeId,
       timeOriginMs: documentRequestClock.timeOriginMs,
       requestStartedAtMs: documentRequestClock.requestStartedAtMs,
+      boundAtMs: 4_000,
+      wallRequestStartedAtMs: documentRequestClock.wallRequestStartedAtMs,
+      wallBoundAtMs: documentRequestClock.wallRequestStartedAtMs
+        + (4_000 - documentRequestClock.requestStartedAtMs),
+    });
+  });
+
+  it('rejects legacy background and document proofs that lack the wall-time authority fields', () => {
+    const bound = documentBoundActivation();
+    const legacyBackgroundProof = {
+      runtimeId: bound.background.monotonicProof.runtimeId,
+      timeOriginMs: bound.background.monotonicProof.timeOriginMs,
+      requestStartedAtMs: bound.background.monotonicProof.requestStartedAtMs,
+      usableUntilMs: bound.background.monotonicProof.usableUntilMs,
+    };
+    const legacyDocumentProof = {
+      runtimeId: bound.document.documentMonotonicProof.runtimeId,
+      timeOriginMs: bound.document.documentMonotonicProof.timeOriginMs,
+      requestStartedAtMs: bound.document.documentMonotonicProof.requestStartedAtMs,
+      usableUntilMs: bound.document.documentMonotonicProof.usableUntilMs,
+    };
+
+    expect(verifyExtensionSubmissionActivation({
+      ...bound.background,
+      monotonicProof: legacyBackgroundProof,
+    }, applicationId, currentClock(6_000))).toMatchObject({
+      ok: false,
+      code: 'submission_activation_invalid',
+    });
+    expect(verifyDocumentExtensionSubmissionActivation({
+      ...bound.document,
+      documentMonotonicProof: legacyDocumentProof,
+    }, applicationId, documentCurrentClock(5_000))).toMatchObject({
+      ok: false,
+      code: 'submission_activation_invalid',
     });
   });
 
@@ -207,6 +324,62 @@ describe('extension submission activation', () => {
     });
     expect(result.ok).toBe(true);
     expect(click).toHaveBeenCalledOnce();
+  });
+
+  it.each(clickBoundaryClockFailureCases)(
+    '%s path performs zero clicks when the %s proof detects that %s',
+    (clickPath, proofKind, _failureLabel, failure) => {
+      const bound = documentBoundActivation();
+      const click = vi.fn(() => true);
+      const backgroundNowMs = failure.monotonicNowMs(bound.document.monotonicProof);
+      const documentNowMs = failure.monotonicNowMs(bound.document.documentMonotonicProof);
+      const backgroundClock = currentClock(backgroundNowMs, proofKind === 'background' ? {
+        wallNowMs: failure.wallNowMs(bound.document.monotonicProof, backgroundNowMs),
+      } : {});
+      const finalDocumentClock = documentCurrentClock(documentNowMs, proofKind === 'document' ? {
+        wallNowMs: failure.wallNowMs(bound.document.documentMonotonicProof, documentNowMs),
+      } : {});
+      const backgroundValidation = verifyExtensionSubmissionActivation(
+        bound.document,
+        applicationId,
+        backgroundClock,
+      );
+      const result = runExtensionSubmissionClickAfterBackgroundValidation({
+        backgroundValidation,
+        activation: bound.document,
+        expectedApplicationId: applicationId,
+        currentClock: finalDocumentClock,
+        click,
+        clickRejectedError: `${clickPath} employer control changed.`,
+      });
+
+      expect(result.ok).toBe(false);
+      expect(click).not.toHaveBeenCalled();
+    },
+  );
+
+  it('uses the earlier deadline when clock drift remains inside tolerance', () => {
+    const bound = documentBoundActivation();
+    const proof = bound.background.monotonicProof;
+    const monotonicNowMs = proof.boundAtMs + 1_000;
+    const alignedWallNowMs = proof.wallBoundAtMs + 1_000;
+
+    for (const wallOffsetMs of [
+      -EXTENSION_SUBMISSION_ACTIVATION_CLOCK_DIVERGENCE_TOLERANCE_MS,
+      EXTENSION_SUBMISSION_ACTIVATION_CLOCK_DIVERGENCE_TOLERANCE_MS,
+    ]) {
+      const result = verifyExtensionSubmissionActivation(
+        bound.background,
+        applicationId,
+        currentClock(monotonicNowMs, { wallNowMs: alignedWallNowMs + wallOffsetMs }),
+      );
+      expect(result.ok).toBe(true);
+      if (!result.ok) continue;
+      expect(result.remainingBudgetMs).toBe(Math.min(
+        proof.usableUntilMs - monotonicNowMs,
+        proof.wallUsableUntilMs - alignedWallNowMs - wallOffsetMs,
+      ));
+    }
   });
 
   it('rotates the background runtime between activation and click and performs zero clicks', () => {
@@ -321,7 +494,7 @@ describe('extension activation runtime wiring', () => {
   const background = readFileSync(new URL('../entrypoints/background.ts', import.meta.url), 'utf8');
   const content = readFileSync(new URL('../entrypoints/content.ts', import.meta.url), 'utf8');
 
-  it('starts a monotonic budget before both backend requests', () => {
+  it('starts the paired monotonic and wall budget before both backend requests', () => {
     const directStart = background.slice(
       background.indexOf("case 'EXTENSION_SUBMISSION_START'"),
       background.indexOf("case 'EXTENSION_SUBMISSION_OUTCOME'"),
@@ -331,6 +504,13 @@ describe('extension activation runtime wiring', () => {
     expect(directStart).toMatch(/activationRequestClock = backgroundActivationRequestClock\(\)[\s\S]*?timeoutBackendFetch[\s\S]*?verifyExtensionSubmissionStartResponse/);
     expect(dashboardStart).toMatch(/GET_SUBMISSION_ACTIVATION_REQUEST_CLOCK[\s\S]*?activationRequestClock = backgroundActivationRequestClock\(\)[\s\S]*?timeoutBackendFetch/);
     expect(dashboardStart).toMatch(/activationRequestClock: contentActivationRequestClock/);
+  });
+
+  it('samples independent wall time with every background and document clock read', () => {
+    expect(background).toMatch(/backgroundActivationRequestClock[\s\S]*?requestStartedAtMs: performance\.now\(\)[\s\S]*?wallRequestStartedAtMs: Date\.now\(\)/);
+    expect(background).toMatch(/backgroundActivationCurrentClock[\s\S]*?nowMs: performance\.now\(\)[\s\S]*?wallNowMs: Date\.now\(\)/);
+    expect(content).toMatch(/beginSubmissionActivationRequest[\s\S]*?requestStartedAtMs: performance\.now\(\)[\s\S]*?wallRequestStartedAtMs: Date\.now\(\)/);
+    expect(content).toMatch(/currentSubmissionActivationClock[\s\S]*?nowMs: performance\.now\(\)[\s\S]*?wallNowMs: Date\.now\(\)/);
   });
 
   it('requires the current background generation and document clock for every employer click path', () => {

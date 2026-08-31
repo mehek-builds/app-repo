@@ -203,11 +203,13 @@ export default defineContentScript({
       runtimeId: submissionActivationRuntimeId,
       timeOriginMs: performance.timeOrigin,
       requestStartedAtMs: performance.now(),
+      wallRequestStartedAtMs: Date.now(),
     });
     const currentSubmissionActivationClock = () => ({
       runtimeId: submissionActivationRuntimeId,
       timeOriginMs: performance.timeOrigin,
       nowMs: performance.now(),
+      wallNowMs: Date.now(),
     });
     const validateBackgroundGenerationForEmployerClick = (
       activation: DocumentBoundExtensionSubmissionActivation,
