@@ -106,7 +106,9 @@ import {
 import {
   EXTENSION_SUBMISSION_ACTIVATION_CONTRACT,
   extensionSubmissionActivationIdentity,
+  sameExtensionSubmissionActivationIdentity,
   verifyExtensionSubmissionStartResponse,
+  verifyExtensionSubmissionActivation,
   type ExtensionSubmissionActivation,
   type ExtensionSubmissionActivationIdentity,
   type ExtensionSubmissionActivationRequestClock,
@@ -2347,6 +2349,43 @@ export default defineBackground(() => {
             error: error instanceof Error ? error.message : 'Submission could not start.',
             ...(isLitosApiError(error) ? { api_error: serializeLitosApiError(error) } : {}),
           }));
+        return true;
+      }
+
+      case 'VALIDATE_SUBMISSION_ACTIVATION_FOR_CLICK': {
+        const tabId = sender.tab?.id;
+        if (tabId === undefined) {
+          sendResponse({ ok: false, error: 'Litos could not identify this application tab.' });
+          return false;
+        }
+        Promise.resolve().then(async () => {
+          const applicationId = String(message.payload?.applicationId ?? '');
+          const activation = message.payload?.activation;
+          const expected = extensionSubmissionActivationIdentity(activation);
+          if (!expected || expected.applicationId !== applicationId) {
+            throw new Error('This send permission has no complete activation identity.');
+          }
+          const pending = await pendingSubmission(tabId);
+          if (
+            !pending
+            || pending.frameId !== (sender.frameId ?? 0)
+            || !sameExtensionSubmissionActivationIdentity(pending, expected)
+          ) {
+            throw new Error('This send permission is no longer the active reservation.');
+          }
+          // Read the worker clock after storage. A worker replacement changes the runtime id, and a
+          // slow storage read consumes the lease rather than moving the click deadline forward.
+          const verified = verifyExtensionSubmissionActivation(
+            activation,
+            applicationId,
+            backgroundActivationCurrentClock(),
+          );
+          if (!verified.ok) throw new Error(verified.error);
+          sendResponse({ ok: true });
+        }).catch((error) => sendResponse({
+          ok: false,
+          error: error instanceof Error ? error.message : 'Litos could not verify a current send permission.',
+        }));
         return true;
       }
 

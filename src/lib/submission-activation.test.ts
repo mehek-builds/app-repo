@@ -1,11 +1,14 @@
 import { readFileSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   EXPIRED_SUBMISSION_ACTIVATION_MESSAGE,
   EXTENSION_SUBMISSION_ACTIVATION_CONTRACT,
+  EXTENSION_SUBMISSION_ACTIVATION_MAX_LEASE_MS,
   EXTENSION_SUBMISSION_ACTIVATION_SAFETY_MARGIN_MS,
   INVALID_SUBMISSION_ACTIVATION_MESSAGE,
   bindExtensionSubmissionActivation,
+  bindExtensionSubmissionActivationToDocument,
+  runExtensionSubmissionClickAfterBackgroundValidation,
   sameExtensionSubmissionActivationIdentity,
   verifyExtensionSubmissionActivation,
   verifyExtensionSubmissionStartResponse,
@@ -28,12 +31,26 @@ const requestClock: ExtensionSubmissionActivationRequestClock = {
   timeOriginMs: 1_000_000,
   requestStartedAtMs: 1_000,
 };
+const documentRuntimeId = '723e4567-e89b-42d3-a456-426614174000';
+const documentRequestClock: ExtensionSubmissionActivationRequestClock = {
+  runtimeId: documentRuntimeId,
+  timeOriginMs: 2_000_000,
+  requestStartedAtMs: 500,
+};
 const currentClock = (nowMs: number, overrides: Partial<{
   runtimeId: string;
   timeOriginMs: number;
 }> = {}) => ({
   runtimeId: overrides.runtimeId ?? runtimeId,
   timeOriginMs: overrides.timeOriginMs ?? requestClock.timeOriginMs,
+  nowMs,
+});
+const documentCurrentClock = (nowMs: number, overrides: Partial<{
+  runtimeId: string;
+  timeOriginMs: number;
+}> = {}) => ({
+  runtimeId: overrides.runtimeId ?? documentRuntimeId,
+  timeOriginMs: overrides.timeOriginMs ?? documentRequestClock.timeOriginMs,
   nowMs,
 });
 const startResponse = (overrides: Record<string, unknown> = {}) => ({
@@ -46,6 +63,24 @@ const startResponse = (overrides: Record<string, unknown> = {}) => ({
   activation_server_now: identity.activationServerNow,
   ...overrides,
 });
+
+function documentBoundActivation() {
+  const background = verifyExtensionSubmissionStartResponse(
+    startResponse(),
+    applicationId,
+    requestClock,
+    currentClock(5_000),
+  );
+  if (!background.ok) throw new Error(background.error);
+  const document = bindExtensionSubmissionActivationToDocument(
+    background.activation,
+    applicationId,
+    documentRequestClock,
+    documentCurrentClock(4_000),
+  );
+  if (!document.ok) throw new Error(document.error);
+  return { background: background.activation, document: document.activation };
+}
 
 describe('extension submission activation', () => {
   it('pins the client request to the server lease contract', () => {
@@ -126,6 +161,94 @@ describe('extension submission activation', () => {
       code: 'submission_activation_expired',
       error: EXPIRED_SUBMISSION_ACTIVATION_MESSAGE,
     });
+  });
+
+  it('rejects a server lease above the backend maximum', () => {
+    const tooLong = new Date(
+      Date.parse(identity.activationServerNow) + EXTENSION_SUBMISSION_ACTIVATION_MAX_LEASE_MS + 1,
+    ).toISOString();
+    expect(verifyExtensionSubmissionStartResponse(
+      startResponse({ activation_expires_at: tooLong }),
+      applicationId,
+      requestClock,
+      currentClock(5_000),
+    )).toEqual({
+      ok: false,
+      code: 'submission_activation_invalid',
+      error: INVALID_SUBMISSION_ACTIVATION_MESSAGE,
+    });
+  });
+
+  it('preserves the background proof while binding a separate document proof', () => {
+    const bound = documentBoundActivation();
+    expect(bound.document.monotonicProof).toEqual(bound.background.monotonicProof);
+    expect(bound.document.documentMonotonicProof).toMatchObject({
+      runtimeId: documentRuntimeId,
+      timeOriginMs: documentRequestClock.timeOriginMs,
+      requestStartedAtMs: documentRequestClock.requestStartedAtMs,
+    });
+  });
+
+  it('clicks once only when both current background and document proofs remain valid', () => {
+    const bound = documentBoundActivation();
+    const click = vi.fn(() => true);
+    const backgroundValidation = verifyExtensionSubmissionActivation(
+      bound.document,
+      applicationId,
+      currentClock(6_000),
+    );
+    const result = runExtensionSubmissionClickAfterBackgroundValidation({
+      backgroundValidation,
+      activation: bound.document,
+      expectedApplicationId: applicationId,
+      currentClock: documentCurrentClock(5_000),
+      click,
+      clickRejectedError: 'Employer control changed.',
+    });
+    expect(result.ok).toBe(true);
+    expect(click).toHaveBeenCalledOnce();
+  });
+
+  it('rotates the background runtime between activation and click and performs zero clicks', () => {
+    const bound = documentBoundActivation();
+    const click = vi.fn(() => true);
+    const backgroundValidation = verifyExtensionSubmissionActivation(
+      bound.document,
+      applicationId,
+      currentClock(6_000, { runtimeId: '823e4567-e89b-42d3-a456-426614174000' }),
+    );
+    const result = runExtensionSubmissionClickAfterBackgroundValidation({
+      backgroundValidation,
+      activation: bound.document,
+      expectedApplicationId: applicationId,
+      currentClock: documentCurrentClock(5_000),
+      click,
+      clickRejectedError: 'Employer control changed.',
+    });
+    expect(result.ok).toBe(false);
+    expect(click).not.toHaveBeenCalled();
+  });
+
+  it('rotates the document runtime between activation and click and performs zero clicks', () => {
+    const bound = documentBoundActivation();
+    const click = vi.fn(() => true);
+    const backgroundValidation = verifyExtensionSubmissionActivation(
+      bound.document,
+      applicationId,
+      currentClock(6_000),
+    );
+    const result = runExtensionSubmissionClickAfterBackgroundValidation({
+      backgroundValidation,
+      activation: bound.document,
+      expectedApplicationId: applicationId,
+      currentClock: documentCurrentClock(5_000, {
+        runtimeId: '823e4567-e89b-42d3-a456-426614174001',
+      }),
+      click,
+      clickRejectedError: 'Employer control changed.',
+    });
+    expect(result.ok).toBe(false);
+    expect(click).not.toHaveBeenCalled();
   });
 
   it('checks performance time immediately against the bound deadline', () => {
@@ -210,7 +333,7 @@ describe('extension activation runtime wiring', () => {
     expect(dashboardStart).toMatch(/activationRequestClock: contentActivationRequestClock/);
   });
 
-  it('checks a document-local performance clock immediately before every employer click path', () => {
+  it('requires the current background generation and document clock for every employer click path', () => {
     const manual = content.slice(
       content.indexOf('function armManualSubmissionTracking'),
       content.indexOf('const freeSubmissionOutcomeButtons'),
@@ -224,14 +347,28 @@ describe('extension activation runtime wiring', () => {
       content.indexOf('Workday account-creation speed-up'),
     );
 
-    expect(manual).toMatch(/verifyExtensionSubmissionActivation\([\s\S]*?currentSubmissionActivationClock\(\)[\s\S]*?submitButton\.click\(\)/);
-    expect(dashboard).toMatch(/verifyExtensionSubmissionActivation\([\s\S]*?currentSubmissionActivationClock\(\)[\s\S]*?clickDashboardSubmitIfAllowed/);
-    expect(automatic).toMatch(/verifyExtensionSubmissionActivation\([\s\S]*?currentSubmissionActivationClock\(\)[\s\S]*?clickAtsSubmitIfAllowed/);
+    for (const clickPath of [manual, dashboard, automatic]) {
+      expect(clickPath).toMatch(/validateBackgroundGenerationForEmployerClick/);
+      expect(clickPath).toMatch(/runExtensionSubmissionClickAfterBackgroundValidation/);
+      expect(clickPath).toMatch(/currentSubmissionActivationClock\(\)/);
+    }
+    expect(manual).toMatch(/runExtensionSubmissionClickAfterBackgroundValidation\([\s\S]*?submitButton\.click\(\)/);
+    expect(dashboard).toMatch(/runExtensionSubmissionClickAfterBackgroundValidation\([\s\S]*?clickDashboardSubmitIfAllowed/);
+    expect(automatic).toMatch(/runExtensionSubmissionClickAfterBackgroundValidation\([\s\S]*?clickAtsSubmitIfAllowed/);
+  });
+
+  it('validates the stored identity and background proof in the current worker generation', () => {
+    const validation = background.slice(
+      background.indexOf("case 'VALIDATE_SUBMISSION_ACTIVATION_FOR_CLICK'"),
+      background.indexOf("case 'EXTENSION_SUBMISSION_OUTCOME'"),
+    );
+    expect(validation).toMatch(/pendingSubmission\(tabId\)[\s\S]*?sameExtensionSubmissionActivationIdentity/);
+    expect(validation).toMatch(/verifyExtensionSubmissionActivation\([\s\S]*?backgroundActivationCurrentClock\(\)/);
   });
 
   it('sends complete activation identity on every outcome path', () => {
     const outcomeMessages = [...content.matchAll(/type: 'EXTENSION_SUBMISSION_OUTCOME'/g)];
-    expect(outcomeMessages.length).toBeGreaterThanOrEqual(4);
+    expect(outcomeMessages.length).toBeGreaterThanOrEqual(3);
     for (const match of outcomeMessages) {
       const message = content.slice(match.index, match.index + 900);
       expect(message).toMatch(/\bactivation(?:\s*:|,)/);
