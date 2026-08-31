@@ -107,6 +107,13 @@ export function verifyExtensionSubmissionStartResponse(
     };
   }
   const response = value as Record<string, unknown>;
+  if (response.activation_contract !== EXTENSION_SUBMISSION_ACTIVATION_CONTRACT) {
+    return {
+      ok: false,
+      code: 'submission_activation_invalid',
+      error: INVALID_SUBMISSION_ACTIVATION_MESSAGE,
+    };
+  }
   return verifyExtensionSubmissionActivation({
     applicationId: response.application_id,
     claimId: response.claim_id,

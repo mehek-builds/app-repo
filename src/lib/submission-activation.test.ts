@@ -25,6 +25,7 @@ describe('extension submission activation', () => {
 
   it('accepts and preserves every exact backend identifier', () => {
     const result = verifyExtensionSubmissionStartResponse({
+      activation_contract: EXTENSION_SUBMISSION_ACTIVATION_CONTRACT,
       application_id: activation.applicationId,
       claim_id: activation.claimId,
       activation_id: activation.activationId,
@@ -36,6 +37,21 @@ describe('extension submission activation', () => {
       ok: true,
       activation,
       expiresAtMs: Date.parse(activation.activationExpiresAt),
+    });
+  });
+
+  it.each([undefined, 'legacy-local-window-v1'])('rejects an unrecognized server contract: %s', (contract) => {
+    expect(verifyExtensionSubmissionStartResponse({
+      activation_contract: contract,
+      application_id: activation.applicationId,
+      claim_id: activation.claimId,
+      activation_id: activation.activationId,
+      activation_lease_id: activation.activationLeaseId,
+      activation_expires_at: activation.activationExpiresAt,
+    }, applicationId, Date.parse('2026-08-31T10:00:00.000Z'))).toEqual({
+      ok: false,
+      code: 'submission_activation_invalid',
+      error: INVALID_SUBMISSION_ACTIVATION_MESSAGE,
     });
   });
 
