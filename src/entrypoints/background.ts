@@ -689,7 +689,11 @@ async function postExtensionOutcome(pending: PendingExtensionSubmission, outcome
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
+      activation_contract: EXTENSION_SUBMISSION_ACTIVATION_CONTRACT,
       claim_id: pending.claimId,
+      activation_id: pending.activationId,
+      activation_lease_id: pending.activationLeaseId,
+      activation_expires_at: pending.activationExpiresAt,
       outcome,
       final_url: finalUrl,
       ...(confirmationText ? { confirmation_text: confirmationText.slice(0, 2000) } : {}),

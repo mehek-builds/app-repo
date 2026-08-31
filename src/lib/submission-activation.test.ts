@@ -101,6 +101,19 @@ describe('extension activation runtime wiring', () => {
     expect(dashboardStart).toMatch(/activation_contract: EXTENSION_SUBMISSION_ACTIVATION_CONTRACT[\s\S]*?authorization: 'user_initiated'/);
   });
 
+  it('binds every outcome to the same exact activation contract', () => {
+    const outcome = background.slice(
+      background.indexOf('async function postExtensionOutcome'),
+      background.indexOf('async function closePendingSubmission'),
+    );
+
+    expect(outcome).toMatch(/activation_contract: EXTENSION_SUBMISSION_ACTIVATION_CONTRACT/);
+    expect(outcome).toMatch(/claim_id: pending\.claimId/);
+    expect(outcome).toMatch(/activation_id: pending\.activationId/);
+    expect(outcome).toMatch(/activation_lease_id: pending\.activationLeaseId/);
+    expect(outcome).toMatch(/activation_expires_at: pending\.activationExpiresAt/);
+  });
+
   it('checks the exact server activation immediately before every employer click path', () => {
     const manual = content.slice(
       content.indexOf('function armManualSubmissionTracking'),
