@@ -104,6 +104,7 @@ import {
   type PendingFreeSubmissionMonitor,
 } from '../lib/free-submission-monitor';
 import {
+  EXTENSION_SUBMISSION_ACTIVATION_CONTRACT,
   verifyExtensionSubmissionStartResponse,
   type ExtensionSubmissionActivation,
 } from '../lib/submission-activation';
@@ -2253,6 +2254,7 @@ export default defineBackground(() => {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
+                activation_contract: EXTENSION_SUBMISSION_ACTIVATION_CONTRACT,
                 authorization,
                 handoff_version: binding.handoffVersion,
                 current_url: currentUrl,
@@ -3784,6 +3786,7 @@ export default defineBackground(() => {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
+            activation_contract: EXTENSION_SUBMISSION_ACTIVATION_CONTRACT,
             authorization: 'user_initiated',
             handoff_version: exactResume.handoff_version,
             current_url: verifiedCurrentUrl,

@@ -6,6 +6,8 @@ export type ExtensionSubmissionActivation = {
   activationExpiresAt: string;
 };
 
+export const EXTENSION_SUBMISSION_ACTIVATION_CONTRACT = 'server-lease-v1' as const;
+
 export type ExtensionSubmissionActivationVerification =
   | {
     ok: true;

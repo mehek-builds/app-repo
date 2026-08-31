@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
   EXPIRED_SUBMISSION_ACTIVATION_MESSAGE,
+  EXTENSION_SUBMISSION_ACTIVATION_CONTRACT,
   INVALID_SUBMISSION_ACTIVATION_MESSAGE,
   verifyExtensionSubmissionActivation,
   verifyExtensionSubmissionStartResponse,
@@ -18,6 +19,10 @@ const activation: ExtensionSubmissionActivation = {
 };
 
 describe('extension submission activation', () => {
+  it('pins the client request to the server lease contract', () => {
+    expect(EXTENSION_SUBMISSION_ACTIVATION_CONTRACT).toBe('server-lease-v1');
+  });
+
   it('accepts and preserves every exact backend identifier', () => {
     const result = verifyExtensionSubmissionStartResponse({
       application_id: activation.applicationId,
@@ -90,8 +95,10 @@ describe('extension activation runtime wiring', () => {
     const dashboardStart = background.slice(background.indexOf("if (message?.type !== 'LITOS_SUBMIT_APPLICATION')"));
 
     expect(directStart).toMatch(/verifyExtensionSubmissionStartResponse\(body, applicationId\)[\s\S]*?\.\.\.activation[\s\S]*?setPendingSubmission/);
+    expect(directStart).toMatch(/activation_contract: EXTENSION_SUBMISSION_ACTIVATION_CONTRACT[\s\S]*?authorization/);
     expect(directStart).toMatch(/sendResponse\(\{ ok: true, \.\.\.activation \}\)/);
     expect(dashboardStart).toMatch(/verifyExtensionSubmissionStartResponse\(started, applicationId\)[\s\S]*?payload: \{ applicationId, questions: \[\], activation \}/);
+    expect(dashboardStart).toMatch(/activation_contract: EXTENSION_SUBMISSION_ACTIVATION_CONTRACT[\s\S]*?authorization: 'user_initiated'/);
   });
 
   it('checks the exact server activation immediately before every employer click path', () => {
