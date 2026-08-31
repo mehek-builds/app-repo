@@ -11,7 +11,7 @@ describe('extension submission synchronization wiring', () => {
     expect(background).toMatch(/pendingSubmissionKey\(tabId/);
     expect(background).toMatch(/chrome\.tabs\.onRemoved\.addListener/);
     expect(background).toMatch(/SUBMISSION_CONFIRMATION_MAX_AGE_MS/);
-    expect(background).toMatch(/frameId: sender\.frameId/);
+    expect(background).toMatch(/const frameId = sender\.frameId \?\? 0[\s\S]*?frameId,/);
   });
 
   it('reserves manual submissions before allowing the employer click', () => {

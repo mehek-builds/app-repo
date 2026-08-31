@@ -494,3 +494,38 @@ export function sameExtensionSubmissionActivationIdentity(
     && a.activationExpiresAt === b.activationExpiresAt
     && a.activationServerNow === b.activationServerNow);
 }
+
+function sameExtensionSubmissionActivationMonotonicProof(
+  left: unknown,
+  right: unknown,
+): boolean {
+  const a = exactMonotonicProof(left);
+  const b = exactMonotonicProof(right);
+  return Boolean(a && b
+    && a.runtimeId === b.runtimeId
+    && a.timeOriginMs === b.timeOriginMs
+    && a.requestStartedAtMs === b.requestStartedAtMs
+    && a.boundAtMs === b.boundAtMs
+    && a.usableUntilMs === b.usableUntilMs
+    && a.wallRequestStartedAtMs === b.wallRequestStartedAtMs
+    && a.wallBoundAtMs === b.wallBoundAtMs
+    && a.wallUsableUntilMs === b.wallUsableUntilMs);
+}
+
+/** Compare the complete immutable background activation, including both clock budgets. */
+export function sameExtensionSubmissionActivation(
+  left: unknown,
+  right: unknown,
+): boolean {
+  if (
+    !left
+    || typeof left !== 'object'
+    || !right
+    || typeof right !== 'object'
+    || !sameExtensionSubmissionActivationIdentity(left, right)
+  ) return false;
+  return sameExtensionSubmissionActivationMonotonicProof(
+    (left as Record<string, unknown>).monotonicProof,
+    (right as Record<string, unknown>).monotonicProof,
+  );
+}

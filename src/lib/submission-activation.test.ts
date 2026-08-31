@@ -10,6 +10,7 @@ import {
   bindExtensionSubmissionActivation,
   bindExtensionSubmissionActivationToDocument,
   runExtensionSubmissionClickAfterBackgroundValidation,
+  sameExtensionSubmissionActivation,
   sameExtensionSubmissionActivationIdentity,
   verifyDocumentExtensionSubmissionActivation,
   verifyExtensionSubmissionActivation,
@@ -488,11 +489,42 @@ describe('extension submission activation', () => {
       activationServerNow: '2026-08-31T10:00:01.000Z',
     })).toBe(false);
   });
+
+  it('compares every immutable identity and background proof field', () => {
+    const bound = documentBoundActivation().background;
+    expect(sameExtensionSubmissionActivation(bound, { ...bound })).toBe(true);
+
+    for (const identityField of [
+      'applicationId',
+      'claimId',
+      'activationId',
+      'activationLeaseId',
+      'activationExpiresAt',
+      'activationServerNow',
+    ] as const) {
+      expect(sameExtensionSubmissionActivation(bound, {
+        ...bound,
+        [identityField]: `${bound[identityField]}-changed`,
+      })).toBe(false);
+    }
+    for (const proofField of Object.keys(bound.monotonicProof) as Array<keyof typeof bound.monotonicProof>) {
+      const value = bound.monotonicProof[proofField];
+      expect(sameExtensionSubmissionActivation(bound, {
+        ...bound,
+        monotonicProof: {
+          ...bound.monotonicProof,
+          [proofField]: typeof value === 'number' ? value + 1 : value.replace('6', '8'),
+        },
+      })).toBe(false);
+    }
+  });
 });
 
 describe('extension activation runtime wiring', () => {
   const background = readFileSync(new URL('../entrypoints/background.ts', import.meta.url), 'utf8');
   const content = readFileSync(new URL('../entrypoints/content.ts', import.meta.url), 'utf8');
+  const activationSource = readFileSync(new URL('./submission-activation.ts', import.meta.url), 'utf8');
+  const pendingSource = readFileSync(new URL('./pending-extension-submission.ts', import.meta.url), 'utf8');
 
   it('starts the paired monotonic and wall budget before both backend requests', () => {
     const directStart = background.slice(
@@ -542,8 +574,27 @@ describe('extension activation runtime wiring', () => {
       background.indexOf("case 'VALIDATE_SUBMISSION_ACTIVATION_FOR_CLICK'"),
       background.indexOf("case 'EXTENSION_SUBMISSION_OUTCOME'"),
     );
-    expect(validation).toMatch(/pendingSubmission\(tabId\)[\s\S]*?sameExtensionSubmissionActivationIdentity/);
-    expect(validation).toMatch(/verifyExtensionSubmissionActivation\([\s\S]*?backgroundActivationCurrentClock\(\)/);
+    expect(validation).toMatch(/commitPendingExtensionSubmissionForClick\(\{[\s\S]*?expected: callerActivation/);
+    expect(validation).toMatch(/validate: \(storedPending\)[\s\S]*?verifyExtensionSubmissionActivation\(\s*storedPending/);
+    expect(validation).not.toMatch(/verifyExtensionSubmissionActivation\(\s*callerActivation/);
+    expect(pendingSource).toMatch(/submissionAuthorityPhase: 'reserved'[\s\S]*?submissionAuthorityPhase: 'click_committed'/);
+  });
+
+  it('keeps the document validation and DOM click boundary synchronous', () => {
+    const boundary = activationSource.slice(
+      activationSource.indexOf('export function runExtensionSubmissionClickAfterBackgroundValidation'),
+      activationSource.indexOf('/** Convert and bind the backend'),
+    );
+    expect(boundary).not.toMatch(/\basync\b|\bawait\b/);
+    expect(boundary).toMatch(/verifyDocumentExtensionSubmissionActivation[\s\S]*?input\.click\(\)/);
+  });
+
+  it('keeps one phased authority lane through click monitoring and exact settlement', () => {
+    expect(background.match(/await reservePendingSubmission\(/g)?.length).toBe(2);
+    expect(background).toMatch(/outcome !== 'cancelled'[\s\S]*?submissionAuthorityPhase !== 'click_committed'/);
+    expect(background).toMatch(/pending\?\.submissionAuthorityPhase === 'reserved'[\s\S]*?'cancelled'/);
+    expect(background).toMatch(/pending\.submissionAuthorityPhase === 'reserved' \? 'cancelled' : 'unknown'/);
+    expect(background).toMatch(/mutationKey: pendingSubmissionMutationKey\(tabId\)[\s\S]*?expected: callerActivation/);
   });
 
   it('sends complete activation identity on every outcome path', () => {
@@ -553,7 +604,7 @@ describe('extension activation runtime wiring', () => {
       const message = content.slice(match.index, match.index + 900);
       expect(message).toMatch(/\bactivation(?:\s*:|,)/);
     }
-    expect(background).toMatch(/extensionSubmissionActivationIdentity\(message\.payload\?\.activation\)/);
+    expect(background).toMatch(/callerActivation = message\.payload\?\.activation[\s\S]*?extensionSubmissionActivationIdentity\(callerActivation\)/);
     expect(background).toMatch(/settlePendingSubmissionOutcome/);
   });
 
