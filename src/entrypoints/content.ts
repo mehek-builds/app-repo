@@ -10,6 +10,10 @@ import { isLinkedInApplicationPage, extractLinkedInJdText, fillLinkedInApplicati
 import { isLikelyApplicationForm, extractGenericJdText, getGenericJobDetails, fillGenericApplication, drainR030CandidateLabels, isPerApplicationDecisionQuestion } from '../lib/adapters/generic';
 import { atsCanAutoSubmit, clickAtsSubmitIfAllowed, clickDashboardSubmitIfAllowed, isAtsApplicationPage, extractAtsJdText, fillAtsApplication, gatedPortalNotice, specForCurrentPage } from '../lib/adapters/ats-2026-07';
 import { PendingSubmissionRecoveryGate } from '../lib/submission-recovery';
+import {
+  verifyExtensionSubmissionActivation,
+  type ExtensionSubmissionActivation,
+} from '../lib/submission-activation';
 import { COLOR, DISMISS_MS, FONT, OVERLAY, RADIUS, SHADOW, markSvg } from '../styles/tokens';
 
 /* Status icons drawn as SVG.
@@ -334,7 +338,7 @@ export default defineContentScript({
         chrome.runtime.sendMessage({
           type: 'EXTENSION_SUBMISSION_START',
           payload: { applicationId, authorization: 'user_initiated', attendedHandoff },
-        }, (response: { ok?: boolean; error?: string } | undefined) => {
+        }, (response: ({ ok?: boolean; error?: string } & Partial<ExtensionSubmissionActivation>) | undefined) => {
           reserving = false;
           if (!response?.ok) {
             pendingRecoveryGate.endLocal(applicationId);
@@ -351,14 +355,25 @@ export default defineContentScript({
             && !replayGuardError
             && !hasEmptyRequiredFields()
             && findProgrammaticFinalSubmitButton(atsName) === submitButton;
-          const clicked = replaySafe && atsName === 'workday'
-            ? replayWorkdayFinalSubmitIfAllowed({
-              expectedControl: submitButton,
-              tabVisible: !document.hidden,
-              tabFocused: document.hasFocus(),
-              requiredFieldsClear: !hasEmptyRequiredFields(),
-            })
-            : replaySafe && (() => { submitButton.click(); return true; })();
+          let activationError: string | null = null;
+          let clicked = false;
+          if (replaySafe) {
+            // Keep this check synchronous with the employer click. The server lease, not the
+            // five-minute confirmation monitor, is the only authority to press Submit.
+            const verifiedActivation = verifyExtensionSubmissionActivation(response, applicationId);
+            if (!verifiedActivation.ok) {
+              activationError = verifiedActivation.error;
+            } else {
+              clicked = atsName === 'workday'
+                ? replayWorkdayFinalSubmitIfAllowed({
+                  expectedControl: submitButton,
+                  tabVisible: !document.hidden,
+                  tabFocused: document.hasFocus(),
+                  requiredFieldsClear: !hasEmptyRequiredFields(),
+                })
+                : (() => { submitButton.click(); return true; })();
+            }
+          }
           if (!clicked) {
             const cancelReservation = (attempt = 0) => chrome.runtime.sendMessage({
                 type: 'EXTENSION_SUBMISSION_OUTCOME',
@@ -376,7 +391,9 @@ export default defineContentScript({
                 pendingRecoveryGate.endLocal(applicationId);
               });
             cancelReservation();
-            if (statusEl) statusEl.textContent = replayGuardError ?? 'The application changed before submission. Review the final page and click Submit again.';
+            if (statusEl) statusEl.textContent = activationError
+              ?? replayGuardError
+              ?? 'The application changed before submission. Review the final page and click Submit again.';
             return;
           }
           submitButton.removeEventListener('click', onClick, true);
@@ -652,7 +669,10 @@ export default defineContentScript({
 
     let cardInjected = false;
     let approved = false; // true once user taps "Yes" on either card
-    let submitFromDashboard: ((questions: Array<{ id: string; question: string; answer: string }>) => Promise<{ ok: boolean; clicked?: boolean; error?: string; finalUrl?: string; confirmationText?: string }>) | null = null;
+    let submitFromDashboard: ((
+      questions: Array<{ id: string; question: string; answer: string }>,
+      activation: ExtensionSubmissionActivation,
+    ) => Promise<{ ok: boolean; clicked?: boolean; error?: string; finalUrl?: string; confirmationText?: string }>) | null = null;
     let prepareSubmissionFromDashboard: ((resume: GeneratedResume, expectedUrl: string) => Promise<string | null>) | null = null;
 
     function openLitosPlansFromPage(
@@ -743,8 +763,16 @@ export default defineContentScript({
         return false;
       }
       const applicationId = String(message.payload?.applicationId ?? '');
+      const verifiedActivation = verifyExtensionSubmissionActivation(
+        message.payload?.activation,
+        applicationId,
+      );
+      if (!verifiedActivation.ok) {
+        sendResponse({ ok: false, error: verifiedActivation.error });
+        return false;
+      }
       pendingRecoveryGate.beginLocal(applicationId);
-      submitFromDashboard(message.payload?.questions ?? [])
+      submitFromDashboard(message.payload?.questions ?? [], verifiedActivation.activation)
         .then(sendResponse)
         .finally(() => pendingRecoveryGate.endLocal(applicationId));
       return true;
@@ -2912,7 +2940,7 @@ export default defineContentScript({
 
         if (finalSubmitBtn) armManualSubmissionTracking(finalSubmitBtn, resume.resume_id, statusEl, fillResult.ats_name, handoffSubmissionGuard, Boolean(handoffApplicationId));
 
-        submitFromDashboard = async (_approvedQuestions) => {
+        submitFromDashboard = async (_approvedQuestions, activation) => {
           const handoffGuardError = handoffSubmissionGuard();
           if (handoffGuardError) return { ok: false, error: handoffGuardError };
           if (!atsCanAutoSubmit(fillResult.ats_name)) {
@@ -2937,6 +2965,10 @@ export default defineContentScript({
           }
           const finalHandoffGuardError = handoffSubmissionGuard();
           if (finalHandoffGuardError) return { ok: false, error: finalHandoffGuardError };
+          // Re-evaluate the exact server activation at the final synchronous click boundary. A
+          // capability that expired while the dashboard replayed answers never reaches the portal.
+          const verifiedActivation = verifyExtensionSubmissionActivation(activation, resume.resume_id);
+          if (!verifiedActivation.ok) return { ok: false, error: verifiedActivation.error };
           if (!clickDashboardSubmitIfAllowed(fillResult.ats_name, finalSubmitBtn)) {
             return { ok: false, error: 'This application needs your direct confirmation on the company page. Nothing was sent.' };
           }
@@ -3258,7 +3290,7 @@ export default defineContentScript({
               if (statusEl) statusEl.textContent = 'Reserving this application safely...';
               pendingRecoveryGate.beginLocal(applicationId);
               try {
-                const started = await new Promise<{ ok?: boolean; error?: string }>((resolve) => {
+                const started = await new Promise<({ ok?: boolean; error?: string } & Partial<ExtensionSubmissionActivation>)>((resolve) => {
                   chrome.runtime.sendMessage({
                     type: 'EXTENSION_SUBMISSION_START',
                     payload: { applicationId, authorization: 'standing_consent', attendedHandoff },
@@ -3271,18 +3303,35 @@ export default defineContentScript({
                   && findProgrammaticFinalSubmitButton(fillResult.ats_name) === target
                   && (fillResult.ats_name !== 'workday' || workdayProgrammaticFinalSubmitAllowed(target));
                 if (started.ok && safeAfterReservation) {
+                  // The network reservation may have consumed most of the lease. Check the exact
+                  // identifiers and server expiry synchronously at the employer click boundary.
+                  const verifiedActivation = verifyExtensionSubmissionActivation(started, applicationId);
+                  if (!verifiedActivation.ok) {
+                    if (statusEl) statusEl.textContent = verifiedActivation.error;
+                    chrome.runtime.sendMessage({
+                      type: 'EXTENSION_SUBMISSION_OUTCOME',
+                      payload: {
+                        applicationId,
+                        outcome: 'cancelled',
+                        finalUrl: window.location.href,
+                        confirmationText: 'The server activation was not current at the final click boundary. Nothing was clicked.',
+                      },
+                    }).catch(() => {});
+                    reportEvent(false);
+                    return;
+                  }
                   if (statusEl) statusEl.textContent = `${actionLabel}...`;
                   const baselineTexts = new Set(visibleSubmissionOutcomeTexts());
-                  if (!clickAtsSubmitIfAllowed(
+                  if (clickAtsSubmitIfAllowed(
                     fillResult.ats_name,
                     target,
                     () => monitorExtensionSubmission(applicationId, baselineTexts),
                   )) {
+                    reportEvent(true);
+                  } else {
                     if (statusEl) statusEl.textContent = 'This application needs your direct confirmation. Nothing was sent.';
                     reportEvent(false);
-                    return;
                   }
-                  reportEvent(true);
                 } else {
                   if (statusEl) statusEl.textContent = started.error ?? 'The page changed before Litos could submit. Check it yourself.';
                   if (started.ok) {

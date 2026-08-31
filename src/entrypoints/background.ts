@@ -103,14 +103,16 @@ import {
   freeSubmissionNavigationMatches,
   type PendingFreeSubmissionMonitor,
 } from '../lib/free-submission-monitor';
+import {
+  verifyExtensionSubmissionStartResponse,
+  type ExtensionSubmissionActivation,
+} from '../lib/submission-activation';
 
 // Latched off once the backend reports onboarding complete. Service-worker memory is fine for
 // this: the worst case on a restart is one wasted 403, which re-latches it immediately.
 let harvestStopped = false;
 
-type PendingExtensionSubmission = {
-  applicationId: string;
-  claimId: string;
+type PendingExtensionSubmission = ExtensionSubmissionActivation & {
   startedAt: number;
   frameId: number;
   packetVersion: string;
@@ -119,7 +121,9 @@ type PendingExtensionSubmission = {
 };
 
 const PENDING_SUBMISSIONS_KEY = 'litos_pending_extension_submission';
-const PENDING_SUBMISSION_MAX_AGE_MS = 5 * 60_000;
+// This bounds post-click confirmation monitoring only. It is never permission to click.
+// The exact backend activation expiry is the sole pre-click deadline.
+const SUBMISSION_CONFIRMATION_MAX_AGE_MS = 5 * 60_000;
 const HANDOFF_PACKET_BINDINGS_KEY = 'litos_extension_handoff_packet_bindings';
 const GATED_ATTENDED_CONTINUATION_PREFIX = 'litos_gated_attended_continuation';
 const GATED_ATTENDED_CONTINUATION_TTL_MS = 60 * 60_000;
@@ -2254,13 +2258,17 @@ export default defineBackground(() => {
                 current_url: currentUrl,
               }),
             }, token);
-            const body = await response.json().catch(() => null) as { claim_id?: string; error?: string; already_submitted?: boolean } | null;
+            const body = await response.json().catch(() => null) as Record<string, unknown> | null;
             assertCurrentAuthEpoch(submissionAuthEpoch);
-            if (!response.ok || !body?.claim_id) throw new Error(body?.error ?? 'Litos could not reserve this application.');
+            if (!response.ok) {
+              throw new Error(typeof body?.error === 'string' ? body.error : 'Litos could not reserve this application.');
+            }
+            const verifiedStart = verifyExtensionSubmissionStartResponse(body, applicationId);
+            if (!verifiedStart.ok) throw new Error(verifiedStart.error);
+            const activation = verifiedStart.activation;
             const gatedIdentity = gatedAttendedIdentity(currentUrl);
             const pending: PendingExtensionSubmission = {
-              applicationId,
-              claimId: body.claim_id,
+              ...activation,
               startedAt: Date.now(),
               frameId: sender.frameId ?? 0,
               packetVersion: binding.packetVersion,
@@ -2271,7 +2279,7 @@ export default defineBackground(() => {
             await setPendingSubmission(tabId, pending, submissionAuthEpoch);
             assertCurrentAuthEpoch(submissionAuthEpoch);
             void trackExtensionEvent('application_submission_requested', { authorization });
-            sendResponse({ ok: true, claimId: body.claim_id });
+            sendResponse({ ok: true, ...activation });
           })
           .catch((error) => sendResponse({
             ok: false,
@@ -2292,7 +2300,7 @@ export default defineBackground(() => {
             throw new Error('This application is no longer waiting for a confirmation.');
           }
           if (pending.frameId !== (sender.frameId ?? 0)) throw new Error('This confirmation came from a different page frame.');
-          if (Date.now() - pending.startedAt > PENDING_SUBMISSION_MAX_AGE_MS) {
+          if (Date.now() - pending.startedAt > SUBMISSION_CONFIRMATION_MAX_AGE_MS) {
             await postExtensionOutcome(pending, 'unknown', String(sender.tab?.url ?? 'https://trylitos.com'));
             await setPendingSubmission(tabId, null);
             sendResponse({ ok: false, error: 'The confirmation window expired. Check the employer portal.' });
@@ -2323,7 +2331,7 @@ export default defineBackground(() => {
           return false;
         }
         pendingSubmission(tabId).then((pending) => {
-          if (pending && Date.now() - pending.startedAt > PENDING_SUBMISSION_MAX_AGE_MS) {
+          if (pending && Date.now() - pending.startedAt > SUBMISSION_CONFIRMATION_MAX_AGE_MS) {
             closePendingSubmission(tabId, String(sender.tab?.url ?? 'https://trylitos.com'))
               .finally(() => sendResponse({ pending: null }));
             return;
@@ -3781,12 +3789,16 @@ export default defineBackground(() => {
             current_url: verifiedCurrentUrl,
           }),
         }, token);
-        const started = await startResponse.json().catch(() => null) as { claim_id?: string; error?: string } | null;
+        const started = await startResponse.json().catch(() => null) as Record<string, unknown> | null;
         assertCurrentAuthEpoch(dashboardAuthEpoch);
-        if (!startResponse.ok || !started?.claim_id) throw new Error(started?.error ?? 'Could not reserve this application.');
+        if (!startResponse.ok) {
+          throw new Error(typeof started?.error === 'string' ? started.error : 'Could not reserve this application.');
+        }
+        const verifiedStart = verifyExtensionSubmissionStartResponse(started, applicationId);
+        if (!verifiedStart.ok) throw new Error(verifiedStart.error);
+        const activation = verifiedStart.activation;
         const pending: PendingExtensionSubmission = {
-          applicationId,
-          claimId: started.claim_id,
+          ...activation,
           startedAt: Date.now(),
           frameId,
           packetVersion: exactResume.packet_audit!.packet_version,
@@ -3798,7 +3810,7 @@ export default defineBackground(() => {
           assertCurrentAuthEpoch(dashboardAuthEpoch);
           const result = await chrome.tabs.sendMessage(tabId, {
             type: 'SUBMIT_FROM_DASHBOARD',
-            payload: { applicationId, questions: [] },
+            payload: { applicationId, questions: [], activation },
           }, { frameId }) as { ok?: boolean; clicked?: boolean; error?: string; finalUrl?: string; confirmationText?: string };
           assertCurrentAuthEpoch(dashboardAuthEpoch);
           await postExtensionOutcome(

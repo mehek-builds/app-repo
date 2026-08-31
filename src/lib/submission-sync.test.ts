@@ -10,7 +10,7 @@ describe('extension submission synchronization wiring', () => {
   it('isolates pending claims by tab and reconciles closed or stale tabs', () => {
     expect(background).toMatch(/pendingSubmissionKey\(tabId/);
     expect(background).toMatch(/chrome\.tabs\.onRemoved\.addListener/);
-    expect(background).toMatch(/PENDING_SUBMISSION_MAX_AGE_MS/);
+    expect(background).toMatch(/SUBMISSION_CONFIRMATION_MAX_AGE_MS/);
     expect(background).toMatch(/frameId: sender\.frameId/);
   });
 
